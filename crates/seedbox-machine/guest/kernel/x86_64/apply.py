@@ -164,13 +164,28 @@ def changes(root):
         "\t/* We should never fault when copying to a kernel buffer: */\n"
         "\tWARN_ON_FPU(err);\n"
         "\tif (!err)\n\t\tseedbox_canonicalize_task_xstate(fpstate);\n"))
+    # A signal frame's XSAVE runs on live registers, so its presence bits
+    # follow XINUSE too. Canonicalize them once the kernel has written the frame.
+    edit("arch/x86/kernel/fpu/xstate.h", lambda s: replace(
+        s,
+        "static inline int set_xfeature_in_sigframe(",
+        "int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf);\n\n"
+        "static inline int set_xfeature_in_sigframe("))
+    edit("arch/x86/kernel/fpu/signal.c", lambda s: replace(
+        s,
+        "\t\tif (!__clear_user(buf_fx, fpstate->user_size))\n"
+        "\t\t\tgoto retry;\n\t\treturn false;\n\t}\n",
+        "\t\tif (!__clear_user(buf_fx, fpstate->user_size))\n"
+        "\t\t\tgoto retry;\n\t\treturn false;\n\t}\n\n"
+        "\tif (use_xsave() && seedbox_canonicalize_sigframe_xstate(buf_fx))\n"
+        "\t\treturn false;\n"))
     anchor = "\treturn (void *)xsave + xfeature_get_offset(xcomp_bv, xfeature_nr);\n}\n"
     edit("arch/x86/kernel/fpu/xstate.c", lambda s: replace(s, anchor, anchor + """
 /* Seedbox: XINUSE may describe initial state as either present or absent.
  * Canonicalize the saved representation without changing register values.
  * Compacted XRSTOR(S) initializes MXCSR when SSE is absent; standard XRSTOR
  * loads MXCSR independently, so leave standard-format SSE state untouched.
- * This task-save hook does not cover signal frames or application XSAVE.
+ * Signal frames have their own hook below; application XSAVE has none.
  */
 void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 {
@@ -219,6 +234,56 @@ void seedbox_canonicalize_task_xstate(struct fpstate *fpstate)
 		else if (!memchr_inv(vector, 0, xstate_sizes[nr]))
 			xsave->header.xfeatures &= ~BIT_ULL(nr);
 	}
+}
+
+/* Whether @size user bytes at @from are zero, or -EFAULT. */
+static int seedbox_user_zero(const void __user *from, unsigned int size)
+{
+	u64 chunk[8];
+	unsigned int n;
+
+	while (size) {
+		n = min_t(unsigned int, size, sizeof(chunk));
+		if (__copy_from_user(chunk, from, n))
+			return -EFAULT;
+		if (memchr_inv(chunk, 0, n))
+			return 0;
+		from += n;
+		size -= n;
+	}
+	return 1;
+}
+
+/* Seedbox: a signal frame's standard-format XSAVE writes every requested
+ * component, initial ones as their initial bytes, but sets each XSTATE_BV bit
+ * from XINUSE. The epilog after this hook marks x87 and SSE present in every
+ * frame, and the kernel sets PKRU itself. Every other component XSAVE always
+ * writes is initial exactly when its bytes are zero: record it present
+ * exactly when it is not. AMX tile configuration and data may be left
+ * unwritten when initial, so they keep XINUSE's bits.
+ */
+int seedbox_canonicalize_sigframe_xstate(struct xregs_state __user *buf)
+{
+	u64 written = current->thread.fpu.fpstate->user_xfeatures &
+		      ~(XFEATURE_MASK_FPSSE | XFEATURE_MASK_PKRU |
+			XFEATURE_MASK_SIGFRAME_INITOPT);
+	u64 features;
+	unsigned int nr;
+	int zero;
+
+	if (__get_user(features, &buf->header.xfeatures))
+		return -EFAULT;
+	for_each_extended_xfeature(nr, written) {
+		zero = seedbox_user_zero((void __user *)buf + xstate_offsets[nr],
+					 xstate_sizes[nr]);
+		if (zero < 0)
+			return zero;
+		if (zero)
+			features &= ~BIT_ULL(nr);
+		else
+			features |= BIT_ULL(nr);
+	}
+	return __put_user(features, &buf->header.xfeatures);
 }
 """))
 

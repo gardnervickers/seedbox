@@ -113,7 +113,7 @@ fault's arguments are checked before it is journaled.
 | `disk_latency` | delayed block completion | yes | yes (type-checked only) | refused |
 | `preempt` | the guest yield hook | yes | refused | refused |
 | `break_on_block_request` | breakpoints | yes | yes (type-checked only) | refused |
-| every other action and trigger | nothing | yes | yes | yes |
+| every other action | nothing | yes | yes | yes |
 
 The [Driver](../crates/seedbox-driver/src/driver/faults.rs) keys each
 capability by backend and architecture. Before it launches the worker, the

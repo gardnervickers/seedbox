@@ -144,9 +144,15 @@ fn factory_progress_preserves_live_application_and_fault_state() {
         .with_progress_budget(std::num::NonZeroU32::new(budget).unwrap());
         // 30,000 iterations through 16 unconditional branches plus state
         // assertions exercise both exhausted and non-exhausted budget paths.
-        // The synchronous fault validates the application's signal context.
+        // The synchronous faults validate the application's signal context;
+        // ARM has three, around a block's overwrite of its scratch register.
         let stdout = run_fixture(&mut factory, "--state".into(), 2_000_000, 1000);
-        assert_eq!(stdout, "STATE=OK FAULTS=1\n", "budget={budget}");
+        let faults = if cfg!(target_arch = "aarch64") { 3 } else { 1 };
+        assert_eq!(
+            stdout,
+            format!("STATE=OK FAULTS={faults}\n"),
+            "budget={budget}"
+        );
     }
 }
 #[test]

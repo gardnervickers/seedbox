@@ -4,13 +4,13 @@
 //! before passing a payload here. Identity failures are fatal; a valid identity
 //! with invalid operation arguments receives a correlated operation error. This
 //! module resolves no targets, allocates no handles, reads no clocks and mutates
-//! no simulation. Runtime availability, causal admission, trigger budget, target
-//! membership and effect completion belong to the private service core, which
-//! the Driver invokes after full-round commit using its single event timeline.
+//! no simulation. Runtime availability, causal admission, target membership
+//! and effect completion belong to the private service core, which the Driver
+//! invokes after full-round commit using its single event timeline.
 //!
 //! Every time in this schema is simulation time (`now_ns`, the `*_at_ns`
-//! reply metadata, `sleep` durations and trigger match timeouts), never the
-//! calling machine's drifted time base; see the Driver's time-base docs.
+//! reply metadata and `sleep` durations), never the calling machine's drifted
+//! time base; see the Driver's time-base docs.
 //!
 //! Network operations use the Driver-owned canonical network policies.
 //! `disk_error`, `disk_latency` and `preempt` carry the control actions'
@@ -20,7 +20,7 @@
 //! selects `request`, as the actions do.
 //! Inspect
 //! results use a generic typed serialization seam so the complete projection
-//! (services, machines, active handles, network counters, optional triggers) can
+//! (services, machines, active handles, network counters) can
 //! be supplied by its owner without defining a misleading partial schema here.
 
 use seedbox_engine_protocol::control::{
@@ -48,18 +48,6 @@ pub(crate) enum Target {
 pub(crate) use seedbox_engine_protocol::control::{
     Connection, DiskEffect, DiskOp, DiskScope, NetworkFaults,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum TriggerFault {
-    Stop {
-        target: Target,
-    },
-    Partition {
-        left: Vec<Target>,
-        right: Vec<Target>,
-    },
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -142,15 +130,6 @@ pub(crate) enum Operation {
     },
     Heal {
         handle: String,
-    },
-    ArmTrigger {
-        source: Target,
-        marker: Vec<u8>,
-        match_timeout_ns: u64,
-        fault: TriggerFault,
-    },
-    CancelTrigger {
-        trigger_id: u32,
     },
     /// Replace the breakpoint names that suspend a machine, for later hits.
     DeclareBreaks {
@@ -393,15 +372,6 @@ impl Operation {
             Self::BreakOnBlockRequest { nth: 0, .. } => {
                 return Err(OperationError::invalid("nth counts from 1"));
             }
-            Self::ArmTrigger {
-                marker,
-                match_timeout_ns,
-                ..
-            } if marker.is_empty() || marker.len() > 256 || *match_timeout_ns == 0 => {
-                return Err(OperationError::invalid(
-                    "trigger requires 1..=256 marker bytes and positive match timeout",
-                ));
-            }
             _ => {}
         }
         Ok(())
@@ -421,7 +391,7 @@ impl Operation {
     /// Check duration/deadline arithmetic at the caller's committed admission
     /// barrier. Control adds no artificial transport delay. This neither chooses
     /// admission nor permits effects in peers' already committed past.
-    /// Target resolution, current state, handles and trigger budget stay outside.
+    /// Target resolution, current state and handles stay outside.
     pub(crate) fn validate_at(&self, admitted: u64) -> Result<(), OperationError> {
         self.validate()?;
         let checked = match self {
@@ -431,16 +401,9 @@ impl Operation {
             Self::WaitBreak { timeout_ns } => admitted
                 .checked_add(*timeout_ns)
                 .ok_or("wait_break timeout overflow"),
-            Self::ArmTrigger {
-                match_timeout_ns, ..
-            } => admitted
-                .checked_add(*match_timeout_ns)
-                .and_then(|n| n.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
-                .ok_or("trigger deadline overflow"),
             Self::Now {}
             | Self::Inspect {}
             | Self::Connections { .. }
-            | Self::CancelTrigger { .. }
             | Self::DeclareBreaks { .. }
             | Self::ResumeBreak { .. }
             | Self::BreakOnBlockRequest { .. } => Ok(admitted),
@@ -522,8 +485,6 @@ fn put_error(reply: &mut Value, error: OperationError) {
 
 #[cfg(test)]
 mod tests;
-
-pub(crate) mod triggers;
 
 mod handles;
 pub(crate) use handles::{Change as HandleChange, HandleTarget, RecordId};

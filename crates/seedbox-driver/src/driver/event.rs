@@ -86,28 +86,6 @@ pub enum EventKind {
         /// applied to; None for other settlements.
         counts: Option<crate::pv::FaultCounts>,
     },
-    /// A guest call armed an output trigger at `at`. Bytes observed at or
-    /// after `deadline` never match. `source` is the watched machine whose
-    /// output is matched, for every trigger kind.
-    // A partition has no single machine target, and a boot
-    // would be wrong at arm time because the effect binds when it fires; the
-    // admitted fault's FaultTarget::Links names the actual members.
-    TriggerArmed {
-        trigger: u32,
-        source: MachineId,
-        /// `Some` is the machine a Stop trigger will stop. `None` means the
-        /// trigger admits a partition, whose members its admitted fault's
-        /// [`FaultTarget::Links`] names; it never means unresolved or unknown.
-        target: Option<MachineId>,
-        deadline: Timestamp,
-    },
-    /// A trigger reached its final state. A fired trigger names the fault it
-    /// admitted; firing proves admission, not the fault's outcome.
-    TriggerResolved {
-        trigger: u32,
-        result: TriggerResult,
-        fault: Option<FaultId>,
-    },
     /// A simulation-control reply was admitted into the inbox of the calling
     /// machine's current boot at its timeline time `at`. It proves neither
     /// transport completion nor that the program read the reply. Replies discarded because the machine exited
@@ -241,8 +219,6 @@ pub enum FaultOrigin {
         machine: MachineId,
         call: SimulationControlId,
     },
-    /// A matched output trigger.
-    Trigger { trigger: u32 },
     /// A host input scheduled with [`Barrier::schedule`](super::Barrier::schedule).
     /// Its `requested_at` is its admission time.
     Input { key: InputKey },
@@ -315,21 +291,6 @@ pub enum BreakEnd {
     Crashed,
     /// The run ended with the machine still suspended.
     RunEnded,
-}
-
-/// Final trigger state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriggerResult {
-    /// The marker matched and the trigger's fault was admitted.
-    Fired,
-    /// The marker matched but control policy rejected the fault.
-    Rejected,
-    /// A guest call cancelled the trigger.
-    Cancelled,
-    /// The match deadline passed without a match.
-    Expired,
-    /// Oracle completion ended the trigger before it resolved.
-    CutOff,
 }
 
 mod persist;

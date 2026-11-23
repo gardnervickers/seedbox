@@ -336,7 +336,7 @@ fn a_settlement_cannot_reenter_execution_and_duplicate_retention() {
         network: None,
         counts: None,
         fault: 1,
-        requester: crate::oracle::service::Requester::Trigger(1),
+        requester: crate::oracle::service::Requester::Input("heal".into()),
         scope: crate::oracle::service::Scope::Machine {
             name: "fixture-2".into(),
             boot: 0,

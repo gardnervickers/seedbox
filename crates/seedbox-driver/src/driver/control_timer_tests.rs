@@ -29,107 +29,6 @@ fn driver() -> Driver<Park> {
     )
     .unwrap()
 }
-fn rpc(driver: &mut Driver<Park>, request: u32, fields: &str) {
-    let payload = format!("{{\"version\":1,\"id\":{request},{fields}}}");
-    driver
-        .execution
-        .control
-        .invoke(&driver.execution.machines, |service, view| {
-            service.admit(
-                view,
-                "machine:0".into(),
-                crate::pv::SimulationControlId {
-                    session: NonZeroU32::new(1).unwrap(),
-                    request: NonZeroU32::new(request).unwrap(),
-                },
-                0,
-                0,
-                payload.as_bytes(),
-            )
-        })
-        .unwrap();
-    driver.sync_trigger_marker();
-}
-fn arm(driver: &mut Driver<Park>, request: u32, timeout: u64) {
-    rpc(
-        driver,
-        request,
-        &format!(
-            r#""op":"arm_trigger","source":{{"machine":"fixture-0"}},"marker":[120],"match_timeout_ns":{timeout},"fault":{{"action":"stop","target":{{"machine":"fixture-0"}}}}"#
-        ),
-    );
-}
-#[test]
-fn cancellation_replaces_then_removes_only_obsolete_internal_markers() {
-    let mut driver = driver();
-    arm(&mut driver, 1, 10);
-    arm(&mut driver, 2, 20);
-    driver
-        .schedule(
-            at(10),
-            auto_key(),
-            Action::Throttle {
-                target: Target::Machine(MachineId(0)),
-                config: ExecutionConfig::new(2000).unwrap(),
-            },
-        )
-        .unwrap();
-    driver
-        .schedule(
-            at(20),
-            auto_key(),
-            Action::Pause(Target::Machine(MachineId(0))),
-        )
-        .unwrap();
-    rpc(&mut driver, 3, r#""op":"cancel_trigger","trigger_id":1"#);
-    assert_eq!(driver.execution.trigger_marker, Some(at(20)));
-    assert!(matches!(
-        driver.execution.events[&at(10)].front(),
-        Some(Scheduled::Control(control::Event::Input {
-            action: Action::Throttle { .. },
-            ..
-        }))
-    ));
-    assert_eq!(driver.execution.events[&at(10)].len(), 1);
-    rpc(&mut driver, 4, r#""op":"cancel_trigger","trigger_id":2"#);
-    assert_eq!(driver.execution.trigger_marker, None);
-    assert_eq!(driver.execution.events[&at(20)].len(), 1);
-    assert!(matches!(
-        driver.execution.events[&at(20)].front(),
-        Some(Scheduled::Control(control::Event::Input {
-            action: Action::Pause(_),
-            ..
-        }))
-    ));
-}
-#[test]
-fn firing_and_expiring_a_trigger_retire_old_marker_and_schedule_next_deadline() {
-    let mut driver = driver();
-    arm(&mut driver, 1, 10);
-    arm(&mut driver, 2, 20);
-    driver.execution.control.service.expire_triggers(10);
-    driver.sync_trigger_marker();
-    assert!(!driver.execution.events.contains_key(&at(10)));
-    assert_eq!(driver.execution.trigger_marker, Some(at(20)));
-    driver
-        .execution
-        .control
-        .service
-        .committed_bytes("machine:0", 11, b"x", 11)
-        .unwrap();
-    driver.execution.clock.set(11);
-    let plans = driver
-        .execution
-        .control
-        .invoke_plans(&driver.execution.machines, |service, view| {
-            service.trigger_effects(view, 11)
-        })
-        .unwrap();
-    driver.control_plans(plans).unwrap();
-    driver.sync_trigger_marker();
-    assert_eq!(driver.execution.trigger_marker, None);
-    assert!(!driver.execution.events.contains_key(&at(20)));
-}
 #[test]
 fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_work() {
     let mut driver = driver();
@@ -153,7 +52,7 @@ fn settlement_retires_its_deadline_without_deleting_other_policy_or_external_wor
                 network: None,
                 counts: None,
                 fault: 7,
-                requester: crate::oracle::service::Requester::Trigger(1),
+                requester: crate::oracle::service::Requester::Input("stop".into()),
                 scope: crate::oracle::service::Scope::Machine {
                     name: "fixture-0".into(),
                     boot: 0,

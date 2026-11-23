@@ -131,10 +131,10 @@ impl Control {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub id: u32,
-    /// The machine's name, as actions target it; empty for a host hit.
-    pub machine: String,
-    /// The machine's boot; zero for a host hit.
-    pub boot: u64,
+    /// The machine's name, as actions target it; `None` for a host hit.
+    pub machine: Option<String>,
+    /// The machine's boot; `None` for a host hit.
+    pub boot: Option<u64>,
     pub name: String,
     /// The simulated time of the breakpoint write or held request.
     pub at_ns: u64,
@@ -192,8 +192,8 @@ impl Control {
                 {
                     Ok(Some(Hit {
                         id,
-                        machine: String::new(),
-                        boot: 0,
+                        machine: None,
+                        boot: None,
                         name,
                         at_ns,
                         block_request: None,
@@ -223,8 +223,8 @@ impl Control {
             (Some(id), Some(machine), Some(boot), Some(name), Some(at_ns), Some(block_request)) => {
                 Ok(Some(Hit {
                     id,
-                    machine,
-                    boot,
+                    machine: Some(machine),
+                    boot: Some(boot),
                     name,
                     at_ns,
                     block_request,
@@ -370,7 +370,7 @@ impl GuestWorld {
     }
 
     /// The underlying RPC, for calls outside [`World`] (`inspect`,
-    /// `connections`, triggers).
+    /// `connections`).
     pub fn control(&mut self) -> &mut Control {
         &mut self.control
     }

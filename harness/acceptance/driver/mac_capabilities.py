@@ -22,10 +22,6 @@ with World.connect() as world:
         assert error.code == "invalid_state", error.response
     else:
         raise AssertionError("an undiscovered connection selector succeeded")
-    trigger = world.arm_console_stop("client", b"CAPABILITY_MARKER", "client", match_timeout=1)
-    assert world.inspect()["triggers"][trigger.id - 1]["status"] == "armed"
-    world.cancel_trigger(trigger)
-    assert world.inspect()["triggers"][trigger.id - 1]["status"] == "cancelled"
     world.now_ns()
     partition = world.partition(["client"], ["server"])
     world.heal(partition)
@@ -35,6 +31,5 @@ with World.connect() as world:
         libc = ctypes.CDLL(None, use_errno=True)
         assert libc.prctl(55, 1, 0, 0, 0) == 0, os.strerror(ctypes.get_errno())
     print("CAPABILITIES_RESULT " + json.dumps({
-        "connections": connections, "trigger_id": trigger.id,
-        "first_partition": partition.handle,
+        "connections": connections, "first_partition": partition.handle,
     }), flush=True)
