@@ -382,7 +382,7 @@ fn before_fault_keeps_admitted_handle_and_applies_held_effect_once() {
 }
 
 #[test]
-fn pending_commands_replies_sleep_and_partial_trigger_keep_control_cursors() {
+fn pending_commands_replies_and_sleep_keep_control_cursors() {
     let mut d = build(
         vec![
             spec(
@@ -391,13 +391,6 @@ fn pending_commands_replies_sleep_and_partial_trigger_keep_control_cursors() {
                 vec![
                     (0, Response::Ready),
                     (2, call(1, r#""op":"sleep","duration_ns":13"#)),
-                    (
-                        3,
-                        call(
-                            2,
-                            r#""op":"arm_trigger","source":{"machine":"fixture-1"},"marker":[120,121],"match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"fixture-1"}}"#,
-                        ),
-                    ),
                 ],
             ),
             spec(
@@ -419,31 +412,22 @@ fn pending_commands_replies_sleep_and_partial_trigger_keep_control_cursors() {
     )
     .unwrap();
     advance(&mut d, 5);
-    // Command completion at 7 and sleep wake at 15 are still pending; trigger
-    // has consumed x but not y, so restarting its matcher would miss the effect.
+    // Command completion at 7 and sleep wake at 15 are still pending.
     assert!(d.execution.events.keys().any(|t| *t > at(5)));
     assert!(matches!(
         d.execution.inputs.get(&key("pause-process")),
         Some(LiveInput::Admitted { .. })
     ));
-    assert!(d.execution.trigger_marker.is_some());
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 30);
-    assert!(expected.iter().any(|e| matches!(
-        e.kind,
-        EventKind::TriggerResolved {
-            result: TriggerResult::Fired,
-            ..
-        }
-    )));
     assert!(
         states(&d)[0]
             .received
             .iter()
             .filter(|i| matches!(i.payload, Request::SimulationReply { .. }))
             .count()
-            >= 2
+            >= 1
     );
     for workers in [1, 4] {
         let mut b = restore(&c, workers);
@@ -1284,8 +1268,8 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
 
 /// Capturing at any boundary of a busy world must not perturb it, and the
 /// capture must restore the remaining effects: a pending command
-/// acknowledgment and sleep reply, frames in flight, a console trigger matched
-/// only in part, and future pause/resume/crash/reboot faults.
+/// acknowledgment and sleep reply, frames in flight, and future
+/// pause/resume/crash/reboot faults.
 #[test]
 fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
     const END: u64 = 40;
@@ -1298,13 +1282,6 @@ fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
                     vec![
                         (0, Response::Ready),
                         (2, call(1, r#""op":"sleep","duration_ns":13"#)),
-                        (
-                            3,
-                            call(
-                                2,
-                                r#""op":"arm_trigger","source":{"machine":"fixture-1"},"marker":[120,121],"match_timeout_ns":20,"fault":{"action":"stop","target":{"machine":"fixture-1"}}"#,
-                            ),
-                        ),
                         (6, frame(mac(1), 1)),
                         (17, frame([255; 6], 2)),
                     ],
@@ -1380,20 +1357,13 @@ fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
         boundaries += 1;
         assert!(boundaries < 1000, "mock run did not finish");
     }
-    assert!(expected.iter().any(|e| matches!(
-        e.kind,
-        EventKind::TriggerResolved {
-            result: TriggerResult::Fired,
-            ..
-        }
-    )));
     let expected_states = states(&reference);
     let expected_position = reference.position();
     let expected_policy = policy(&mut reference);
     drop(reference);
 
     // Which owed effects each capture held, so the sweep provably covers them.
-    let mut seen = [false; 4];
+    let mut seen = [false; 3];
     for target in 0..=boundaries {
         let mut d = make();
         let mut events = d.drain_events();
@@ -1403,7 +1373,6 @@ fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
         let label = format!("capture after {target} of {boundaries} steps");
         for (seen, held) in seen.iter_mut().zip([
             !d.execution.network.is_idle(),
-            d.execution.trigger_marker.is_some(),
             d.execution.events.keys().any(|t| *t > d.now()),
             states(&d)[0]
                 .sends
@@ -1451,7 +1420,7 @@ fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
     }
     assert!(boundaries >= 5, "{boundaries} boundaries");
     assert_eq!(
-        seen, [true; 4],
-        "in-flight frame, partial trigger, future input, owed acknowledgment"
+        seen, [true; 3],
+        "in-flight frame, future input, owed acknowledgment"
     );
 }

@@ -63,14 +63,6 @@ fn full_scoped_wire_vocabulary_preserves_targets_and_binary_marker() {
     operation(json!({"op":"clock_drift","target":{"service":"s"},"max_rate_ppb":100_000_000}));
     operation(json!({"op":"throttle","target":{"machine":"m"},"factor_permille":1000}));
     operation(json!({"op":"heal","handle":"p2"}));
-    assert!(
-        matches!(operation(json!({"op":"arm_trigger","source":{"service":"s"},"marker":[0,255,10],"match_timeout_ns":7,"fault":{"action":"stop","target":{"machine":"m"}}})), Operation::ArmTrigger { marker, fault:TriggerFault::Stop { .. }, .. } if marker == [0,255,10])
-    );
-    // Zero is syntactically valid; unknown/cancelled trigger state is dispatcher-owned.
-    assert_eq!(
-        operation(json!({"op":"cancel_trigger","trigger_id":0})),
-        Operation::CancelTrigger { trigger_id: 0 }
-    );
 }
 
 #[test]
@@ -122,7 +114,6 @@ fn identity_failures_are_fatal_but_argument_errors_retain_correlation() {
         json!({"op":"stop","target":{"machine":"m","service":"s"}}),
         json!({"op":"sleep","duration_ns":-1}),
         json!({"op":"sleep","duration_ns":1.5}),
-        json!({"op":"arm_trigger","source":{"machine":"m"},"marker":[256],"match_timeout_ns":1,"fault":{"action":"stop","target":{"machine":"m"}}}),
     ] {
         let error = invalid(arguments);
         assert_eq!(error.code, ErrorCode::InvalidRequest);
@@ -168,28 +159,6 @@ fn semantic_bounds_and_time_overflow_are_checked_without_runtime_admission() {
             .message,
         "fault deadline overflow"
     );
-    let mut trigger = json!({"op":"arm_trigger","source":target,"marker":[1],"match_timeout_ns":1,"fault":{"action":"stop","target":target}});
-    operation(trigger.clone())
-        .validate_at(u64::MAX - PROCESS_EFFECT_TIMEOUT_NS - 1)
-        .unwrap();
-    assert_eq!(
-        operation(trigger.clone())
-            .validate_at(u64::MAX - PROCESS_EFFECT_TIMEOUT_NS)
-            .unwrap_err()
-            .message,
-        "trigger deadline overflow"
-    );
-    for marker in [json!([]), json!(vec![0; 257])] {
-        trigger["marker"] = marker;
-        assert_eq!(
-            invalid(trigger.clone()).message,
-            "trigger requires 1..=256 marker bytes and positive match timeout"
-        );
-    }
-    trigger["marker"] = json!(vec![255; 256]);
-    operation(trigger.clone());
-    trigger["match_timeout_ns"] = json!(0);
-    assert_eq!(invalid(trigger).code, ErrorCode::InvalidRequest);
     let too_large = br#"{"version":1,"id":1,"op":"sleep","duration_ns":18446744073709551616}"#;
     assert_eq!(
         parse(too_large).unwrap().operation.unwrap_err().code,
@@ -353,9 +322,6 @@ fn network_operations_parse_and_validate_before_policy_admission() {
             right: vec![Target::Service("b".into())],
         }
     );
-    operation(json!({"op":"arm_trigger","source":{"machine":"a"},"marker":[1],"match_timeout_ns":1,"fault":{"action":"partition","left":[],"right":[]}}))
-        .validate_at(0)
-        .unwrap();
     // Malformed known deferred operations remain argument errors.
     assert_eq!(
         invalid(json!({"op":"shape"})).code,

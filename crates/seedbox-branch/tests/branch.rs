@@ -6,7 +6,7 @@ use seedbox_driver::{
         faults::Engine, Action, Checkpoint, Driver, InputKey, MachineId, MachineState,
         NetworkConfig, Target, Transition,
     },
-    pv::{Output, Request, Response, SimulationControlId, Stream},
+    pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
 };
 use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
@@ -35,8 +35,9 @@ fn call(n: u32, fields: &str) -> Response {
 }
 
 /// A machine that emits its script at the scripted times after each boot,
-/// later when it was not run in time, and whose application exits once the
-/// host hits a breakpoint it waits on.
+/// later when it was not run in time, that acknowledges each process command
+/// as it arrives, and whose application exits once the host hits a breakpoint
+/// it waits on.
 #[derive(Clone, Default)]
 struct Speaker {
     script: Vec<(u64, Response)>,
@@ -55,8 +56,10 @@ impl Machine for Speaker {
         upto: Timestamp,
     ) -> Result<StopReason, Self::Error> {
         let now = context.clock.now();
+        let mut commands = Vec::new();
         while let Some(input) = context.inbox.take() {
             match input.payload {
+                Request::Application { id, .. } => commands.push(id),
                 Request::Crash => self.crashed = true,
                 Request::Reboot => {
                     self.crashed = false;
@@ -83,6 +86,10 @@ impl Machine for Speaker {
             };
             context.outbox.emit(output).unwrap()
         };
+        for id in commands {
+            let result = CommandResult::Completed;
+            emit(now, Response::CommandAcknowledged { id, result });
+        }
         if std::mem::take(&mut self.exiting) {
             emit(now, Response::ApplicationOutcome { code: 0 });
         }
@@ -290,6 +297,48 @@ fn a_restored_run_repeats_its_parent_until_its_own_inputs_differ() {
     assert_eq!(other.program().delivered().len(), 2);
 }
 
+/// The oracle asks at 13 for the server to crash, and the Driver applies a
+/// guest's call at the commit that took it: at the round's end, 20, after
+/// the server's line at 17. Stopping and saving at every nanosecond moves no
+/// round's end, so the line is written; only a stop in the program does.
+#[test]
+fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
+    let scripts = || {
+        vec![
+            vec![(13, call(1, r#""op":"crash","target":{"machine":"m1"}"#))],
+            vec![(5, says("boot\n")), (17, says("late\n"))],
+        ]
+    };
+    let mut straight = run(scripts(), vec![]);
+    straight.advance(at(100)).unwrap();
+    assert_eq!(
+        lines(&straight),
+        [(5, "boot".to_owned()), (17, "late".into())]
+    );
+
+    let mut stepped = run(scripts(), vec![]);
+    let mut saves = Vec::new();
+    for time in 1..=100 {
+        stepped.advance(at(time)).unwrap();
+        saves.push(stepped.save().unwrap());
+    }
+    assert_eq!(occurrences(&stepped), occurrences(&straight));
+    // A run restored from any of those points goes on the same way.
+    let mut resumed = restored(&saves[14]);
+    resumed.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&resumed), occurrences(&straight));
+
+    // A stop at 15 in the program ends that round there, so the crash comes
+    // first; it is the program's own, so a replay from boot does the same.
+    let stop = || vec![Input::stop(at(15), key("stop"))];
+    let mut cut = run(scripts(), stop());
+    cut.advance(at(100)).unwrap();
+    assert_eq!(lines(&cut), [(5, "boot".to_owned())]);
+    let mut again = run(scripts(), stop());
+    again.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&again), occurrences(&cut));
+}
+
 #[test]
 fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
     // The pause delays the commit lines to 70; only this run knows that.
@@ -321,7 +370,8 @@ fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
         .iter()
         .map(|input| input.key.as_str())
         .collect();
-    assert_eq!(delivered, ["pause"]);
+    // And the stop that put it there, so the stop is part of its run.
+    assert_eq!(delivered, ["pause", "rewind-67"]);
     assert!(before.program().pending().is_empty());
     // The server was paused before it ended its first line.
     assert!(lines(&before).is_empty());
@@ -350,7 +400,14 @@ fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
 #[test]
 fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
     // The inputs arrive after the saved point, the first due at that point.
-    let mut scout = run(talk(), vec![]);
+    // The scout stops exactly at 39 and 40 only because its program does.
+    let mut scout = run(
+        talk(),
+        vec![
+            Input::stop(at(39), key("stop-39")),
+            Input::stop(at(40), key("stop-40")),
+        ],
+    );
     scout.advance(at(39)).unwrap();
     let earlier = scout.save().unwrap();
     scout.advance(at(40)).unwrap();
@@ -373,20 +430,20 @@ fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
     // Back at the saved point the pause is in force, as it was in the scout.
     let mut paused = saved.rewind(history, at(40), &mut restore).unwrap();
     assert_eq!(paused.now(), at(40));
-    assert_eq!(keys(&paused), ["pause"]);
+    assert_eq!(keys(&paused), ["stop-39", "stop-40", "pause"]);
     assert!(paused.program().pending().is_empty());
     paused.advance(at(100)).unwrap();
     assert!(lines(&paused).is_empty());
 
     // A nanosecond earlier it is not, and the server ends its line on time.
     let mut free = earlier.rewind(history, at(39), &mut restore).unwrap();
-    assert!(keys(&free).is_empty());
+    assert_eq!(keys(&free), ["stop-39"]);
     free.advance(at(50)).unwrap();
     assert_eq!(lines(&free), [(5, "bootelectleader".to_owned())]);
 
     // The resume is due where this rewind stops, so the scout's lines follow.
     let mut resumed = saved.rewind(history, at(70), &mut restore).unwrap();
-    assert_eq!(keys(&resumed), ["pause", "resume"]);
+    assert_eq!(keys(&resumed), ["stop-39", "stop-40", "pause", "resume"]);
     resumed.advance(at(100)).unwrap();
     assert_eq!(occurrences(&resumed), occurrences(&scout));
 }
@@ -589,6 +646,103 @@ fn judge_waits_out_an_oracle_that_never_declares_the_breakpoint() {
     assert_eq!(run.program().delivered().len(), 20);
 }
 
+/// [`waiting_oracle`] with a server that is ready for process commands.
+fn ready_server() -> Scripts {
+    let mut scripts = waiting_oracle();
+    scripts[1].insert(0, (0, Response::Ready));
+    scripts
+}
+/// The server has its application frozen at 10 and its machine paused at 20,
+/// so the pause hides the freeze.
+fn frozen_then_paused() -> Run<Speaker> {
+    let freeze = Action::PauseProcess {
+        target: machine(1),
+        deadline: Duration::from_nanos(1000),
+    };
+    let inputs = vec![
+        input(10, "freeze", freeze),
+        input(20, "pause", Action::Pause(machine(1))),
+    ];
+    let mut run = run(ready_server(), inputs);
+    run.advance(at(30)).unwrap();
+    run
+}
+fn state(run: &mut Run<Speaker>, index: usize) -> MachineState {
+    run.barrier(|barrier| Ok(barrier.view()?.machines[index].state))
+        .unwrap()
+}
+fn delivered(run: &Run<Speaker>) -> Vec<String> {
+    let delivered = run.program().delivered().iter();
+    delivered
+        .map(|input| input.key.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn recover_and_judge_look_again_for_what_a_pause_hid() {
+    let mut scout = frozen_then_paused();
+    assert_eq!(state(&mut scout, 1), MachineState::Paused);
+    let saved = scout.save().unwrap();
+    let settle = Duration::from_nanos(10);
+
+    // One look resumes the machine and finds its application still frozen.
+    let mut short = restored(&saved);
+    assert!(!short.recover("r-", settle, 1).unwrap().clean);
+    assert_eq!(state(&mut short, 1), MachineState::Frozen);
+
+    // A second look thaws it.
+    let mut enough = restored(&saved);
+    assert!(enough.recover("r-", settle, 4).unwrap().clean);
+    assert_eq!(state(&mut enough, 1), MachineState::Running);
+    assert_eq!(
+        delivered(&enough),
+        ["freeze", "pause", "r-0-resume-1", "r-1-thaw-1"]
+    );
+
+    // Judging takes the same two looks before it asks the oracle to finish,
+    // and its program alone reproduces the verdict from boot.
+    let mut judged = restored(&saved);
+    let verdict = judged
+        .judge("finish", settle, Duration::from_nanos(500))
+        .unwrap();
+    let exit = ExitReason::ProgramExit { code: 0 };
+    assert!(verdict.recovered && verdict.signalled);
+    assert_eq!(verdict.finished, Some(exit));
+    assert_eq!(
+        delivered(&judged),
+        [
+            "freeze",
+            "pause",
+            "judge-0-resume-1",
+            "judge-1-thaw-1",
+            "judge-finish-0"
+        ]
+    );
+    let mut cold = run(ready_server(), judged.program().delivered().to_vec());
+    assert_eq!(cold.advance(at(1000)).unwrap(), Stop::Finished(exit));
+    assert_eq!(cold.now(), verdict.at);
+    assert_eq!(occurrences(&cold), occurrences(&judged));
+}
+
+#[test]
+fn recover_refuses_a_label_that_makes_an_invalid_key() {
+    let mut run = frozen_then_paused();
+    run.extend_pending([input(500, "later", Action::Crash(machine(1)))])
+        .unwrap();
+    // The last one is valid alone but too long for the keys it would make.
+    let long = "r".repeat(120);
+    for label in ["not a key", "slash/", &long] {
+        assert!(matches!(
+            run.recover(label, Duration::from_nanos(10), 4),
+            Err(Error::Label(_))
+        ));
+    }
+    // It refused before changing anything.
+    assert_eq!(delivered(&run), ["freeze", "pause"]);
+    assert_eq!(run.program().pending().len(), 1);
+    assert_eq!(state(&mut run, 1), MachineState::Paused);
+}
+
 #[test]
 fn recover_and_judge_refuse_a_zero_settle() {
     let mut run = run(talk(), vec![]);
@@ -662,4 +816,33 @@ fn a_branch_is_reproduced_by_its_program_from_boot() {
         let _ = halting.save().unwrap();
     }
     assert_eq!(occurrences(&halting), occurrences(&end));
+}
+
+/// The oracle crashes the server at 13 ns; the server writes at 5 and 17.
+fn crash_scripts() -> Scripts {
+    vec![
+        vec![(13, call(1, r#""op":"crash","target":{"machine":"m1"}"#))],
+        vec![(5, says("boot\n")), (17, says("late\n"))],
+    ]
+}
+
+#[test]
+fn a_watched_stop_delivers_the_input_that_cut_its_round() {
+    // The watch stops at the barrier the programmed stop at 15 cut; the
+    // stop is delivered by then, so dropping what is pending keeps it.
+    let mut watched = run(crash_scripts(), vec![Input::stop(at(15), key("p"))]);
+    let mut seen = 0;
+    let stop = watched.advance_watching(at(100), |_, _| {
+        seen += 1;
+        seen == 2
+    });
+    assert_eq!(stop.unwrap(), Stop::Watched);
+    assert_eq!(watched.now(), at(15));
+    assert!(watched.program().pending().is_empty());
+    watched.replace_pending(Vec::new()).unwrap();
+    watched.advance(at(100)).unwrap();
+    // Its program, run from boot, reproduces it.
+    let mut cold = run(crash_scripts(), watched.program().delivered().to_vec());
+    cold.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&cold), occurrences(&watched));
 }

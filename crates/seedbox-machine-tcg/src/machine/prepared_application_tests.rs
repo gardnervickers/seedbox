@@ -34,7 +34,7 @@ fn tcg_native_prepared_image_launch_and_runtime_wrapper() {
                         initramfs: boot_derived(&derived, &bootstrap).unwrap().into(),
                         firmware: firmware.clone().into(),
                         command_line: bootstrap.kernel.command_line.clone(),
-                        epoch_seconds: 0,
+                        epoch_seconds: bootstrap.epoch_seconds,
                     },
                 },
             )

@@ -1,10 +1,17 @@
 //! Bringing a run to a verdict: end what is in force, tell the oracle to
 //! finish, read the outcome. Written over [`Run`]'s public surface.
 use crate::{Error, Input, Run, Stop};
-use seedbox_driver::driver::{Action, HealTarget, InputKey, MachineState, Target, WorldView};
-use seedbox_engine_protocol::property::Assessment;
+use seedbox_driver::driver::{
+    Action, HealTarget, InputKey, InvalidInputKey, MachineState, Target, WorldView,
+};
+use seedbox_engine_protocol::{control::PROCESS_EFFECT_TIMEOUT_NS, property::Assessment};
 use seedbox_machine::machine::{ExitReason, Machine, Timestamp};
 use std::time::Duration;
+
+/// The looks [`Run::judge`] gives recovery. A machine hides at most a couple
+/// of conditions behind each other (a frozen application in a paused
+/// machine), so this leaves room to spare.
+pub const JUDGE_ROUNDS: usize = 8;
 
 impl<M> Run<M>
 where
@@ -25,8 +32,9 @@ where
     /// nothing went wrong: an unallowed crash stays a violation in
     /// [`Run::properties`].
     ///
-    /// Each undo is an input of the program, keyed under `label`. A zero
-    /// `settle` is refused, since time could not move between looks.
+    /// Each undo is an input of the program, keyed under `label`; a label
+    /// that makes an invalid input key is [`Error::Label`]. A zero `settle`
+    /// is refused, since time could not move between looks.
     pub fn recover(
         &mut self,
         label: &str,
@@ -36,13 +44,18 @@ where
         if settle.is_zero() {
             return Err(Error::NoSettle);
         }
+        // Check the longest key recovery can make before dropping anything.
+        let last = rounds.saturating_sub(1);
+        let longest = format!("{label}{last}-restart-{}", usize::MAX);
+        InputKey::new(longest).map_err(Error::Label)?;
         let dropped = self.program().pending().iter();
         let dropped = dropped.map(|input| input.key.clone()).collect();
         self.replace_pending(Vec::new())?;
         let mut clean = None;
         for round in 0..rounds {
             let view = self.barrier(|barrier| barrier.view())?;
-            let undo = recovery(&view, self.now(), &format!("{label}{round}-"));
+            let undo =
+                recovery(&view, self.now(), &format!("{label}{round}-")).map_err(Error::Label)?;
             if undo.is_empty() {
                 clean = Some(true);
                 break;
@@ -57,16 +70,18 @@ where
             Some(clean) => clean,
             None => {
                 let view = self.barrier(|barrier| barrier.view())?;
-                recovery(&view, self.now(), "").is_empty()
+                recovery(&view, self.now(), "")
+                    .map_err(Error::Label)?
+                    .is_empty()
             }
         };
         Ok(Recovered { clean, dropped })
     }
 
-    /// Bring the run to a verdict: [`Self::recover`], hit the host
-    /// breakpoint `finish` so the oracle wraps up, and run until the oracle
-    /// finishes or `patience` passes. An oracle that has not declared
-    /// `finish` is asked again every `settle`.
+    /// Bring the run to a verdict: [`Self::recover`] in up to
+    /// [`JUDGE_ROUNDS`] looks, hit the host breakpoint `finish` so the oracle
+    /// wraps up, and run until the oracle finishes or `patience` passes. An
+    /// oracle that has not declared `finish` is asked again every `settle`.
     ///
     /// Each time the oracle is asked is an input of the program, keyed
     /// `judge-finish-N`, so the judged run's program reproduces its verdict
@@ -90,7 +105,7 @@ where
         let Recovered {
             clean: recovered,
             dropped,
-        } = self.recover("judge-", settle, 8)?;
+        } = self.recover("judge-", settle, JUDGE_ROUNDS)?;
         let deadline = after(self.now(), patience);
         let mut signalled = false;
         let mut asked = 0;
@@ -155,22 +170,26 @@ pub struct Judgement {
 /// The inputs at `at` that end what `view` shows in force: a heal for every
 /// active handle, and for each machine the counterpart of its state. An
 /// application that exited by itself is left as it is. Keys begin with
-/// `label`.
-pub fn recovery(view: &WorldView, at: Timestamp, label: &str) -> Vec<Input> {
-    const DEADLINE: Duration = Duration::from_secs(5);
-    let key = |text: String| InputKey::new(text).expect("a valid input key");
+/// `label`, which must leave them valid input keys.
+pub fn recovery(
+    view: &WorldView,
+    at: Timestamp,
+    label: &str,
+) -> Result<Vec<Input>, InvalidInputKey> {
+    // A thaw or restart gets the deadline a process fault has by default.
+    const DEADLINE: Duration = Duration::from_nanos(PROCESS_EFFECT_TIMEOUT_NS);
     let mut inputs: Vec<Input> = view
         .handles
         .iter()
         .enumerate()
         .map(|(index, handle)| {
-            Input::action(
+            Ok(Input::action(
                 at,
-                key(format!("{label}heal-{index}")),
+                InputKey::new(format!("{label}heal-{index}"))?,
                 Action::Heal(HealTarget::Handle(handle.clone())),
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     for machine in &view.machines {
         let target = Target::Machine(machine.id);
         let (what, action) = match machine.state {
@@ -194,9 +213,9 @@ pub fn recovery(view: &WorldView, at: Timestamp, label: &str) -> Vec<Input> {
         };
         inputs.push(Input::action(
             at,
-            key(format!("{label}{what}-{}", machine.id.index())),
+            InputKey::new(format!("{label}{what}-{}", machine.id.index()))?,
             action,
         ));
     }
-    inputs
+    Ok(inputs)
 }

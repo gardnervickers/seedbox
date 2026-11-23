@@ -104,8 +104,8 @@ impl NetworkSetup {
     ///
     /// Calls join the existing FIFO at observed+latency; replies at effect+latency
     /// (or rejection decision+latency). Existing same-time host inputs remain
-    /// before later-enqueued calls; effects and matched triggers append at their
-    /// current FIFO turn. Frames and timers retain their ordinary ordering.
+    /// before later-enqueued calls; effects append at their current FIFO turn.
+    /// Frames and timers retain their ordinary ordering.
     /// Unauthorized guest outputs poison the Driver. Guest targets cannot name
     /// the controller, but host input authority/timing is unchanged. A reply is
     /// pinned to its original boot and discarded if that boot has ended.
