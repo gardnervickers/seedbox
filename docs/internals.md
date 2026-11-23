@@ -56,7 +56,9 @@ The TSC and LAPIC timer both count guest nanoseconds, so the guest command line 
 Idle reports its next virtual timer but cannot jump time itself; the Driver advances the shared clock.
 A run's budget splits a translated block as a timer deadline does, and finds nothing newly pending there:
 timers run between blocks, and an I/O instruction that raises an interrupt ends its block. A run that starts
-where the last stopped, with nothing to deliver, adopts no time, so where runs end leaves no trace.
+where the last stopped, with nothing to deliver, adopts no time. A run too short to complete one instruction,
+which a throttled machine can get, is charged to the next instruction only after its CPU has taken what was
+pending at its start, and a CPU that stays halted is charged nothing. So where runs end leaves no trace.
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.
 
