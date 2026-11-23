@@ -204,17 +204,6 @@ pub trait Machine {
         }
     }
 
-    /// Every instance of this type supplies a split run. A Driver for this
-    /// concrete type needs only the coordinator's execution context, including
-    /// for evidence reads. A wrapper containing different backends can instead
-    /// select its context count when it selects the backend.
-    fn always_split() -> bool
-    where
-        Self: Sized,
-    {
-        false
-    }
-
     /// The transport for a run that can stay in flight. Blocking implementations
     /// implement `run` and keep the default here.
     fn split_run(&mut self) -> Option<&mut dyn SplitRun<Self::Context, Self::Error>> {

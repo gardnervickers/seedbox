@@ -2,19 +2,18 @@
 //! Each lane accepts outputs into its own staging area. The Driver merges
 //! those at the barrier in simulation order.
 use super::batch::{BatchView, Flight, RunResult, Started};
-use super::workers::Stream;
 use super::*;
 use seedbox_machine::host::{
     doorbell::{Coordinator, Doorbell, Wake},
     idle::{Action, Outcome},
 };
 
-type Job<M> = Box<dyn FnOnce(&mut <M as Machine>::Context) -> RunResult<M> + Send>;
-
 pub(super) struct Runs<M: Machine> {
     flying: Vec<Flight<M>>,
     finished: VecDeque<RunResult<M>>,
-    lent: Option<Stream<Job<M>, RunResult<M>>>,
+    /// Runs of blocking machines, which this thread runs inline while it
+    /// waits for the runs in flight.
+    inline: Vec<BatchView>,
     /// How the round waits for its runs in flight, decided once, before its
     /// first scan of them.
     wait: Option<Wait>,
@@ -32,7 +31,7 @@ impl<M: Machine> Runs<M> {
         Self {
             flying: Vec::new(),
             finished: VecDeque::new(),
-            lent: None,
+            inline: Vec::new(),
             wait: None,
         }
     }
@@ -51,12 +50,7 @@ where
                 Started::Flying(flight) => runs.flying.push(flight),
             }
         } else {
-            let (id, job) = self.run_job(view);
-            self.workers.submit(
-                runs.lent.get_or_insert_with(Stream::default),
-                id,
-                Box::new(job),
-            );
+            runs.inline.push(view);
         }
     }
 
@@ -65,15 +59,13 @@ where
             return result;
         }
         if runs.flying.is_empty() {
-            return self
-                .workers
-                .next(runs.lent.as_mut().expect("outstanding jobs"))
-                .expect("job reports");
+            let view = runs.inline.pop().expect("outstanding runs");
+            return self.run_here(view);
         }
         // Claimed before any scan, and never during one: a doorbell claimed
         // after a scan would not have sampled the rings that scan raced.
         let mut bell = match runs.wait.get_or_insert_with(|| {
-            let bell = self.workers.doorbell().and_then(Doorbell::claim);
+            let bell = self.host.doorbell().and_then(Doorbell::claim);
             bell.map_or(Wait::OldestRun, Wait::Doorbell)
         }) {
             Wait::Doorbell(bell) => Some(bell),
@@ -94,35 +86,34 @@ where
                         i += 1;
                         continue;
                     }
-                    Ok(true) => runs.flying.remove(i).finish(self.workers.caller()),
+                    Ok(true) => runs.flying.remove(i).finish(self.host.context()),
                     Err(error) => runs.flying.remove(i).result(Err(error)),
                 };
                 runs.finished.push_back(result);
             }
             if let Some(result) = runs.finished.pop_front() {
                 if attempt > 0 {
-                    self.workers.idle().reset(Outcome::Progress);
+                    self.host.idle().reset(Outcome::Progress);
                 }
                 return result;
             }
-            if let Some(result) = runs.lent.as_mut().and_then(|s| self.workers.try_next(s)) {
-                return result;
+            // The runs in flight continue in their processes meanwhile.
+            if let Some(view) = runs.inline.pop() {
+                return self.run_here(view);
             }
-            match self.workers.idle().idle(attempt, wait.elapsed()) {
+            match self.host.idle().idle(attempt, wait.elapsed()) {
                 // Wait on the publication word sampled before the scan.
                 action @ (Action::Spin | Action::Monitor(_)) => match bell.as_ref() {
                     Some(bell) => bell.spin(action),
                     None => std::hint::spin_loop(),
                 },
                 Action::Sleep => {
-                    self.workers.idle().reset(if attempt == 0 {
+                    self.host.idle().reset(if attempt == 0 {
                         Outcome::SleptAtOnce
                     } else {
                         Outcome::SleptAfterTrying
                     });
-                    // A lent job reports through its channel, not the doorbell.
-                    let lent = runs.lent.as_ref().is_some_and(|s| s.outstanding() > 0);
-                    if let Some(bell) = bell.as_mut().filter(|_| !lent) {
+                    if let Some(bell) = bell.as_mut() {
                         match bell.park(|ticket| {
                             runs.flying
                                 .iter_mut()
@@ -135,7 +126,7 @@ where
                                 continue;
                             }
                             Ok(Wake::Exited(i)) => {
-                                return runs.flying.remove(i).finish(self.workers.caller())
+                                return runs.flying.remove(i).finish(self.host.context())
                             }
                             Ok(Wake::Unwatched) | Err(_) => {}
                         }
@@ -145,7 +136,7 @@ where
                     // it needs no doorbell and ends if the worker exits. The
                     // other runs keep their replies in their rings, where the
                     // next scan finds them.
-                    return runs.flying.remove(0).finish(self.workers.caller());
+                    return runs.flying.remove(0).finish(self.host.context());
                 }
             }
             attempt += 1;

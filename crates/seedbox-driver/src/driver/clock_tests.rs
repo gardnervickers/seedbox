@@ -113,11 +113,10 @@ impl Machine for Timers {
     }
 }
 
-fn driver(machines: Vec<Timers>, quantum: u64, workers: usize) -> Driver<Timers> {
+fn driver(machines: Vec<Timers>, quantum: u64) -> Driver<Timers> {
     fixture::driver(
         at(0),
         Duration::from_nanos(quantum),
-        workers,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || Ok(machines),
@@ -175,7 +174,7 @@ fn fast_and_slow_timers_fire_at_the_earliest_converted_simulation_time() {
     let (fast, fast_calls) = Timers::new(&[1_100_000_000, 1_100_000_001], false);
     let (slow, _) = Timers::new(&[900_000_000, 900_000_001], false);
     let (nominal, _) = Timers::new(&[1_000_000_000, 1_000_000_001], false);
-    let mut driver = driver(vec![nominal, fast, slow], 250_000_000, 1);
+    let mut driver = driver(vec![nominal, fast, slow], 250_000_000);
     set_rate(&mut driver, 0, 1, 100_000_000);
     set_rate(&mut driver, 0, 2, -100_000_000);
     let events = run_until(&mut driver, 3_000_000_000);
@@ -224,7 +223,7 @@ fn every_machine_stops_at_common_barriers_mapped_to_its_own_time() {
         machines.push(machine);
         calls.push(recorded);
     }
-    let mut driver = driver(machines, 1_000, 1);
+    let mut driver = driver(machines, 1_000);
     for (id, ppb) in rates.into_iter().enumerate() {
         set_rate(&mut driver, 0, id, ppb);
     }
@@ -276,7 +275,7 @@ fn rate_change_keeps_accrued_offset_and_reconverts_pending_timers() {
     // Machine time 1.1e9 at simulation 1e9, then nominal: machine 3e9 is
     // simulation 1e9 + 1.9e9. Without the heal it would be 3e9 / 1.1.
     let (machine, calls) = Timers::new(&[3_000_000_000], false);
-    let mut driver = driver(vec![machine], 1_000_000_000, 1);
+    let mut driver = driver(vec![machine], 1_000_000_000);
     set_rate(&mut driver, 0, 0, 100_000_000);
     heal_rate(&mut driver, 1_000_000_000, 0, 0);
     let events = run_until(&mut driver, 5_000_000_000);
@@ -286,7 +285,7 @@ fn rate_change_keeps_accrued_offset_and_reconverts_pending_timers() {
     assert!(calls.iter().all(|call| call.now != 1_100_000_000));
     // The fractional offset survives a heal at a non-integral position.
     let (machine, _) = Timers::new(&[2_000_000_000], false);
-    let mut driver = self::driver(vec![machine], 1_000_000_000, 1);
+    let mut driver = self::driver(vec![machine], 1_000_000_000);
     set_rate(&mut driver, 0, 0, 1);
     heal_rate(&mut driver, 1_500_000_001, 0, 0);
     // G(1_500_000_001) = 1_500_000_002.500000001; machine 2e9 is reached at
@@ -300,7 +299,7 @@ fn rate_change_keeps_accrued_offset_and_reconverts_pending_timers() {
 #[test]
 fn paused_machine_adopts_the_new_rate_on_its_zero_budget_resume() {
     let (machine, calls) = Timers::new(&[2_000_000_000], false);
-    let mut driver = driver(vec![machine], 1_000_000_000, 1);
+    let mut driver = driver(vec![machine], 1_000_000_000);
     driver
         .with_barrier(|b| {
             let target = || Target::Machine(MachineId(0));
@@ -331,7 +330,7 @@ fn paused_machine_adopts_the_new_rate_on_its_zero_budget_resume() {
 #[test]
 fn inputs_are_offered_in_machine_time_and_outputs_return_in_simulation_time() {
     let (machine, calls) = Timers::new(&[], false);
-    let mut driver = driver(vec![machine], 1_000_000_000, 1);
+    let mut driver = driver(vec![machine], 1_000_000_000);
     set_rate(&mut driver, 0, 0, 100_000_000);
     // Raw queue entry: private timeline mechanics below the control policy.
     driver
@@ -369,7 +368,7 @@ fn inputs_are_offered_in_machine_time_and_outputs_return_in_simulation_time() {
 fn fast_timers_due_at_their_own_blocking_time_rerun_without_invalid_stops() {
     // Machine 10 and 11 both first become visible at simulation 10 (G = 11).
     let (machine, calls) = Timers::new(&[10, 11], false);
-    let mut driver = driver(vec![machine], 1_000, 1);
+    let mut driver = driver(vec![machine], 1_000);
     set_rate(&mut driver, 0, 0, 100_000_000);
     let events = run_until(&mut driver, 100);
     assert_eq!(fired(&events), [(10, 0, 1), (10, 0, 2)]);
@@ -378,34 +377,28 @@ fn fast_timers_due_at_their_own_blocking_time_rerun_without_invalid_stops() {
 }
 
 #[test]
-fn worker_count_never_changes_the_translated_event_stream() {
-    let scenario = |workers| {
-        let machines = [
-            &[1_100_000_000, 2_000_000_000][..],
-            &[900_000_000, 950_000_001],
-            &[5, 7, 3_000_000_000],
-        ]
-        .iter()
-        .map(|timers| Timers::new(timers, false).0)
-        .collect();
-        let mut driver = driver(machines, 100_000_000, workers);
-        set_rate(&mut driver, 0, 0, 100_000_000);
-        set_rate(&mut driver, 0, 1, -100_000_000);
-        heal_rate(&mut driver, 1_000_000_000, 0, 0);
-        set_rate(&mut driver, 1_000_000_001, 0, -7);
-        set_rate(&mut driver, 1_200_000_000, 2, 33);
-        run_until(&mut driver, 5_000_000_000)
-    };
-    let serial = scenario(1);
-    assert_eq!(fired(&serial).len(), 7);
-    assert_eq!(serial, scenario(2));
-    assert_eq!(serial, scenario(4));
+fn rate_changes_translate_every_machine_timer() {
+    let machines = [
+        &[1_100_000_000, 2_000_000_000][..],
+        &[900_000_000, 950_000_001],
+        &[5, 7, 3_000_000_000],
+    ]
+    .iter()
+    .map(|timers| Timers::new(timers, false).0)
+    .collect();
+    let mut driver = driver(machines, 100_000_000);
+    set_rate(&mut driver, 0, 0, 100_000_000);
+    set_rate(&mut driver, 0, 1, -100_000_000);
+    heal_rate(&mut driver, 1_000_000_000, 0, 0);
+    set_rate(&mut driver, 1_000_000_001, 0, -7);
+    set_rate(&mut driver, 1_200_000_000, 2, 33);
+    assert_eq!(fired(&run_until(&mut driver, 5_000_000_000)).len(), 7);
 }
 
 #[test]
 fn snapshots_hold_machine_time_and_the_mapping_is_rebuilt_from_events() {
     let (machine, calls) = Timers::new(&[u64::MAX], true);
-    let mut driver = driver(vec![machine], 1_000_000, 1);
+    let mut driver = driver(vec![machine], 1_000_000);
     set_rate(&mut driver, 0, 0, 100_000_000);
     heal_rate(&mut driver, 3_000_000, 0, 0);
     set_rate(&mut driver, 3_000_001, 0, -50_000_001);
@@ -439,7 +432,7 @@ fn snapshots_hold_machine_time_and_the_mapping_is_rebuilt_from_events() {
 fn unrepresentable_machine_times_fail_or_never_fire() {
     // A slow timer at the end of machine time is unreachable: no wakeup.
     let (machine, _) = Timers::new(&[u64::MAX], false);
-    let mut driver = driver(vec![machine], 1_000, 1);
+    let mut driver = driver(vec![machine], 1_000);
     set_rate(&mut driver, 0, 0, -1);
     assert!(matches!(
         driver.step(at(10)).unwrap(),
@@ -447,7 +440,7 @@ fn unrepresentable_machine_times_fail_or_never_fire() {
     ));
     // A fast busy machine cannot map a bound beyond u64 machine time.
     let (machine, _) = Timers::new(&[], true);
-    let mut driver = self::driver(vec![machine], u64::MAX - 1, 1);
+    let mut driver = self::driver(vec![machine], u64::MAX - 1);
     set_rate(&mut driver, 0, 0, 100_000_000);
     assert!(driver.step(at(0)).is_ok());
     assert!(matches!(

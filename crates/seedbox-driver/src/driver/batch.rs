@@ -1,6 +1,5 @@
-//! Batch execution: due machines run on the workers, the Driver's own thread
-//! among them, in their own time bases, and accepted runs commit in identity
-//! order.
+//! Batch execution: due machines run on the Driver's thread in their own
+//! time bases, and accepted runs commit in identity order.
 use super::*;
 
 /// Each batch machine's start, bound and offered input count, in its own
@@ -10,7 +9,7 @@ pub(super) type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize)>
 /// A batch machine's start, bound and due inputs, in its own time base.
 pub(super) type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>);
 
-/// A worker's finished run: the lent machine and RNG, how many offered
+/// A finished run: the taken machine and RNG, how many offered
 /// inputs it left, and its outputs and stop, in its own time base.
 pub(super) struct RunResult<M: Machine> {
     pub(super) id: MachineId,
@@ -21,9 +20,8 @@ pub(super) struct RunResult<M: Machine> {
     stopped: Result<StopReason, Error<M::Error>>,
 }
 
-/// A split machine's run in flight on the Driver's thread: what
-/// [`Driver::run_job`] lends a worker job, held while the machine executes
-/// elsewhere (see [`Machine::split_run`]).
+/// One machine's run on the Driver's thread, held while a split machine
+/// executes elsewhere (see [`Machine::split_run`]).
 pub(super) struct Flight<M: Machine> {
     id: MachineId,
     machine: M,
@@ -45,7 +43,7 @@ impl<M: Machine> Flight<M> {
     /// Call the machine with this run's context, reporting a panic as an error.
     fn call<T>(
         &mut self,
-        worker: &mut M::Context,
+        context: &mut M::Context,
         call: impl FnOnce(&mut M, &mut RunContext<'_, M::Context>) -> Result<T, M::Error>,
     ) -> Result<T, Error<M::Error>> {
         let id = self.id;
@@ -53,7 +51,7 @@ impl<M: Machine> Flight<M> {
             call(
                 &mut self.machine,
                 &mut RunContext {
-                    worker,
+                    worker: context,
                     clock: &FixedClock(self.start.as_nanos()),
                     rng: &mut self.rng,
                     execution: self.execution,
@@ -80,9 +78,9 @@ impl<M: Machine> Flight<M> {
     pub(super) fn watch_reply(&mut self, ticket: u64) -> Option<std::os::fd::RawFd> {
         self.machine.split_run()?.watch_reply(ticket)
     }
-    /// Wait for the run to stop and return it as a worker job would.
-    pub(super) fn finish(mut self, worker: &mut M::Context) -> RunResult<M> {
-        let stopped = self.call(worker, |machine, context| {
+    /// Wait for the run to stop and return its result.
+    pub(super) fn finish(mut self, context: &mut M::Context) -> RunResult<M> {
+        let stopped = self.call(context, |machine, context| {
             machine
                 .split_run()
                 .expect("split run in flight")
@@ -258,15 +256,14 @@ where
         Ok((id, start, bound, inbox))
     }
 
-    /// Run every view on the workers and return each machine and its RNG to
-    /// its entry, removing the inputs the run accepted. Reports are ordered
-    /// by identity.
+    /// Run every view and return each machine and its RNG to its entry,
+    /// removing the inputs the run accepted. Reports are ordered by identity.
     fn execute_batch(
         &mut self,
         views: Vec<BatchView>,
         bounds: &BatchBounds,
     ) -> Vec<RunReport<M::Error>> {
-        let mut results = if views.iter().any(|v| self.splits(v.0)) {
+        let mut results: Vec<RunResult<M>> = if views.iter().any(|v| self.splits(v.0)) {
             let mut round = round::Runs::new();
             let count = views.len();
             for view in views {
@@ -274,10 +271,9 @@ where
             }
             (0..count).map(|_| self.next_run(&mut round)).collect()
         } else {
-            let jobs = views.into_iter().map(|view| self.run_job(view)).collect();
-            self.workers.run(jobs)
+            views.into_iter().map(|view| self.run_here(view)).collect()
         };
-        results.sort_by_key(|result: &RunResult<M>| result.id);
+        results.sort_by_key(|result| result.id);
         results
             .into_iter()
             .map(|result| {
@@ -287,63 +283,10 @@ where
             .collect()
     }
 
-    /// Lend one view's machine and RNG to a job that runs it on a worker.
-    pub(super) fn run_job(
-        &mut self,
-        (id, start, bound, mut inbox): BatchView,
-    ) -> (
-        usize,
-        impl FnOnce(&mut M::Context) -> RunResult<M> + Send + 'static,
-    ) {
+    /// Take one view's machine and RNG from its entry for a run.
+    fn take_flight(&mut self, (id, start, bound, inbox): BatchView) -> Flight<M> {
         let entry = &mut self.execution.machines[id.0];
-        let mut machine = entry.machine.take().expect("stopped machine");
-        let mut rng = entry.rng.take().expect("stopped machine RNG");
-        let execution = entry.lifecycle.execution();
-        let job = move |context: &mut M::Context| {
-            let mut outputs = Vec::new();
-            let stopped = catch_unwind(AssertUnwindSafe(|| {
-                machine.run(
-                    &mut RunContext {
-                        worker: context,
-                        clock: &FixedClock(start.as_nanos()),
-                        rng: &mut rng,
-                        execution,
-                        inbox: Inbox::new(&mut inbox, start),
-                        outbox: Outbox::new(&mut outputs, start, bound),
-                    },
-                    bound,
-                )
-            }))
-            .map_err(|_| Error::Panicked { id })
-            .and_then(|result| result.map_err(|source| Error::Machine { id, source }));
-            RunResult {
-                id,
-                machine,
-                rng,
-                remaining: inbox.len(),
-                outputs,
-                stopped,
-            }
-        };
-        (id.0, job)
-    }
-
-    /// Whether machine `id` executes elsewhere, so that the Driver's thread
-    /// can keep its runs in flight beside others' instead of lending it to a
-    /// worker.
-    pub(super) fn splits(&mut self, id: MachineId) -> bool {
-        self.execution.machines[id.0]
-            .machine
-            .as_mut()
-            .and_then(M::split_run)
-            .is_some()
-    }
-
-    /// Start one view's run on this thread, as [`Driver::run_job`]'s job
-    /// would run it, and keep it in flight unless it finished at once.
-    pub(super) fn start_flight(&mut self, (id, start, bound, inbox): BatchView) -> Started<M> {
-        let entry = &mut self.execution.machines[id.0];
-        let mut flight = Flight {
+        Flight {
             id,
             machine: entry.machine.take().expect("stopped machine"),
             rng: entry.rng.take().expect("stopped machine RNG"),
@@ -352,8 +295,35 @@ where
             start,
             bound,
             execution: entry.lifecycle.execution(),
-        };
-        match flight.call(self.workers.caller(), |machine, context| {
+        }
+    }
+
+    /// Run one view's machine on this thread until it stops.
+    pub(super) fn run_here(&mut self, view: BatchView) -> RunResult<M> {
+        let mut flight = self.take_flight(view);
+        let bound = flight.bound;
+        let stopped = flight.call(self.host.context(), |machine, context| {
+            machine.run(context, bound)
+        });
+        flight.result(stopped)
+    }
+
+    /// Whether machine `id` executes elsewhere, so that the Driver's thread
+    /// can keep its runs in flight beside others' instead of running it inline.
+    pub(super) fn splits(&mut self, id: MachineId) -> bool {
+        self.execution.machines[id.0]
+            .machine
+            .as_mut()
+            .and_then(M::split_run)
+            .is_some()
+    }
+
+    /// Start one view's run on this thread and keep it in flight unless it
+    /// finished at once.
+    pub(super) fn start_flight(&mut self, view: BatchView) -> Started<M> {
+        let mut flight = self.take_flight(view);
+        let bound = flight.bound;
+        match flight.call(self.host.context(), |machine, context| {
             let split = machine.split_run().expect("split run");
             split.start(context, bound)
         }) {

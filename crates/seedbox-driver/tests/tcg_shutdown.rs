@@ -62,7 +62,6 @@ fn driver(restore_initial: bool) -> Harness {
     let driver = Driver::new(
         at(0),
         Duration::from_millis(1),
-        1,
         TestRng,
         || Ok(()),
         definition,
@@ -314,7 +313,6 @@ fn paused_shutdown_stays_pending_until_resume_and_restores_without_duplicate() {
         let branch_driver = Driver::new(
             resume,
             Duration::from_millis(1),
-            1,
             TestRng,
             || Ok(()),
             definition,

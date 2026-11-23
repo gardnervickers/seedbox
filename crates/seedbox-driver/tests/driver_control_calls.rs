@@ -158,11 +158,10 @@ struct World {
     peer: MachineId,
 }
 impl World {
-    fn new(workers: usize, caller: Vec<Output>) -> Self {
+    fn new(caller: Vec<Output>) -> Self {
         let mut driver = Driver::new(
             at(0),
             Duration::from_nanos(10),
-            workers,
             Rng,
             || Ok(()),
             seedbox_driver::test_support::definition("oracle"),
@@ -251,14 +250,11 @@ impl World {
 #[test]
 fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
     for crash in [false, true] {
-        let mut world = World::new(
-            2,
-            vec![call(
-                1,
-                1,
-                serde_json::json!({"op":"sleep", "duration_ns":7}),
-            )],
-        );
+        let mut world = World::new(vec![call(
+            1,
+            1,
+            serde_json::json!({"op":"sleep", "duration_ns":7}),
+        )]);
         world.advance(10);
         assert!(world
             .driver
@@ -313,14 +309,11 @@ fn positive_sleep_wakes_at_admission_plus_duration_even_if_caller_exits() {
 
 #[test]
 fn accepted_peer_effect_finishes_after_its_caller_exits() {
-    let mut world = World::new(
-        2,
-        vec![call(
-            1,
-            1,
-            serde_json::json!({"op":"stop", "target":{"machine":"peer"}}),
-        )],
-    );
+    let mut world = World::new(vec![call(
+        1,
+        1,
+        serde_json::json!({"op":"stop", "target":{"machine":"peer"}}),
+    )]);
     world.advance(10);
     let peer = world.peer();
     assert_eq!(peer.commands.len(), 1);

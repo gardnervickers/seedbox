@@ -27,7 +27,6 @@ fn changed_key_action_and_each_record_field_mismatch_before_effects() {
         let mut d = Driver::new_seeded(
             Timestamp::from_nanos(0),
             Duration::from_nanos(10),
-            1,
             51,
             || Ok(()),
             fixture::definition(0),

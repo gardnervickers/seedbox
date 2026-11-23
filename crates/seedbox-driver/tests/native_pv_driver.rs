@@ -95,7 +95,6 @@ fn concrete_pv_drivers_create_only_the_callers_context() {
     let mut driver = Driver::new_seeded(
         at(0),
         std::time::Duration::from_millis(1),
-        4,
         1,
         context,
         definition("oracle"),
@@ -108,7 +107,6 @@ fn concrete_pv_drivers_create_only_the_callers_context() {
     let saved = driver.checkpoint().unwrap();
     Driver::from_checkpoint(
         &saved,
-        6,
         context,
         |snap| RawMachine::from_snapshot(&executable, snap).map_err(std::io::Error::other),
         create,
@@ -131,7 +129,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -198,7 +195,6 @@ mod machine {
                 let mut restored = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -227,7 +223,6 @@ mod machine {
                 let mut second = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -265,7 +260,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -309,7 +303,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -347,7 +340,6 @@ mod machine {
                 let mut branch = native_fixture::driver(
                     at(40),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {

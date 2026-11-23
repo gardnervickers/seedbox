@@ -17,7 +17,7 @@ fn cheap_output_and_identity_refusals_precede_drain_and_native_capture() {
             .unwrap();
         }
         let peak = Arc::new(AtomicUsize::new(0));
-        let mut driver = driver(1, 1, Arc::default(), peak.clone(), None);
+        let mut driver = driver(1, Arc::default(), peak.clone(), None);
         let mut state = state(1);
         let error = capture(
             &mut driver,
@@ -50,7 +50,7 @@ fn missing_factory_authority_is_a_benign_pre_drain_refusal() {
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
     fs::remove_file(&inventory.artifacts()[0].artifact).unwrap();
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let error = capture(
         &mut driver,
@@ -75,7 +75,7 @@ fn publication_after_drain_failure_is_distinctly_terminal_not_an_ordinary_refusa
     let inventory = fixture_inventory(&root.path().join("authority"));
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let error = capture(
         &mut driver,
@@ -104,7 +104,7 @@ fn abandoned_bodies_never_publish_or_block_identity_and_are_never_clobbered() {
     let abandoned = output.join("checkpoint-saved-bodies");
     fs::create_dir(&abandoned).unwrap();
     fs::write(abandoned.join("sentinel"), b"abandoned owned-session data").unwrap();
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let path = capture(
         &mut driver,
@@ -142,7 +142,7 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut driver = driver(1, 2, Arc::default(), peak.clone(), None);
+    let mut driver = driver(2, Arc::default(), peak.clone(), None);
     let mut state = state(2);
     driver
         .with_barrier(|barrier| {
@@ -188,7 +188,7 @@ fn actual_driver_before_fault_hold_is_captured_without_applying_effect() {
     assert!(effects.is_empty(), "capture must not publish an effect");
     assert_eq!(peak.load(Ordering::SeqCst), 1);
     let captured = resolve(&load(&path).unwrap(), limits(), decode).unwrap();
-    let mut restored = restored(&captured, 4);
+    let mut restored = restored(&captured);
     assert_eq!(
         restored
             .with_barrier(|barrier| Ok(barrier.playback()))

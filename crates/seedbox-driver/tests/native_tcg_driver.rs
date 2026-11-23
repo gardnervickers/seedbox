@@ -126,7 +126,7 @@ const QEMU: &str = "qemu-system-x86_64";
 /// The existing Linux idle test requires userspace boot within two simulated
 /// seconds. tcg-init then sleeps for seedbox_sleep before poweroff; allow the
 /// same two-second kernel budget for shutdown. These are guest-time bounds,
-/// independent of the number of guests, workers or elapsed host time.
+/// independent of the number of guests or elapsed host time.
 struct LinuxWorkloadProgress {
     now: Timestamp,
     deadline: Timestamp,
@@ -251,7 +251,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(37),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -299,7 +298,6 @@ mod machine {
                     native_fixture::driver(
                         at(0),
                         std::time::Duration::from_millis(1),
-                        2,
                         SeededRng::new(0),
                         || Ok(()),
                         || {
@@ -364,7 +362,6 @@ mod machine {
                     native_fixture::driver(
                         at(0),
                         std::time::Duration::from_millis(1),
-                        2,
                         SeededRng::new(0),
                         || Ok(()),
                         || {
@@ -473,7 +470,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     fixture::snapshot_reached(&fork),
                     std::time::Duration::from_millis(1),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -527,19 +523,18 @@ mod machine {
                         .into(),
                     epoch_seconds: 0,
                 };
-                // Hang guard only: main measured ~91 host seconds for these
-                // 12 boots unloaded. Four times that permits concurrent portable
+                // Hang guard only: main measured ~91 host seconds for 12 such
+                // boots unloaded. Four times that permits concurrent portable
                 // checks; workload failure is determined by guest progress below.
                 let guard = HangGuard::new(
                     "paired native Linux boot transport must return",
                     Duration::from_secs(4 * 91),
                 );
                 let mut reference = None;
-                for (guests, step_limit, workers) in [
-                    ([("slow", "2"), ("fast", "1")], 1_000_000, 1),
-                    ([("slow", "2"), ("fast", "1")], 1_000_000, 2),
-                    ([("slow", "2"), ("fast", "1")], 131_071, 4),
-                    ([("fast", "1"), ("slow", "2")], 131_071, 4),
+                for (guests, step_limit) in [
+                    ([("slow", "2"), ("fast", "1")], 1_000_000),
+                    ([("slow", "2"), ("fast", "1")], 131_071),
+                    ([("fast", "1"), ("slow", "2")], 131_071),
                 ] {
                     let oracle = ("oracle", "3");
                     let longest_sleep_seconds = std::iter::once(&oracle)
@@ -550,7 +545,6 @@ mod machine {
                     let mut driver = native_fixture::driver(
                         at(0),
                         std::time::Duration::from_millis(1),
-                        workers,
                         SeededRng::new(0),
                         || Ok(()),
                         || {
@@ -583,7 +577,7 @@ mod machine {
                         },
                     )
                     .unwrap();
-                    // Machines and their read-only clock can be transferred to workers.
+                    // Machines and their read-only clock can move with the Driver to another thread.
                     fn assert_send<T: Send>() {}
                     assert_send::<Driver<TcgMachine>>();
                     let ids: Vec<_> = driver
@@ -604,7 +598,7 @@ mod machine {
                         });
                         let before = now;
                         let upto = progress.next_limit(step_limit).unwrap_or_else(|reason| {
-                            panic!("{reason}: at {now:?}, guests={guests:?}, workers={workers}")
+                            panic!("{reason}: at {now:?}, guests={guests:?}")
                         });
                         let outcome = driver.step(upto).unwrap();
                         now = match outcome {
@@ -622,7 +616,7 @@ mod machine {
                         };
                         assert!(now >= before && now <= upto);
                         progress.advanced(now).unwrap_or_else(|reason| {
-                            panic!("{reason}: at {now:?}, guests={guests:?}, workers={workers}")
+                            panic!("{reason}: at {now:?}, guests={guests:?}")
                         });
                         driver
                             .with_barrier(|barrier| {
@@ -691,112 +685,99 @@ mod machine {
             fn driver_playback_controls_preserve_real_machine_execution_and_pre_crash_state() {
                 use seedbox_driver::driver::{Action, PlaybackRate};
                 let code = counting_loop(); // Increment EBX; jump back one instruction.
-                let mut reference = None;
-                for workers in [1, 2, 4] {
-                    let mut driver = native_fixture::driver(
-                        at(0),
-                        Duration::from_nanos(10),
-                        workers,
-                        SeededRng::new(0),
-                        || Ok(()),
-                        || {
-                            let clock: Arc<dyn Clock + Send + Sync> =
-                                Arc::new(SimulationClock::new((at(0)).as_nanos()));
-                            TcgMachine::configured(
-                                Path::new(QEMU),
-                                manifest(code.clone()),
-                                SeededRng::new(0),
-                                clock,
-                            )
-                            .map(|guest| vec![guest])
-                        },
-                    )
+                let mut driver = native_fixture::driver(
+                    at(0),
+                    Duration::from_nanos(10),
+                    SeededRng::new(0),
+                    || Ok(()),
+                    || {
+                        let clock: Arc<dyn Clock + Send + Sync> =
+                            Arc::new(SimulationClock::new((at(0)).as_nanos()));
+                        TcgMachine::configured(
+                            Path::new(QEMU),
+                            manifest(code.clone()),
+                            SeededRng::new(0),
+                            clock,
+                        )
+                        .map(|guest| vec![guest])
+                    },
+                )
+                .unwrap();
+                let id = machine_id(&mut driver);
+                driver
+                    .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
                     .unwrap();
-                    let id = machine_id(&mut driver);
-                    driver
-                        .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
-                        .unwrap();
-                    assert!(
-                        matches!(driver.step(at(100)).unwrap(), StepOutcome::Waiting { at: reached, .. } if reached == at(0))
-                    );
-                    driver
-                        .with_barrier(|barrier| {
-                            fixture::assert_reached(barrier.machine(id)?, at(0));
-                            barrier.step_quantum()
-                        })
-                        .unwrap();
-                    assert_eq!(
-                        driver.step(at(3)).unwrap(),
-                        StepOutcome::BarrierReached { at: at(3) }
-                    );
-                    assert_eq!(
-                        driver.step(at(100)).unwrap(),
-                        StepOutcome::BarrierReached { at: at(10) }
-                    );
-                    // The first quantum ran only stub instructions; admit a
-                    // second one to reach eight loop instructions.
-                    driver
-                        .with_barrier(|barrier| barrier.step_quantum())
-                        .unwrap();
-                    assert_eq!(
-                        driver.step(at(100)).unwrap(),
-                        StepOutcome::BarrierReached { at: at(20) }
-                    );
-                    let saved = driver
-                        .with_barrier(|barrier| {
-                            assert!(!barrier.playback().stepping);
-                            barrier.snapshot(id)
-                        })
-                        .unwrap();
-                    let mut restored =
-                        TcgMachine::from_snapshot(Path::new(QEMU), &saved, clock(20)).unwrap();
-                    let registers = registers(&mut restored);
-                    assert_eq!(registers[RBX], (20 - STUB) / 2);
-                    if let Some(reference) = reference {
-                        assert_eq!(registers, reference);
-                    } else {
-                        reference = Some(registers);
-                    }
-                    driver
-                        .with_barrier(|barrier| {
-                            barrier.schedule(
-                                at(25),
-                                auto_key(),
-                                Action::Crash(Target::Machine(id)),
-                            )?;
-                            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
-                        })
-                        .unwrap();
-                    let held = driver.step(at(100)).unwrap();
-                    assert!(matches!(&held, StepOutcome::BeforeFault { at: t, fault }
+                assert!(
+                    matches!(driver.step(at(100)).unwrap(), StepOutcome::Waiting { at: reached, .. } if reached == at(0))
+                );
+                driver
+                    .with_barrier(|barrier| {
+                        fixture::assert_reached(barrier.machine(id)?, at(0));
+                        barrier.step_quantum()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    driver.step(at(3)).unwrap(),
+                    StepOutcome::BarrierReached { at: at(3) }
+                );
+                assert_eq!(
+                    driver.step(at(100)).unwrap(),
+                    StepOutcome::BarrierReached { at: at(10) }
+                );
+                // The first quantum ran only stub instructions; admit a
+                // second one to reach eight loop instructions.
+                driver
+                    .with_barrier(|barrier| barrier.step_quantum())
+                    .unwrap();
+                assert_eq!(
+                    driver.step(at(100)).unwrap(),
+                    StepOutcome::BarrierReached { at: at(20) }
+                );
+                let saved = driver
+                    .with_barrier(|barrier| {
+                        assert!(!barrier.playback().stepping);
+                        barrier.snapshot(id)
+                    })
+                    .unwrap();
+                let mut restored =
+                    TcgMachine::from_snapshot(Path::new(QEMU), &saved, clock(20)).unwrap();
+                let registers = registers(&mut restored);
+                assert_eq!(registers[RBX], (20 - STUB) / 2);
+                driver
+                    .with_barrier(|barrier| {
+                        barrier.schedule(at(25), auto_key(), Action::Crash(Target::Machine(id)))?;
+                        barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+                    })
+                    .unwrap();
+                let held = driver.step(at(100)).unwrap();
+                assert!(matches!(&held, StepOutcome::BeforeFault { at: t, fault }
             if *t == at(25) && matches!(fault.target, seedbox_driver::driver::FaultTarget::Machine { machine, .. } if machine == id) && fault.action == seedbox_driver::driver::FaultAction::Crash));
-                    for _ in 0..2 {
-                        assert_eq!(driver.step(at(100)).unwrap(), held);
-                    }
-                    driver
-                        .with_barrier(|barrier| {
-                            fixture::assert_reached(barrier.machine(id)?, at(25));
-                            fixture::assert_matches_ready(barrier.machine(id)?);
-                            barrier.set_rate(PlaybackRate::Unlimited)
-                        })
-                        .unwrap();
-                    assert_eq!(
-                        driver.step(at(100)).unwrap(),
-                        StepOutcome::Finished {
-                            at: at(25),
-                            // Crashing the oracle completes the simulation with its actual
-                            // exit reason, not the old all-machines-exited sentinel.
-                            reason: ExitReason::Crashed
-                        }
-                    );
-                    assert_eq!(
-                        stopped(&mut driver, id),
-                        StopReason::Exited {
-                            reached: at(25),
-                            reason: ExitReason::Crashed
-                        }
-                    );
+                for _ in 0..2 {
+                    assert_eq!(driver.step(at(100)).unwrap(), held);
                 }
+                driver
+                    .with_barrier(|barrier| {
+                        fixture::assert_reached(barrier.machine(id)?, at(25));
+                        fixture::assert_matches_ready(barrier.machine(id)?);
+                        barrier.set_rate(PlaybackRate::Unlimited)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    driver.step(at(100)).unwrap(),
+                    StepOutcome::Finished {
+                        at: at(25),
+                        // Crashing the oracle completes the simulation with its actual
+                        // exit reason, not the old all-machines-exited sentinel.
+                        reason: ExitReason::Crashed
+                    }
+                );
+                assert_eq!(
+                    stopped(&mut driver, id),
+                    StopReason::Exited {
+                        reached: at(25),
+                        reason: ExitReason::Crashed
+                    }
+                );
             }
         }
         mod elapsed_tests {
@@ -807,7 +788,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_nanos(10_000),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -888,7 +868,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     std::time::Duration::from_nanos(10_000),
-                    2,
                     SeededRng::new(0),
                     || Ok(()),
                     || {
@@ -956,11 +935,9 @@ mod machine {
             use crate::*;
             #[test]
             fn driver_reboots_live_and_crashed_guest_with_fresh_state_and_retained_actions() {
-                for workers in [1, 2, 4] {
-                    check_driver_reboot(workers);
-                }
+                check_driver_reboot();
             }
-            fn check_driver_reboot(workers: usize) {
+            fn check_driver_reboot() {
                 use seedbox_driver::driver::{Action, StepOutcome};
                 use std::time::Duration;
 
@@ -971,7 +948,6 @@ mod machine {
                 let mut driver = native_fixture::driver(
                     at(0),
                     Duration::from_nanos(10),
-                    workers,
                     SeededRng::new(0),
                     || Ok(()),
                     || {

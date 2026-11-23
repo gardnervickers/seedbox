@@ -110,15 +110,6 @@ impl Trace {
             .collect()
     }
 
-    /// Everything observed is identical, including log record boundaries.
-    pub fn same(&self, other: &Self) -> Outcome {
-        self.same_prefix(other, u64::MAX)?;
-        if self.logs != other.logs {
-            return Err("log records differ in their boundaries or times".into());
-        }
-        Ok(())
-    }
-
     pub fn same_prefix(&self, other: &Self, before: u64) -> Outcome {
         let logs = |t: &Self| -> Vec<Record> {
             t.logs.iter().filter(|r| r.time < before).cloned().collect()

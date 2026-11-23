@@ -116,9 +116,7 @@ simulator:
 Network latency and scheduled events can shorten a parallel execution window.
 Replay and checkpoints retain the quantum.
 
-Choose the backend, seed, execution limits and machine worker count with CLI flags.
-`run` and `replay` accept `--machine-workers 1..64`. The default count equals the
-number of machines. Preparation can use these workers. During execution TCG workers
-steal queued runs, and PV uses one coordinator to drive all its VM processes.
-Each round waits for every running machine to reach its boundary. Worker count
-affects host throughput and preserves simulation results.
+Choose the backend, seed and execution limits with CLI flags.
+Every machine runs on the Driver's thread. TCG machines run one after another;
+PV starts each VM process and drives them all from that thread, so they execute
+concurrently. Each round waits for every running machine to reach its boundary.

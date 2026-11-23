@@ -10,9 +10,8 @@ use std::time::Duration;
 pub fn driver<M>(
     start: Timestamp,
     quantum: Duration,
-    workers: usize,
     rng: impl RngStream + Send + 'static,
-    context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+    context: impl FnOnce() -> Result<M::Context, M::Error>,
     make: impl FnOnce() -> Result<Vec<M>, M::Error>,
 ) -> Result<Driver<M>, Error<M::Error>>
 where
@@ -27,7 +26,6 @@ where
     Driver::new(
         start,
         quantum,
-        workers,
         rng,
         context,
         definition(0),

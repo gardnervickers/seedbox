@@ -145,7 +145,6 @@ fn build_with(
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         definition(0),
@@ -392,7 +391,6 @@ fn undeclared_names_and_engines_without_breakpoints_never_suspend() {
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         fixture::definition(0),
@@ -419,7 +417,6 @@ fn declarations_reach_machines_and_survive_a_checkpoint() {
     let checkpoint = driver.checkpoint().unwrap();
     let restored = Driver::<Guest>::from_checkpoint(
         &checkpoint,
-        1,
         || Ok(()),
         |saved| Ok(saved.clone()),
         |_| unreachable!("no spawns"),
@@ -526,7 +523,6 @@ fn block_request_breakpoints_need_an_engine_with_breakpoints() {
         let mut driver = Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            1,
             7,
             || Ok(()),
             fixture::definition(0),
@@ -722,7 +718,6 @@ fn a_host_hit_waits_for_the_next_wait_break_across_a_checkpoint() {
     let checkpoint = driver.checkpoint().unwrap();
     let mut restored = Driver::<Guest>::from_checkpoint(
         &checkpoint,
-        1,
         || Ok(()),
         |saved| Ok(saved.clone()),
         |_| unreachable!("no spawns"),

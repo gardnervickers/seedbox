@@ -44,15 +44,14 @@ where
     M::Context: 'static,
     M::Error: Send + 'static,
 {
-    /// Read all stopped machines on the existing execution workers. Every
-    /// accepted read finishes and returns its machine before this call returns.
+    /// Read all stopped machines in insertion order, one after another.
     /// Reading evidence does not execute machines or change Driver policy.
     /// Per-machine failures remain in insertion order alongside successful reads.
     pub fn execution_evidence_all(
         &mut self,
     ) -> Result<Vec<ExecutionEvidenceRead<M::Error>>, Error<M::Error>> {
         self.driver.check_valid()?;
-        let jobs = self
+        Ok(self
             .driver
             .execution
             .machines
@@ -60,29 +59,18 @@ where
             .enumerate()
             .map(|(index, entry)| {
                 let id = MachineId(index);
-                let mut machine = entry.machine.take().expect("stopped machine");
-                let job = move |_: &mut M::Context| {
-                    let evidence = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        machine.execution_evidence()
-                    }))
-                    .map_err(|_| Error::Panicked { id })
-                    .and_then(|read| read.map_err(|source| Error::Machine { id, source }));
-                    (id, machine, evidence)
-                };
-                (index, job)
+                let machine = entry.machine.as_mut().expect("stopped machine");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    machine.execution_evidence()
+                }))
+                .map_err(|_| Error::Panicked { id })
+                .and_then(|read| read.map_err(|source| Error::Machine { id, source }));
+                ExecutionEvidenceRead {
+                    machine: id,
+                    result,
+                }
             })
-            .collect();
-        // Results come back in job order, which is insertion order.
-        let results = self.driver.workers.run(jobs);
-        let mut reads = Vec::with_capacity(results.len());
-        for (id, machine, result) in results {
-            self.driver.execution.machines[id.0].machine = Some(machine);
-            reads.push(ExecutionEvidenceRead {
-                machine: id,
-                result,
-            });
-        }
-        Ok(reads)
+            .collect())
     }
 }
 
