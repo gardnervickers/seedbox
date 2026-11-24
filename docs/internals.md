@@ -18,8 +18,14 @@ The translator also makes syscalls for itself: suspending threads to flush rewri
 code, returning from its signal handler and waiting on futexes. On ARM its syscall
 stubs put a fixed mark in x7, which arm64 syscalls leave unused, and the kernel
 charges a marked syscall a tenth of a syscall. A JVM makes millions of these while
-it starts, and at full price they dominated simulated startup time. x86 has no such
-mark yet and charges translator syscalls in full, as system time.
+it starts, and at full price they dominated simulated startup time. Marked `mmap`,
+`munmap`, `mprotect`, `mremap`, `madvise` and `gettid` cost nothing: they commit
+the translator's heap and code-cache pages and look up its thread id before TLS
+exists, so their count follows the translator's own layout. Futex, yield and
+signal syscalls keep the tenth, since the translator waits in loops of them. No
+marked syscall takes a preempt fault draw. The progress call is recognised first,
+whatever x7 holds. x86 has no such mark yet and charges translator syscalls in
+full, as system time.
 
 Guest time advances only inside the kernel, so every timer tick interrupts kernel
 mode and tick accounting would charge all translated compute as system time
