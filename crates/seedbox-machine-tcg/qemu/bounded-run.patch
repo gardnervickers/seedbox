@@ -8,7 +8,7 @@
  #include "qemu/error-report.h"
  #include "system/cpus.h"
  #include "system/qtest.h"
-@@ -53,10 +54,391 @@
+@@ -53,10 +54,396 @@
  /* Do not count executed instructions */
  ICountMode use_icount = ICOUNT_DISABLED;
 
@@ -221,7 +221,8 @@
 +        seqlock_write_unlock(&timers_state.vm_clock_seqlock,
 +                             &timers_state.vm_clock_lock);
 +    }
-+    qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
++    /* QEMU_CLOCK_VIRTUAL is off while the VM is stopped, so no timer runs
++     * here. One due by the adopted time runs when seedbox-run resumes. */
 +}
 +
 +void qmp_seedbox_capture_complete(Error **errp)
@@ -339,6 +340,10 @@
 +    now = icount_get();
 +    if (now >= seedbox_end) {
 +        seedbox_reanchor(now);
++        /* Timers due at the boundary run before it stops, as at any other
++         * stop. Left to QEMU, they ran first only if this thread took the
++         * BQL again before the main loop paused the machine. */
++        qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
 +        seedbox_reason = SEEDBOX_STOP_REASON_BOUNDARY;
 +    } else if (all_cpu_threads_idle()) {
 +        delay = qemu_clock_deadline_ns_all(QEMU_CLOCK_VIRTUAL,
@@ -400,7 +405,7 @@
  }
 
  static void icount_enable_adaptive(void)
-@@ -123,6 +487,9 @@
+@@ -123,6 +492,9 @@
  static int64_t icount_get_locked(void)
  {
      int64_t icount = icount_get_raw_locked();
@@ -410,7 +415,7 @@
      return qatomic_read(&timers_state.qemu_icount_bias) + icount_to_ns(icount);
  }
 
-@@ -295,6 +662,10 @@
+@@ -295,6 +667,10 @@
      int64_t deadline;
 
      assert(icount_enabled());
@@ -464,6 +469,26 @@
 
          if (icount_enabled() && all_cpu_threads_idle()) {
              /*
+@@ -273,12 +289,16 @@
+             }
+             current_cpu = cpu;
+ 
+-            qemu_clock_enable(QEMU_CLOCK_VIRTUAL,
+-                              (cpu->singlestep_flags & SSTEP_NOTIMER) == 0);
+-
+             if (cpu_can_run(cpu)) {
+                 int r;
+ 
++                /* Only a CPU that may run switches the clock on. A stopped
++                 * one also passes here, to take work queued while stopped or
++                 * after the main loop paused the machine first; turning the
++                 * clock on then would let stopped QMP commands and the main
++                 * loop run virtual timers, depending on host thread timing. */
++                qemu_clock_enable(QEMU_CLOCK_VIRTUAL,
++                                  (cpu->singlestep_flags & SSTEP_NOTIMER) == 0);
+                 bql_unlock();
+                 if (icount_enabled()) {
+                     icount_prepare_for_run(cpu, cpu_budget);
 --- a/hw/char/meson.build
 +++ b/hw/char/meson.build
 @@ -19,6 +19,7 @@
@@ -868,9 +893,9 @@
 +##
 +# @seedbox-advance:
 +#
-+# Advance a stopped VM's virtual time, delivering due timers without
-+# executing guest instructions.  Overdue timers observe the adopted
-+# time.
++# Advance a stopped VM's virtual time without executing guest
++# instructions.  No timer runs: the virtual clock is off while the VM
++# is stopped, so timers due by then run when seedbox-run resumes.
 +#
 +# @time: New simulation time in nanoseconds.
 +#

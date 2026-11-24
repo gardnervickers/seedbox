@@ -388,6 +388,71 @@ fn a_wake_run_too_short_for_an_instruction_takes_its_interrupt_as_a_longer_run_d
     }
 }
 
+/// A stopped machine's virtual clock stays off, so adopting a time runs no
+/// timer: one due then runs when execution resumes. QEMU's CPU thread used
+/// to switch the clock back on whenever it passed through its loop while
+/// stopped: after the main loop paused the machine first (a host-timing
+/// race at every stop), or to take work queued while stopped, which a
+/// snapshot's memory listeners queue. The next adoption then ran the due
+/// timer, so where QEMU's threads happened to be left a trace in the timer
+/// state. Each trial snapshots a machine blocked on its LAPIC timer and
+/// adopts the timer's deadline without executing; one that took no snapshot
+/// must show the same state. Interrupts stay disabled, so the CPU stays
+/// halted either way. The CPU thread takes the snapshot's work at a host
+/// time of its own, so one trial misses the defect some of the time; there
+/// are several.
+#[test]
+fn a_snapshot_does_not_let_adopting_a_deadline_run_its_timer() {
+    let image = timer(100_000).cli().hlt().spin().image();
+    let blocked = || {
+        let mut machine = start(image.clone());
+        machine
+            .configure_policy(
+                "m",
+                &BackendPolicy {
+                    seed: 42,
+                    timer_jitter_ns: 17,
+                    full_state: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let stop = drive(&mut machine, 0, 20_000, 1000, vec![]);
+        let StopReason::Blocked {
+            deadline: Some(deadline),
+            ..
+        } = stop
+        else {
+            panic!("{stop:?}")
+        };
+        (machine, deadline.as_nanos())
+    };
+    let (mut plain, deadline) = blocked();
+    assert_eq!(
+        drive(&mut plain, deadline, deadline, 1000, vec![]),
+        StopReason::BoundaryReached
+    );
+    let expected = plain.state_evidence().unwrap().expect("full state");
+    for trial in 0..10 {
+        let (mut saved, at) = blocked();
+        assert_eq!(at, deadline);
+        saved.snapshot().unwrap();
+        assert_eq!(
+            drive(&mut saved, deadline, deadline, 1000, vec![]),
+            StopReason::BoundaryReached
+        );
+        let state = saved.state_evidence().unwrap().expect("full state");
+        let differs: Vec<_> = expected
+            .parts
+            .iter()
+            .zip(&state.parts)
+            .filter(|(a, b)| a != b)
+            .map(|((name, _), _)| name.as_str())
+            .collect();
+        assert!(differs.is_empty(), "trial {trial}: {differs:?} differ");
+    }
+}
+
 #[test]
 fn execution_cost_timer_inside_partial_charge_matches_segmented_and_restored_cpu() {
     // Interrupts stay disabled: the loop reads the LAPIC IRR into ECX to
