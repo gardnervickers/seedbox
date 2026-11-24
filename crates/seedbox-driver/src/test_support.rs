@@ -20,11 +20,22 @@ pub fn auto_key() -> InputKey {
 /// nothing else. What follows from an output is due one floor after it, and
 /// every runnable machine bounds a round by it, so fixtures whose scripts
 /// are timed in nanoseconds use this instead of the default millisecond:
-/// rounds still end at quantum boundaries, and consequences come one quantum
-/// after their output.
+/// a busy round still ends one quantum after the earliest machine's start,
+/// and consequences come one quantum after their output.
 pub fn floor(quantum: std::time::Duration) -> crate::driver::NetworkConfig {
     let latency = quantum.min(std::time::Duration::from_secs(3600));
     crate::driver::NetworkConfig::new(latency, std::time::Duration::ZERO, 0).unwrap()
+}
+
+/// A limited playback rate too fast ever to make a host wait. Playback is
+/// paced, so every round ends at the next quantum boundary at the latest, as
+/// paced playback and single stepping need, without host time in a test.
+pub fn paced() -> crate::driver::PlaybackRate {
+    let one = std::num::NonZeroU32::MIN;
+    crate::driver::PlaybackRate::Limited {
+        numerator: std::num::NonZeroU32::MAX,
+        denominator: one,
+    }
 }
 
 /// A fixed key for tests that correlate events with it.

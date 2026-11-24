@@ -2,11 +2,11 @@
 //!
 //! Each scenario runs once with the Driver's own round boundaries, once
 //! under each of several seeded [`StopPolicy`]s, which end rounds early at
-//! host-drawn times, and once with each of two other quanta, which move the
-//! Driver's own boundaries. It also runs with machines whose runs stay in
-//! flight on the Driver's thread, as a PV machine's do
-//! ([`Machine::split_run`]), under the Driver's own stops and under each
-//! policy. The runs must agree on:
+//! host-drawn times, and once paced with each of three quanta: paced playback
+//! ends every round at a quantum boundary, which unpaced rounds ignore. It
+//! also runs with machines whose runs stay in flight on the Driver's thread,
+//! as a PV machine's do ([`Machine::split_run`]), under the Driver's own stops
+//! and under each policy. The runs must agree on:
 //!
 //! - the event stream, with each event's `position` removed (it counts commits);
 //! - Driver policy evidence, as written, at a few times the host asks for a
@@ -26,7 +26,7 @@ use seedbox_driver::driver::{
     Action, Driver, HealTarget, MachineId, NetworkConfig, NetworkFaults, NetworkPolicy,
     NetworkSetup, StepOutcome, Target,
 };
-use seedbox_driver::test_support::{definition, key, StopPolicy};
+use seedbox_driver::test_support::{definition, key, paced as paced_rate, StopPolicy};
 use seedbox_engine_protocol::property::Frame;
 use seedbox_machine::{
     clock::ClockRate,
@@ -47,9 +47,13 @@ const MS: u64 = 1_000_000;
 const SEEDS: [u64; 6] = [1, 2, 3, 0x5eed, 0xdead_beef, u64::MAX];
 /// The quantum of every run but those in [`QUANTA`].
 const QUANTUM: Duration = Duration::from_millis(1);
-/// Other quanta every scenario runs with, under the Driver's own stops. The
-/// latency floor stays the network's, whatever the quantum.
-const QUANTA: [Duration; 2] = [Duration::from_micros(250), Duration::from_millis(4)];
+/// Quanta every scenario also runs with paced, under the Driver's own stops.
+/// The latency floor stays the network's, whatever the quantum.
+const QUANTA: [Duration; 3] = [
+    Duration::from_micros(250),
+    QUANTUM,
+    Duration::from_millis(4),
+];
 /// Frames with a tag at or above this are not echoed, which bounds chains.
 const ECHO_LIMIT: u8 = 40;
 
@@ -375,18 +379,19 @@ fn networked(index: usize) -> MachineDefinition {
 /// Run `scenario` to its end. Returns its results and how many barriers the
 /// host saw on the way.
 fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
-    run_with(scenario, policy, QUANTUM, &[])
+    run_with(scenario, policy, QUANTUM, false, &[])
 }
 
-/// [`run`] with `quantum`, the host first asking for a barrier at each of
-/// `barriers`.
+/// [`run`] with `quantum`, paced playback when `paced`, the host first
+/// asking for a barrier at each of `barriers`.
 fn run_with(
     scenario: &Scenario,
     policy: Option<u64>,
     quantum: Duration,
+    paced: bool,
     barriers: &[u64],
 ) -> (Results, usize) {
-    run_as(scenario, policy, quantum, barriers, false)
+    run_as(scenario, policy, quantum, paced, barriers, false)
 }
 
 /// [`run_with`], every machine's runs staying in flight on the Driver's
@@ -395,6 +400,7 @@ fn run_as(
     scenario: &Scenario,
     policy: Option<u64>,
     quantum: Duration,
+    paced: bool,
     barriers: &[u64],
     split: bool,
 ) -> (Results, usize) {
@@ -448,6 +454,11 @@ fn run_as(
         })
         .unwrap();
     driver.set_stop_policy(policy.map(StopPolicy::seeded));
+    if paced {
+        driver
+            .with_barrier(|barrier| barrier.set_rate(paced_rate()))
+            .unwrap();
+    }
     for &barrier in barriers {
         while matches!(
             driver.step(at(barrier)).unwrap(),
@@ -578,14 +589,14 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
         }
     }
     for quantum in QUANTA {
-        let (other, _) = run_with(scenario, None, quantum, &[]);
+        let (other, _) = run_with(scenario, None, quantum, true, &[]);
         let differences = differences(&own, &other);
         if !differences.is_empty() {
-            found.push((format!("quantum {quantum:?}"), differences));
+            found.push((format!("paced, quantum {quantum:?}"), differences));
         }
     }
     for policy in std::iter::once(None).chain(SEEDS.map(Some)) {
-        let (other, _) = run_as(scenario, policy, QUANTUM, &[], true);
+        let (other, _) = run_as(scenario, policy, QUANTUM, false, &[], true);
         let differences = differences(&own, &other);
         if !differences.is_empty() {
             found.push((format!("split, policy {policy:?}"), differences));
@@ -1440,7 +1451,7 @@ fn a_slow_clock_exit_does_not_depend_on_a_barrier_in_its_nanosecond() {
     // At nine tenths of simulation time, machine time 1.8 ms is reached at
     // 2 ms and still read at 2 ms + 1 ns.
     let (own, _) = run(&scenario, None);
-    let (cut, _) = run_with(&scenario, None, QUANTUM, &[2 * MS + 1]);
+    let (cut, _) = run_with(&scenario, None, QUANTUM, false, &[2 * MS + 1]);
     assert_eq!(differences(&own, &cut), Vec::<String>::new());
     assert_eq!(
         own.outcome,

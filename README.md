@@ -103,8 +103,8 @@ range can make later seeds differ from a fresh run of the same seed; replaying a
 seed still matches. See [the spawn project](examples/spawn/seedbox.yaml).
 
 `network.latency` sets the one-way delay between machines and defaults to `1ms`.
-`simulator.quantum` sets the longest stretch machines run between barriers, and
-the step of paced playback and single stepping:
+`simulator.quantum` sets the step of paced playback and of single stepping; it
+has no effect on results:
 
 ```yaml
 network:
@@ -114,9 +114,10 @@ simulator:
 ```
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
-Network latency and scheduled events can shorten a parallel execution window.
-The quantum is a host setting: where machines stop changes nothing they do, so
-it does not change results. Comparison ignores a definition's quantum: edit
+While playback is paced or single stepping, no parallel execution window crosses
+a quantum boundary; otherwise network latency and scheduled events alone bound
+it. The quantum is a host setting: where machines stop changes nothing they do,
+so it does not change results. Comparison ignores a definition's quantum: edit
 `quantumNs` in `seedbox show ID --view definition` output, run that file, and
 `seedbox compare` reports MATCH. A project run again after changing `quantum`
 in `seedbox.yaml` is NOT_COMPARABLE with the earlier run instead, because its

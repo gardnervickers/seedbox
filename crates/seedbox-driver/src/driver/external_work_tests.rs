@@ -49,14 +49,26 @@ fn at(driver: &mut Driver<Idle>) -> u64 {
         .unwrap()
 }
 #[test]
-fn external_deadline_advances_idle_driver_in_quanta_without_running_idle_machines() {
-    for workers in [1, 4] {
+fn external_deadline_advances_idle_driver_without_running_idle_machines() {
+    for (workers, paced) in [(1, false), (4, false), (1, true), (4, true)] {
         let (mut driver, calls) = driver(workers);
+        if paced {
+            driver
+                .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
+                .unwrap();
+        }
         assert!(
             matches!(driver.step(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == 0)
         );
         let initial_calls = calls.load(Ordering::SeqCst);
-        for expected in (10..=100).step_by(10) {
+        // Paced playback crosses idle time a quantum at a time; otherwise
+        // one round reaches the deadline.
+        let stops = if paced {
+            (10..=100).step_by(10).collect()
+        } else {
+            vec![100]
+        };
+        for expected in stops {
             assert!(
                 matches!(driver.step_toward_external(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == expected)
             );
@@ -88,7 +100,7 @@ fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_aut
     let (mut source, _) = driver(1);
     source.step(Timestamp::from_nanos(100)).unwrap();
     source
-        .step_toward_external(Timestamp::from_nanos(100))
+        .step_toward_external(Timestamp::from_nanos(10))
         .unwrap();
     let checkpoint = source.checkpoint().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -110,6 +122,6 @@ fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_aut
     restored
         .step_toward_external(Timestamp::from_nanos(100))
         .unwrap();
-    assert_eq!(at(&mut restored), 20);
+    assert_eq!(at(&mut restored), 100);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

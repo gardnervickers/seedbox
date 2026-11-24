@@ -612,8 +612,10 @@ fn invalid_schedule_does_not_mutate_the_queue_or_poison_the_driver() {
     );
 }
 
+/// While playback is paced, a round never crosses a quantum boundary, and
+/// short steps, actions and additions keep the boundaries where they were.
 #[test]
-fn quantum_boundaries_survive_short_steps_actions_and_additions() {
+fn paced_quantum_boundaries_survive_short_steps_actions_and_additions() {
     let mut driver = super::fixture::driver(
         at(7),
         Duration::from_nanos(10),
@@ -623,6 +625,9 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
         || Ok(vec![machine(0, &[Op::Work(100), Op::Exit])]),
     )
     .unwrap();
+    driver
+        .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
+        .unwrap();
     assert_eq!(
         driver.step(at(12)).unwrap(),
         StepOutcome::BarrierReached { at: at(12) }
@@ -645,8 +650,40 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
     }
 }
 
+/// At an unlimited rate the quantum caps nothing: a busy round ends one
+/// floor after the earliest machine's start, wherever that falls between
+/// quantum boundaries.
 #[test]
-fn idle_time_does_not_skip_quantum_boundaries() {
+fn unpaced_rounds_end_one_floor_after_the_earliest_start() {
+    let mut driver = super::fixture::driver(
+        at(7),
+        Duration::from_nanos(10),
+        2,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        || Ok(vec![machine(0, &[Op::Work(100), Op::Exit])]),
+    )
+    .unwrap();
+    assert_eq!(
+        driver.step(at(12)).unwrap(),
+        StepOutcome::BarrierReached { at: at(12) }
+    );
+    driver
+        .with_barrier(|barrier| {
+            let id = barrier.add(|| Ok(machine(1, &[Op::Park])))?;
+            barrier.schedule(at(15), auto_key(), Action::Crash(Target::Machine(id)))
+        })
+        .unwrap();
+    for end in [15, 25, 35] {
+        assert_eq!(
+            driver.step(at(100)).unwrap(),
+            StepOutcome::BarrierReached { at: at(end) }
+        );
+    }
+}
+
+#[test]
+fn paced_idle_time_does_not_skip_quantum_boundaries() {
     let mut driver = super::fixture::driver(
         at(0),
         Duration::from_nanos(10),
@@ -656,6 +693,9 @@ fn idle_time_does_not_skip_quantum_boundaries() {
         || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
     )
     .unwrap();
+    driver
+        .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
+        .unwrap();
     // The machine's timer is taken inside the third window's lane, which
     // ends at its exit, and the run ends one floor after that.
     for end in [10, 20, 25, 30] {
@@ -671,6 +711,36 @@ fn idle_time_does_not_skip_quantum_boundaries() {
             reason: ExitReason::Shutdown
         }
     );
+}
+
+/// Unpaced, idle time is crossed in one round: the sleeping machine wakes
+/// inside it, and the run still ends one floor after its exit.
+#[test]
+fn unpaced_idle_time_is_one_round() {
+    let mut driver = super::fixture::driver(
+        at(0),
+        Duration::from_nanos(10),
+        2,
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
+    )
+    .unwrap();
+    let mut barriers = Vec::new();
+    let finished = loop {
+        match driver.step(at(100)).unwrap() {
+            StepOutcome::BarrierReached { at } => barriers.push(at.as_nanos()),
+            outcome => break outcome,
+        }
+    };
+    assert_eq!(
+        finished,
+        StepOutcome::Finished {
+            at: at(35),
+            reason: ExitReason::Shutdown
+        }
+    );
+    assert!(barriers.len() < 3, "{barriers:?}");
 }
 
 #[test]
@@ -695,6 +765,8 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
         )
         .is_err());
     }
+    // Only a paced round is capped by a quantum boundary, which can then
+    // overflow.
     let mut driver = super::fixture::driver(
         at(u64::MAX - 3),
         Duration::from_nanos(2),
@@ -704,6 +776,9 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
         || Ok(vec![machine(0, &[Op::Work(100)])]),
     )
     .unwrap();
+    driver
+        .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
+        .unwrap();
     assert_eq!(
         driver.step(at(u64::MAX)).unwrap(),
         StepOutcome::BarrierReached {

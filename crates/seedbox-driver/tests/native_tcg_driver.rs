@@ -1112,7 +1112,8 @@ mod machine {
                         Ok(())
                     })
                     .unwrap();
-                for end in [9, 10] {
+                // Rounds end at the resume and then at the crashes.
+                for end in [9, 12] {
                     assert_eq!(
                         driver.step(at(100)).unwrap(),
                         StepOutcome::BarrierReached { at: t(end) }
