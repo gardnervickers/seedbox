@@ -34,6 +34,13 @@
 #define SEEDBOX_TRANSLATOR_MARK 0x5eedd1a900000000UL
 /* Translator syscalls cost this fraction of an application syscall. */
 #define SEEDBOX_TRANSLATOR_DIVISOR 10
+/* Translator memory and thread-id bookkeeping, which costs nothing. */
+#define SEEDBOX_MUNMAP_NR 215
+#define SEEDBOX_MREMAP_NR 216
+#define SEEDBOX_MMAP_NR 222
+#define SEEDBOX_MPROTECT_NR 226
+#define SEEDBOX_MADVISE_NR 233
+#define SEEDBOX_GETTID_NR 178
 struct seedbox_page {
 	u64 now, last, bound, abi, deferred_irq_pending, exclusive_epoch;
 	u64 syscall_ns;
@@ -173,12 +180,35 @@ bool seedbox_user_tick(void)
 	return READ_ONCE(user_charge) == current && irq_count() == HARDIRQ_OFFSET;
 }
 
+/* Memory commits and thread-id lookups the translator makes for itself depend
+ * on its own layout (heap and code-cache page boundaries, TLS setup), not on
+ * application work. None of them waits, so a loop of them cannot stall the
+ * clock. Futex, yield, sleep and signal syscalls are not here: the translator
+ * waits in loops made of them.
+ */
+static bool seedbox_translator_free(unsigned int scno)
+{
+	switch (scno) {
+	case SEEDBOX_MMAP_NR:
+	case SEEDBOX_MUNMAP_NR:
+	case SEEDBOX_MPROTECT_NR:
+	case SEEDBOX_MREMAP_NR:
+	case SEEDBOX_MADVISE_NR:
+	case SEEDBOX_GETTID_NR:
+		return true;
+	default:
+		return false;
+	}
+}
+
 /* Charge one syscall. Load its price once: throttle/heal changes at a
  * rendezvous affect the next syscall. Some syscalls are not application work
  * at full price. The PV clock disables the vDSO, so time syscalls stand in for
  * vDSO reads and cost only the clock read they make. The translator's own
- * syscalls (thread suspension, signal returns, futex waits) are bookkeeping
- * and cost a tenth of a syscall, still at least one bounded read.
+ * syscalls are bookkeeping and take no preempt draw: its memory and thread-id
+ * calls cost nothing, and the rest (thread suspension, signal returns, futex
+ * waits) cost a tenth of a syscall, still at least one bounded read. The
+ * progress call is classified first, whatever x7 holds.
  */
 void seedbox_syscall_progress(struct pt_regs *regs, unsigned int scno)
 {
@@ -194,9 +224,11 @@ void seedbox_syscall_progress(struct pt_regs *regs, unsigned int scno)
 		WRITE_ONCE(user_charge, current);
 		seedbox_charge(ns);
 		WRITE_ONCE(user_charge, NULL);
+	} else if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK) {
+		if (!seedbox_translator_free(scno))
+			seedbox_charge(max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL));
+		return;
 	} else {
-		if (regs->regs[7] == SEEDBOX_TRANSLATOR_MARK)
-			ns = max(ns / SEEDBOX_TRANSLATOR_DIVISOR, 1ULL);
 		seedbox_charge(ns);
 	}
 	/* Syscall entry runs in process context with IRQs enabled, so a seeded

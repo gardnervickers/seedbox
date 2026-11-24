@@ -153,5 +153,41 @@ int main(void)
 	seedbox_syscall_progress(&(struct pt_regs){ { 0 } }, 63);
 	seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETTIME_NR);
 	assert(yields == 2 && storage.last == 2000);
+
+	/* The translator's memory and thread-id syscalls cost nothing, not even a
+	 * read, and no marked translator syscall draws, charged or not. */
+	reset(1000, 300, 300);
+	storage.preempt_ppm = 1000000;
+	storage.preempt_seed = 1;
+	regs.regs[7] = SEEDBOX_TRANSLATOR_MARK;
+	seedbox_syscall_progress(&regs, SEEDBOX_MPROTECT_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_MMAP_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_MUNMAP_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_MREMAP_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_MADVISE_NR);
+	seedbox_syscall_progress(&regs, SEEDBOX_GETTID_NR);
+	assert(storage.last == 0 && writes == 0 && yields == 0);
+	/* brk is not translator bookkeeping: a tenth, like a futex wait. */
+	seedbox_syscall_progress(&regs, 214);
+	assert(storage.last == 100 && yields == 0);
+	seedbox_syscall_progress(&regs, 98);
+	assert(storage.last == 200 && yields == 0);
+	/* The same syscalls without the mark are application work. */
+	regs.regs[7] = 0;
+	seedbox_syscall_progress(&regs, SEEDBOX_MPROTECT_NR);
+	assert(storage.last == 1200 && yields == 1);
+	seedbox_syscall_progress(&regs, SEEDBOX_GETTID_NR);
+	assert(storage.last == 2200 && yields == 2);
+
+	/* The progress client does not set x7, so a stale mark can reach its
+	 * getpid: it keeps the full charge, user ticks and the draw. */
+	reset(1000, 300, 300);
+	storage.preempt_ppm = 1000000;
+	storage.preempt_seed = 1;
+	regs.regs[0] = SEEDBOX_PROGRESS_MARK;
+	regs.regs[7] = SEEDBOX_TRANSLATOR_MARK;
+	seedbox_syscall_progress(&regs, SEEDBOX_PROGRESS_NR);
+	assert(storage.last == 1000 && user_ticks == 3 && system_ticks == 0);
+	assert(yields == 1);
 	return 0;
 }
