@@ -19,6 +19,9 @@
 //! factor) is charged as part of the next instruction only once its CPU has
 //! taken what was pending at its start: an interrupt is delivered at the time
 //! a longer run delivers it, and a CPU that stays halted is charged nothing.
+//! Timers due when a run ends run before it stops, and none run while the
+//! machine is stopped (adopting time included), whichever of QEMU's threads
+//! gets there first.
 //! So where runs end should leave no trace in the guest or its witness. The
 //! native `stop_tests` checks that on one Linux guest with one CPU and no
 //! frames, disk or host input, under nominal and throttled pricing.
