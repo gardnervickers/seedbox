@@ -88,3 +88,36 @@ fn pv_disk_server_rejects_an_exhausted_boot_count() {
 fn pv_disk_server_rejects_an_oversized_token() {
     scenario::disk_rejects_an_oversized_token(&backend());
 }
+
+/// The PV backend with full state evidence.
+fn evidenced() -> Backend<PVMachine> {
+    Backend {
+        factory: || {
+            let mut factory = Factory::new(
+                &input("SEEDBOX_PV_WORKER"),
+                &input("SEEDBOX_PV_ASSETS"),
+                super::TEST_EPOCH_SECONDS,
+            )
+            .unwrap()
+            .with_policy(seedbox_machine::definition::BackendPolicy {
+                seed: 42,
+                timer_jitter_ns: 17,
+                stop_tolerance_ns: 0,
+                torn_writes: false,
+                full_state: true,
+                seeded_pv_speed: false,
+                boot_end_evidence: false,
+                controller: None,
+            })
+            .unwrap();
+            Box::new(move |definition| factory.create(definition))
+        },
+        ..backend()
+    }
+}
+
+#[test]
+#[ignore = "requires native PV worker, rebuilt assets and network fixtures"]
+fn pv_timed_inbox_matches_one_run_per_arrival() {
+    scenario::timed_inbox_matches_one_run_per_arrival(&evidenced(), 2);
+}

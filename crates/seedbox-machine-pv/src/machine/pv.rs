@@ -287,12 +287,14 @@ pub struct PVMachine {
     /// has not received.
     in_flight: Option<InFlight>,
 }
-/// A sent run: its interval, and whether the machine was held at its start.
-#[derive(Clone, Copy)]
+/// A sent run: its interval, whether the machine was held at its start, and
+/// in a timed run the times of the timed frames offered to it, ascending.
+#[derive(Clone)]
 struct InFlight {
     now: u64,
     upto: u64,
     held: bool,
+    timed: Option<Vec<u64>>,
 }
 /// Kernel arguments for a definition: the assets' arguments plus, with a
 /// network interface, the guest's static address (`guest_network.h`).
@@ -985,15 +987,26 @@ impl PVMachine {
         }
         Ok(())
     }
-    /// Send the worker a run over `now..upto`; returns the run's start.
+    /// Send the worker a run over `now..upto`; returns the run's start. In a
+    /// timed run the last of `frames`, one per time in `timed`, are delivered
+    /// at those times.
     fn send_run(
         &mut self,
         now: u64,
         upto: u64,
         syscall_cost_ns: u64,
         frames: &[Vec<u8>],
+        timed: Option<&[u64]>,
     ) -> Result<u64, String> {
         let now = now.max(self.reached);
+        let times = timed.unwrap_or_default();
+        if times.first().is_some_and(|&first| first <= now)
+            || times.last().is_some_and(|&last| last >= upto)
+            || times.windows(2).any(|pair| pair[0] > pair[1])
+            || times.len() > frames.len()
+        {
+            return Err("PV timed frames outside their run".into());
+        }
         let shutdown = false;
         let input = self.input.clone();
         let breaks = self.breaks.clone();
@@ -1008,14 +1021,27 @@ impl PVMachine {
                 frames: 0,
                 breaks,
                 resume,
+                timed: timed.map(<[u64]>::to_vec),
             },
             frames,
         )?;
         Ok(now)
     }
-    /// Receive the run [`PVMachine::send_run`] sent, which started at `now`.
-    fn receive_run(&mut self, now: u64, upto: u64) -> Result<StopReason, String> {
-        let (time, stop, writes) = self.worker()?.receive_run()?;
+    /// Receive the run [`PVMachine::send_run`] sent, which started at `now`:
+    /// its stop, and how many of the `timed` frames it delivered.
+    fn receive_run(
+        &mut self,
+        now: u64,
+        upto: u64,
+        timed: Option<&[u64]>,
+    ) -> Result<(StopReason, usize), String> {
+        let timed = timed.unwrap_or_default();
+        let (time, stop, writes, taken) = self.worker()?.receive_run()?;
+        // Each delivered frame was delivered at its time, which the run reached.
+        let taken = usize::try_from(taken).map_err(|_| "PV timed frame count")?;
+        if taken > timed.len() || taken > 0 && timed[taken - 1] > time {
+            return Err("PV worker delivered timed frames it did not reach".into());
+        }
         if time < now || time < self.reached || time > upto {
             return Err("PV worker crossed execution interval".into());
         }
@@ -1037,7 +1063,7 @@ impl PVMachine {
             }
         }
         self.writes.extend(writes);
-        match stop {
+        let stopped: Result<StopReason, String> = match stop {
             Stop::Horizon if time == upto => {
                 self.state = State::Ready;
                 Ok(StopReason::BoundaryReached)
@@ -1093,7 +1119,8 @@ impl PVMachine {
                 })
             }
             _ => Err("PV worker returned invalid stop".into()),
-        }
+        };
+        Ok((stopped?, taken))
     }
     fn capturable(&self) -> Result<(), String> {
         if self.state == State::Invalid {
@@ -1472,6 +1499,12 @@ impl Machine for PVMachine {
         true
     }
 
+    /// The worker stops the guest at each timed frame's time and delivers
+    /// it there, as a new run from that time would.
+    fn timed_inbox(&self) -> bool {
+        true
+    }
+
     type Context = ();
     type Error = std::io::Error;
     type Snapshot = Snapshot;
@@ -1646,8 +1679,29 @@ impl SplitRun<(), std::io::Error> for PVMachine {
             // no guest work; time it spends held is a stall to the guest.
             let held = self.held;
             let upto = if held { now.max(self.reached) } else { upto };
-            let now = self.send_run(now, upto, syscall_cost_ns, &frames)?;
-            self.in_flight = Some(InFlight { now, upto, held });
+            // A timed inbox: frames dated inside the run, delivered at their
+            // times. A held machine runs nothing and leaves them untaken.
+            let mut timed = (!held && upto > now && context.inbox.is_timed()).then(Vec::new);
+            if let Some(times) = timed.as_mut() {
+                for input in context.inbox.timed() {
+                    let seedbox_machine::pv::Request::ReceiveFrame { bytes } = &input.payload
+                    else {
+                        return Err("PV timed input that is not a frame".into());
+                    };
+                    if self.network.is_none() || !seedbox_machine::pv::frame_in_bounds(bytes) {
+                        return Err("PV timed frame without a NIC or outside frame bounds".into());
+                    }
+                    times.push(input.at.as_nanos());
+                    frames.push(bytes.clone());
+                }
+            }
+            let now = self.send_run(now, upto, syscall_cost_ns, &frames, timed.as_deref())?;
+            self.in_flight = Some(InFlight {
+                now,
+                upto,
+                held,
+                timed,
+            });
             Ok(None)
         })();
         result.map_err(|error| {
@@ -1659,11 +1713,23 @@ impl SplitRun<(), std::io::Error> for PVMachine {
         })
     }
     fn finish(&mut self, context: &mut RunContext<'_, ()>) -> Result<StopReason, std::io::Error> {
-        let Some(InFlight { now, upto, held }) = self.in_flight.take() else {
+        let Some(InFlight {
+            now,
+            upto,
+            held,
+            timed,
+        }) = self.in_flight.take()
+        else {
             return Err(std::io::Error::other("PV finish without a run in flight"));
         };
         let result: Result<StopReason, String> = (|| {
-            let mut stopped = self.receive_run(now, upto)?;
+            let (mut stopped, taken) = self.receive_run(now, upto, timed.as_deref())?;
+            for _ in 0..taken {
+                context
+                    .inbox
+                    .take_timed()
+                    .ok_or("PV delivered a timed frame its inbox did not offer")?;
+            }
             if held {
                 self.state = State::Blocked(None);
                 stopped = StopReason::Blocked {

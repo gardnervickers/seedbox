@@ -163,8 +163,8 @@ impl Worker {
     pub(super) fn doorbell(&self, ticket: u64) -> Option<RawFd> {
         (self.running && !self.lost).then(|| self.stream.get_ref().watch(ticket).as_raw_fd())
     }
-    /// The second half of [`Worker::send_run`]: the stop and the guest's writes.
-    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+    /// The second half of [`Worker::send_run`] ([`RunReply`]).
+    pub(super) fn receive_run(&mut self) -> Result<RunReply> {
         if !std::mem::take(&mut self.running) {
             return Err("PV run answer without a run in flight".into());
         }
@@ -176,9 +176,12 @@ impl Worker {
             }
             stream.get_mut().finish_send().map_err(|e| e.to_string())?;
             shm::receive(stream, &prefix, |response, body| match response {
-                Response::Stopped { time, stop, writes } => {
-                    Ok(Ok((time, stop, wire::receive_writes(body, writes)?)))
-                }
+                Response::Stopped {
+                    time,
+                    stop,
+                    writes,
+                    taken,
+                } => Ok(Ok((time, stop, wire::receive_writes(body, writes)?, taken))),
                 Response::Error(error) => Ok(Err(error)),
                 _ => Err("PV worker returned unexpected run response".into()),
             })?
@@ -220,7 +223,9 @@ impl Drop for Worker {
 struct Slot {
     seat: Mutex<Seat>,
 }
-type RunReply = (u64, Stop, Vec<GuestWrite>);
+/// A run's stop time and stop, the guest's writes, and how many timed
+/// frames the guest was given.
+pub(super) type RunReply = (u64, Stop, Vec<GuestWrite>, u64);
 
 struct Seat {
     worker: Worker,
@@ -294,7 +299,7 @@ impl Occupant {
         self.slot.seat().worker.doorbell(ticket)
     }
     /// As [`Worker::receive_run`].
-    pub(super) fn receive_run(&mut self) -> Result<(u64, Stop, Vec<GuestWrite>)> {
+    pub(super) fn receive_run(&mut self) -> Result<RunReply> {
         let mut seat = self.slot.seat();
         seat.completed
             .take()
@@ -441,6 +446,7 @@ pub(crate) fn preboot_errors(executable: &Path) -> Result<Vec<Option<String>>> {
         frames: 0,
         breaks: Vec::new(),
         resume: false,
+        timed: None,
     };
     Ok(vec![
         worker.call(Request::Capture(unused.clone())).err(),

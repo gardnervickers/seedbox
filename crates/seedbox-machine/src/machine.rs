@@ -148,6 +148,17 @@ pub trait Machine {
     /// speculative state or effects exposed to the caller.
     /// A blocked machine may return without making progress.
     ///
+    /// A machine that honours a timed inbox ([`Machine::timed_inbox`]) may
+    /// be given frames dated inside its run ([`crate::pv::Inbox::with_timed`]).
+    /// It delivers each at its own time `t` exactly as a run that ended at
+    /// `t` (reaching it, or blocked earlier) followed by a run from `t`
+    /// with that frame due would: delivering inside the run changes nothing
+    /// else. It takes them in order with [`crate::pv::Inbox::take_timed`].
+    /// It may end the run before any of them wherever it could end a run
+    /// anyway (an exit, a breakpoint, a held disk request, a block); those
+    /// it did not deliver stay with the caller, and the run stops no later
+    /// than the first of them.
+    ///
     /// A stop that delivers nothing leaves no trace: splitting one execution
     /// into different `run` calls gives the same machine. A call that ends at
     /// `upto` only because `upto` came first changes no guest-visible state,
@@ -219,6 +230,13 @@ pub trait Machine {
     where
         Self: Sized,
     {
+        false
+    }
+
+    /// Whether the machine honours a timed inbox given through its run's
+    /// context (see [`Machine::run`]). The default does not, and its runs
+    /// are never given one.
+    fn timed_inbox(&self) -> bool {
         false
     }
 
