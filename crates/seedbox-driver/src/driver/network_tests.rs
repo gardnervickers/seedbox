@@ -1823,3 +1823,47 @@ fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
         );
     }
 }
+
+#[test]
+fn a_machine_not_yet_switched_on_drops_frames_and_takes_them_once_booted() {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
+    let (mut driver, log) = simple(
+        10 * MS,
+        config,
+        vec![
+            spec(Some(1))
+                .send(0, frame(mac(2), 1))
+                .send(spread + MS, frame(mac(2), 2)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    driver.stagger_boots(BOOT_SPREAD).unwrap();
+    let boot = driver.execution.machines[1]
+        .rng
+        .as_ref()
+        .unwrap()
+        .boot_delay(spread);
+    assert!(boot > MS, "the first frame arrives before the boot: {boot}");
+    barriers(&mut driver, spread + 5 * MS);
+    // The frame arriving at 1 ms was dropped, by the lane and with no run;
+    // the receiver first ran at its boot and took the later frame.
+    assert_eq!(received(&log), [(1, spread + 2 * MS, 2)]);
+    let first = log
+        .lock()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|run| run.0 == 1)
+        .copied()
+        .unwrap();
+    assert_eq!(first.1, boot);
+    let facts = driver.drain_observations().frames.facts;
+    let dropped: Vec<_> = facts
+        .iter()
+        .filter(|fact| matches!(fact.fate, FrameFate::ReceiverDropped))
+        .map(|fact| fact.due)
+        .collect();
+    assert_eq!(dropped, [Some(at(MS))]);
+}

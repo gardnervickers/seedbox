@@ -55,7 +55,15 @@ fn linux_boots_owned_inputs_on_the_fixed_x86_microvm_board() {
         value(&arguments, "-rtc"),
         ["base=1970-01-01T00:00:00,clock=vm"]
     );
-    assert_eq!(value(&arguments, "-append"), ["console=ttyS0"]);
+    // The boot seed (7) selects the guest entropy and the realtime offset.
+    assert_eq!(value(&arguments, "-seed"), ["7"]);
+    assert_eq!(
+        value(&arguments, "-append"),
+        [format!(
+            "console=ttyS0 seedbox.clock_offset_ns={}",
+            seedbox_machine::clock::boot_realtime_offset_ns(7)
+        )]
+    );
     for (flag, name, bytes) in [
         ("-bios", "firmware", [3; 4]),
         ("-kernel", "kernel", [1; 4]),

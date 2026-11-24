@@ -119,6 +119,7 @@ impl<T> Entry<T> {
             inbox: self.inbox.clone(),
             staged: self.staged.clone(),
             last_ended_published: self.last_ended_published,
+            powered_off: self.powered_off,
         }
     }
 }

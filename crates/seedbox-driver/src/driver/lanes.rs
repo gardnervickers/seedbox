@@ -18,7 +18,8 @@ struct Arrival {
     delivery: network::Delivery,
     /// The frame's length; its bytes move to the receiver's inbox.
     len: usize,
-    /// Whether its receiver had exited by the arrival.
+    /// Whether its receiver had exited, or was not yet switched on, by the
+    /// arrival.
     dropped: bool,
 }
 
@@ -53,7 +54,7 @@ where
     M::Error: Send + 'static,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
-    /// receiver drops them there. A paused or suspended receiver admits them
+    /// or not yet switched on receiver drops them there. A paused or suspended receiver admits them
     /// at a round boundary instead, in a zero-budget run. These states cannot
     /// change before the round commits.
     pub(super) fn lane_receivers(&self) -> Vec<bool> {
@@ -64,7 +65,7 @@ where
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                matches!(entry.stopped, StopReason::Exited { .. })
+                entry.drops_frames()
                     || !entry.lifecycle.paused()
                         && !(any_suspended
                             && breaks.suspended(&control::Control::source(MachineId(index))))
@@ -170,7 +171,7 @@ where
             let entry = &mut self.execution.machines[id.0];
             let next = entry.next();
             if let Some(at) = arrival {
-                if matches!(entry.stopped, StopReason::Exited { .. }) {
+                if entry.drops_frames() {
                     while let Some(&index) = window.lanes[id.0].front() {
                         window.arrivals[index].dropped = true;
                         window.lanes[id.0].pop_front();

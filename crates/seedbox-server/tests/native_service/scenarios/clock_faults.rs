@@ -103,7 +103,8 @@ fn readings(output: &str, times: &[(usize, u64)]) -> Vec<Reading> {
             end += line.len();
             let at = times.iter().find(|(offset, _)| *offset >= end).unwrap().1;
             let words: Vec<_> = line.split_whitespace().collect();
-            assert_eq!(words.len(), 5, "unexpected native clock output: {line}");
+            assert_eq!(words.len(), 6, "unexpected native clock output: {line}");
+            assert!(words[5].starts_with("off="), "{line}");
             let number =
                 |index: usize, prefix| words[index].strip_prefix(prefix).unwrap().parse().unwrap();
             Reading {

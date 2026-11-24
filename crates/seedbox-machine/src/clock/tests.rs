@@ -10,3 +10,39 @@ fn rate_bounds_are_exact() {
     }
     assert_eq!(ClockRate::default(), ClockRate::NOMINAL);
 }
+
+#[test]
+fn boot_realtime_offsets_are_bounded_deterministic_and_spread() {
+    let offsets: Vec<i64> = (0..4096u64).map(boot_realtime_offset_ns).collect();
+    assert_eq!(
+        offsets,
+        (0..4096u64)
+            .map(boot_realtime_offset_ns)
+            .collect::<Vec<_>>()
+    );
+    assert!(offsets.iter().all(|o| o.abs() <= REALTIME_OFFSET_BOUND_NS));
+    let distinct: std::collections::BTreeSet<_> = offsets.iter().collect();
+    assert!(distinct.len() > 4000, "{} distinct", distinct.len());
+    // Both signs, and spread across the whole range.
+    assert!(offsets
+        .iter()
+        .any(|&o| o < -REALTIME_OFFSET_BOUND_NS * 9 / 10));
+    assert!(offsets
+        .iter()
+        .any(|&o| o > REALTIME_OFFSET_BOUND_NS * 9 / 10));
+    // Neighbouring boot seeds, as consecutive draws often are, still differ.
+    assert_ne!(boot_realtime_offset_ns(1), boot_realtime_offset_ns(2));
+}
+
+#[test]
+fn boot_command_line_appends_one_offset_argument() {
+    let offset = boot_realtime_offset_ns(7);
+    assert_eq!(
+        boot_command_line("console=ttyAMA0 quiet", 7),
+        format!("console=ttyAMA0 quiet seedbox.clock_offset_ns={offset}")
+    );
+    assert_eq!(
+        boot_command_line("", 7),
+        format!("seedbox.clock_offset_ns={offset}")
+    );
+}

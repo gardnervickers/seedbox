@@ -1184,7 +1184,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
 
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
-fn tcg_native_boot_realtime_is_epoch_plus_machine_counter() {
+fn tcg_native_boot_realtime_is_epoch_plus_machine_counter_and_offset() {
     let serial = boot_epoch(1);
     assert_eq!(serial, boot_epoch(2));
     assert_eq!(serial, boot_epoch(4));
@@ -1230,10 +1230,13 @@ fn check_boot_epoch_clocks(clocks: &[u64]) {
     let lower = (i128::from(raw0) - i128::from(m2)).max(i128::from(raw1) - i128::from(m4));
     let upper = (i128::from(raw0) - i128::from(m1)).min(i128::from(raw1) - i128::from(m3));
     assert!(lower <= upper, "RAW/MONO offset changed across the probe");
-    let epoch = u64::from(TEST_EPOCH_SECONDS) * 1_000_000_000;
+    // Realtime is the epoch plus the counter, which leads monotonic by the
+    // boot before the kernel clocksource, plus the boot's bounded offset.
+    let epoch = i128::from(TEST_EPOCH_SECONDS) * 1_000_000_000;
+    let offset = i128::from(seedbox_machine::clock::REALTIME_OFFSET_BOUND_NS);
     for (realtime, before) in [(rt0, m0), (rt1, m2)] {
-        let since_epoch = realtime - epoch;
-        assert!(since_epoch > before && since_epoch - before < 1_000_000_000);
+        let lead = i128::from(realtime) - epoch - i128::from(before);
+        assert!(lead > -offset && lead < 1_000_000_000 + offset);
     }
     // No sample-quantization assertion: the former 10MHz RISC-V CSR does
     // not describe x86 POSIX clocks. Even a 1GHz TSC can back a kernel that

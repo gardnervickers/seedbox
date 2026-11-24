@@ -113,11 +113,11 @@ pub enum Request {
     /// (the Driver settles it Rejected without failing); a malformed, missing
     /// or late acknowledgment remains a fatal protocol failure. Linux refuses a step that would
     /// put CLOCK_REALTIME below CLOCK_MONOTONIC, so a negative step can be at
-    /// most the boot's realtime lead over monotonic (its epoch plus the counter
-    /// that elapsed before the kernel clocksource started). The ID shares the per-boot correlation space of
+    /// most the boot's realtime lead over monotonic (its epoch plus its realtime
+    /// offset plus the counter that elapsed before the kernel clocksource started). The ID shares the per-boot correlation space of
     /// `Application` and must not be reused within a machine incarnation.
     /// The step is guest kernel state: it ends with crash, reboot or exit, and
-    /// every boot starts realtime from the machine's epoch again.
+    /// every boot starts realtime from the machine's epoch and its own offset again.
     StepRealtime {
         /// Caller-assigned command correlation ID.
         id: NonZeroU32,

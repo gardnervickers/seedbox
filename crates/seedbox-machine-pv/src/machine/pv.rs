@@ -724,7 +724,9 @@ impl PVMachine {
                 initrd: self.directory.path().join("initrd"),
                 seed,
                 now,
-                command_line: self.command_line.clone(),
+                // The boot's realtime offset derives from its seed, like
+                // its rng-seed; a restored image keeps the one it booted with.
+                command_line: seedbox_machine::clock::boot_command_line(&self.command_line, seed),
                 disk,
                 network: self.network,
                 policy: Box::new(selected.clone()),

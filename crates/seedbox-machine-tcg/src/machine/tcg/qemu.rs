@@ -664,8 +664,9 @@ fn command(
             command_line,
             epoch_seconds,
         } => {
-            // The CMOS RTC reads epoch plus the virtual clock, matching
-            // the realtime the supervisor sets; no host wall clock is read.
+            // The CMOS RTC reads epoch plus the virtual clock, the realtime
+            // the supervisor sets less the boot's sub-second offset; no host
+            // wall clock is read.
             // The BIOS loads the kernel, initramfs and exact command line
             // from fw_cfg.
             command
@@ -682,7 +683,14 @@ fn command(
                 Initramfs::File { path, .. } => path.to_path_buf(),
             });
             command.arg("-bios").arg(write("firmware", firmware)?);
-            command.arg("-append").arg(command_line);
+            // The boot's realtime offset derives from its seed, like the
+            // guest entropy `-seed` selects.
+            command
+                .arg("-append")
+                .arg(seedbox_machine::clock::boot_command_line(
+                    command_line,
+                    seed,
+                ));
         }
     }
     // Connected anonymous sockets supplied through stdio. No pathname limit,
