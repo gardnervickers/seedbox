@@ -119,7 +119,14 @@ sleeps in its oldest run for that round, on that worker's own pipe. The default
 spin ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
 monitored wait and a 400 µs VM ceiling. Other hosts, including Macs without
 FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after consecutive unproductive spins.
+A PV machine on a clock without drift has a timed inbox: its lane run goes to the round's end and is given
+every frame that arrives for it before then, instead of ending at each arrival. The worker makes, inside the run,
+exactly the runs the client would have made: to each frame's time with the frames due then, and on from a block at
+its wake or the next frame, whichever comes first. Frames it did not reach (an exit, a breakpoint, a held disk
+request) go back to the lane. Tests turn this off with `Driver::set_timed_inbox` and, for whole runs, the
+`SEEDBOX_TIMED_INBOX=0` performance parameter of a `test-support` worker.
 [Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+[Lanes](../crates/seedbox-driver/src/driver/lanes.rs) ·
 [Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
 
 ## Same-time controls

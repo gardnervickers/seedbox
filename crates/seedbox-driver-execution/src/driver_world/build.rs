@@ -66,6 +66,25 @@ fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<(
         ))
     }
 }
+/// Turn timed inboxes off when the request asks, which only a test-support
+/// build can.
+fn timed_inbox(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    if !request.no_timed_inbox {
+        return Ok(());
+    }
+    #[cfg(feature = "test-support")]
+    {
+        driver.set_timed_inbox(false);
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = driver;
+        Err(bad(
+            "turning timed inboxes off needs a worker built with test support",
+        ))
+    }
+}
 /// Native PV executes each vCPU in its own process. Only TCG needs host
 /// threads for blocking machine calls. Restore uses the same selection.
 fn execution_threads(request: &wire::Request) -> usize {
@@ -160,6 +179,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     // The engine decides the oracle's device faults and breakpoints.
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
     stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -362,6 +382,7 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     .map_err(|e| bad(e.to_string()))?;
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
     stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }

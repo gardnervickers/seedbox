@@ -6,7 +6,11 @@
 //! Driver's own boundaries. It also runs with machines whose runs stay in
 //! flight on the Driver's thread, as a PV machine's do
 //! ([`Machine::split_run`]), under the Driver's own stops and under each
-//! policy. The runs must agree on:
+//! policy. All those runs give no machine a timed inbox, so each frame
+//! arriving inside a lane ends its receiver's run. Last, it runs with timed
+//! inboxes, whose runs take the frames arriving inside them at their times
+//! ([`Machine::timed_inbox`]), lent and split, under the Driver's own stops
+//! and under each policy. The runs must agree on:
 //!
 //! - the event stream, with each event's `position` removed (it counts commits);
 //! - Driver policy evidence, as written, at a few times the host asks for a
@@ -128,70 +132,73 @@ impl Script {
     }
 }
 
-impl Machine for Script {
-    type Context = ();
-    type Error = std::io::Error;
-    type Snapshot = ();
-
-    fn run(
+impl Script {
+    /// Take one input at machine time `start`.
+    fn take(
         &mut self,
         context: &mut RunContext<'_, ()>,
-        upto: Timestamp,
-    ) -> Result<StopReason, Self::Error> {
-        let start = context.clock.now();
-        self.reached = self.reached.max(start);
-        let seen = self.seen.clone();
-        let mut seen = seen.lock().unwrap();
-        while let Some(input) = context.inbox.take() {
-            seen.push(format!("in {} {:?}", input.at.as_nanos(), input.payload));
-            let ack = |id, result| Response::CommandAcknowledged { id, result };
-            match input.payload {
-                Request::Crash => {
-                    self.exited = true;
-                    self.held = false;
-                }
-                Request::Reboot => self.exited = false,
-                Request::ReceiveFrame { bytes } if !self.exited => {
-                    let mut body = [0; 4];
-                    context.rng.fill_bytes(&mut body);
-                    seen.push(format!("draw {body:?}"));
-                    let tag = bytes[14];
-                    if let Some(to) = self.echo.filter(|_| tag < ECHO_LIMIT) {
-                        let reply = Response::TransmitFrame {
-                            bytes: frame(to, tag + 1, &body),
-                        };
-                        self.later(start + 1, reply);
-                    }
-                }
-                Request::Application { id, .. } if self.acks && !self.exited => {
-                    self.later(start + 1, ack(id, CommandResult::Completed));
-                }
-                Request::StepRealtime { id, nanoseconds } if self.acks && !self.exited => {
-                    let result = if nanoseconds.get() % 2 == 0 {
-                        CommandResult::Completed
-                    } else {
-                        CommandResult::Rejected
-                    };
-                    self.later(start + 1, ack(id, result));
-                }
-                Request::DeclareBreaks { names } => self.declared = names,
-                Request::ResumeBreak => self.held = false,
-                _ => {}
+        seen: &mut Vec<String>,
+        input: seedbox_machine::pv::Input,
+        start: u64,
+    ) {
+        seen.push(format!("in {} {:?}", input.at.as_nanos(), input.payload));
+        let ack = |id, result| Response::CommandAcknowledged { id, result };
+        match input.payload {
+            Request::Crash => {
+                self.exited = true;
+                self.held = false;
             }
+            Request::Reboot => self.exited = false,
+            Request::ReceiveFrame { bytes } if !self.exited => {
+                let mut body = [0; 4];
+                context.rng.fill_bytes(&mut body);
+                seen.push(format!("draw {body:?}"));
+                let tag = bytes[14];
+                if let Some(to) = self.echo.filter(|_| tag < ECHO_LIMIT) {
+                    let reply = Response::TransmitFrame {
+                        bytes: frame(to, tag + 1, &body),
+                    };
+                    self.later(start + 1, reply);
+                }
+            }
+            Request::Application { id, .. } if self.acks && !self.exited => {
+                self.later(start + 1, ack(id, CommandResult::Completed));
+            }
+            Request::StepRealtime { id, nanoseconds } if self.acks && !self.exited => {
+                let result = if nanoseconds.get() % 2 == 0 {
+                    CommandResult::Completed
+                } else {
+                    CommandResult::Rejected
+                };
+                self.later(start + 1, ack(id, result));
+            }
+            Request::DeclareBreaks { names } => self.declared = names,
+            Request::ResumeBreak => self.held = false,
+            _ => {}
         }
+    }
+
+    /// One run from `start` to `end` at most, having taken the inputs due
+    /// at `start`.
+    fn segment(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        seen: &mut Vec<String>,
+        start: u64,
+        end: u64,
+    ) -> StopReason {
         if self.exited {
-            return Ok(StopReason::Exited {
+            return StopReason::Exited {
                 reached: at(self.reached),
                 reason: ExitReason::Crashed,
-            });
+            };
         }
         if self.held {
-            return Ok(StopReason::Blocked {
+            return StopReason::Blocked {
                 reached: at(self.reached),
                 deadline: None,
-            });
+            };
         }
-        let end = upto.as_nanos();
         let late = self.late_exit;
         let exit = self
             .exit
@@ -211,33 +218,101 @@ impl Machine for Script {
                 }
                 self.reached = self.reached.max(t);
                 self.held = true;
-                emit(context, &mut seen, t, payload);
-                return Ok(StopReason::Blocked {
+                emit(context, seen, t, payload);
+                return StopReason::Blocked {
                     reached: at(self.reached),
                     deadline: None,
-                });
+                };
             }
             self.reached = self.reached.max(t);
-            emit(context, &mut seen, t, payload);
+            emit(context, seen, t, payload);
         }
         if let Some(exit) = exit {
             self.exited = true;
             self.reached = exit;
             seen.push(format!("exit {exit}"));
-            return Ok(StopReason::Exited {
+            return StopReason::Exited {
                 reached: at(exit),
                 reason: ExitReason::Shutdown,
-            });
+            };
         }
         if self.busy {
             self.reached = end;
-            return Ok(StopReason::BoundaryReached);
+            return StopReason::BoundaryReached;
         }
         let deadline = self.sends.front().map(|(t, _)| *t).into_iter();
-        Ok(StopReason::Blocked {
+        StopReason::Blocked {
             reached: at(self.reached),
             deadline: deadline.chain(self.exit).min().map(at),
-        })
+        }
+    }
+}
+
+/// The time of the first timed input still offered.
+fn next_timed(context: &RunContext<'_, ()>) -> Option<u64> {
+    context
+        .inbox
+        .timed()
+        .next()
+        .map(|input| input.at.as_nanos())
+}
+
+impl Machine for Script {
+    type Context = ();
+    type Error = std::io::Error;
+    type Snapshot = ();
+
+    /// It takes each timed frame at its time, as the run from there would:
+    /// its run is a series of such runs, each up to the next frame.
+    fn timed_inbox(&self) -> bool {
+        true
+    }
+
+    fn run(
+        &mut self,
+        context: &mut RunContext<'_, ()>,
+        upto: Timestamp,
+    ) -> Result<StopReason, Self::Error> {
+        let upto = upto.as_nanos();
+        let mut start = context.clock.now();
+        let seen = self.seen.clone();
+        let mut seen = seen.lock().unwrap();
+        let mut first = true;
+        loop {
+            self.reached = self.reached.max(start);
+            if first {
+                while let Some(input) = context.inbox.take() {
+                    self.take(context, &mut seen, input, start);
+                }
+                first = false;
+            } else {
+                while next_timed(context) == Some(start) {
+                    let input = context.inbox.take_timed().unwrap();
+                    self.take(context, &mut seen, input, start);
+                }
+            }
+            let next = next_timed(context);
+            let stop = self.segment(context, &mut seen, start, next.unwrap_or(upto));
+            // Go on where the Driver would at once start this machine's
+            // next run inside this one: at the next timed frame, or at a
+            // wake before the run's bound.
+            let resume = match stop {
+                StopReason::BoundaryReached => next.filter(|&at| at == self.reached),
+                StopReason::Blocked { deadline, reached }
+                    if !self.held && context.inbox.is_timed() =>
+                {
+                    let wake = deadline
+                        .map(Timestamp::as_nanos)
+                        .filter(|&wake| wake > reached.as_nanos() && wake < upto);
+                    wake.into_iter().chain(next).min()
+                }
+                _ => None,
+            };
+            match resume {
+                Some(at) => start = at,
+                None => return Ok(stop),
+            }
+        }
     }
 
     fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), Self::Error>> {
@@ -372,8 +447,8 @@ fn networked(index: usize) -> MachineDefinition {
     definition
 }
 
-/// Run `scenario` to its end. Returns its results and how many barriers the
-/// host saw on the way.
+/// Run `scenario` to its end without timed inboxes. Returns its results and
+/// how many barriers the host saw on the way.
 fn run(scenario: &Scenario, policy: Option<u64>) -> (Results, usize) {
     run_with(scenario, policy, QUANTUM, &[])
 }
@@ -386,18 +461,21 @@ fn run_with(
     quantum: Duration,
     barriers: &[u64],
 ) -> (Results, usize) {
-    run_as(scenario, policy, quantum, barriers, false)
+    let (results, barriers, _) = run_as(scenario, policy, quantum, barriers, false, false);
+    (results, barriers)
 }
 
 /// [`run_with`], every machine's runs staying in flight on the Driver's
-/// thread if `split`.
+/// thread if `split`, and machines given timed inboxes if `timed`. Also
+/// returns how many frames machines took inside their runs.
 fn run_as(
     scenario: &Scenario,
     policy: Option<u64>,
     quantum: Duration,
     barriers: &[u64],
     split: bool,
-) -> (Results, usize) {
+    timed: bool,
+) -> (Results, usize, u64) {
     let seen: Vec<Seen> = scenario.machines.iter().map(|_| Seen::default()).collect();
     let mut machines: VecDeque<Script> = scenario
         .machines
@@ -448,6 +526,7 @@ fn run_as(
         })
         .unwrap();
     driver.set_stop_policy(policy.map(StopPolicy::seeded));
+    driver.set_timed_inbox(timed);
     for &barrier in barriers {
         while matches!(
             driver.step(at(barrier)).unwrap(),
@@ -481,6 +560,7 @@ fn run_as(
         looks.push(evidence(&mut driver));
     }
     let outcome = outcome.unwrap();
+    let taken = driver.timed_frames_taken();
     let drained = driver.drain_observations();
     let events = drained
         .events
@@ -517,7 +597,7 @@ fn run_as(
             .map(|seen| seen.lock().unwrap().clone())
             .collect(),
     };
-    (results, barriers)
+    (results, barriers, taken)
 }
 
 /// The first difference between two lists, for a readable failure.
@@ -561,8 +641,10 @@ fn differences(own: &Results, other: &Results) -> Vec<String> {
 
 /// Run `scenario` with the Driver's own stops, under every policy seed and
 /// with every other quantum, and with split machines under the Driver's own
-/// stops and every policy seed. Returns the results under the Driver's own
-/// stops, and what differed from them in each other run.
+/// stops and every policy seed; then with timed inboxes, lent and split,
+/// under the Driver's own stops and every policy seed. Returns the results
+/// under the Driver's own stops, and what differed from them in each other
+/// run.
 fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
     let (own, own_barriers) = run(scenario, None);
     let mut found = Vec::new();
@@ -585,12 +667,38 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
         }
     }
     for policy in std::iter::once(None).chain(SEEDS.map(Some)) {
-        let (other, _) = run_as(scenario, policy, QUANTUM, &[], true);
+        let (other, _, _) = run_as(scenario, policy, QUANTUM, &[], true, false);
         let differences = differences(&own, &other);
         if !differences.is_empty() {
             found.push((format!("split, policy {policy:?}"), differences));
         }
     }
+    // Timed inboxes: frames arriving inside a run are taken at their times
+    // in that run.
+    let mut taken = 0;
+    for policy in std::iter::once(None).chain(SEEDS.map(Some)) {
+        for split in [false, true] {
+            let (other, _, timed) = run_as(scenario, policy, QUANTUM, &[], split, true);
+            taken += timed;
+            let differences = differences(&own, &other);
+            if !differences.is_empty() {
+                found.push((
+                    format!("timed inboxes, split {split}, policy {policy:?}"),
+                    differences,
+                ));
+            }
+        }
+    }
+    let frames = own
+        .seen
+        .iter()
+        .flatten()
+        .any(|seen| seen.contains("ReceiveFrame"));
+    // A machine held at a breakpoint takes its frames in zero-budget runs.
+    assert!(
+        taken > 0 || !frames || scenario.breaks,
+        "no frame was taken inside a run"
+    );
     (own, found)
 }
 

@@ -52,6 +52,7 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
         output,
         machine_workers: 1,
         stop_policy: None,
+        no_timed_inbox: false,
         start_paused: false,
         full_state: false,
         observations: None,

@@ -357,7 +357,10 @@ fn machine_worker_count_never_changes_results() {
 /// history), write the baseline's output, and match the other. Each is
 /// stepped through its first quanta, as a reference run without the policy
 /// is; both commit more barriers on the way than the reference, at different
-/// counts, which shows that the policy acted.
+/// counts, which shows that the policy acted. A third server does the same
+/// without timed inboxes (`SEEDBOX_TIMED_INBOX=0`, which the long suites' CLI
+/// build accepts), which are on by default: its runs make one run per frame
+/// arrival and must still match the baseline.
 #[test]
 fn stops_and_quantum_never_change_results() {
     let mut run = Run::new("stops");
@@ -405,13 +408,39 @@ fn stops_and_quantum_never_change_results() {
             }
         };
         let mut stopped = run.session(&state, Some(3));
-        stopped.document = document;
+        stopped.document = document.clone();
         run.oracle(
             "StopPolicyInvariance",
-            stopped.stop_invariance((&baseline, &record), &output, &reference),
+            stopped.stop_invariance((&baseline, &record), &output, &reference, &[]),
         )
         .await;
         run.release(stopped.release(&[])).await;
+        // Without timed inboxes, under the same seeded stops.
+        drop(server.take());
+        let untimed = [
+            (seedbox_driver_execution::driver_world::STOP_POLICY, "4242"),
+            (seedbox_driver_execution::driver_world::TIMED_INBOX, "0"),
+        ];
+        server = match run.server_with(&state, &untimed) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                run.failures.push(format!("timed-inbox server: {error}"));
+                return;
+            }
+        };
+        let mut inbox = run.session(&state, Some(3));
+        inbox.document = document;
+        run.oracle(
+            "TimedInboxInvariance",
+            inbox.stop_invariance(
+                (&baseline, &record),
+                &output,
+                &reference,
+                &[(seedbox_driver_execution::driver_world::TIMED_INBOX, "0")],
+            ),
+        )
+        .await;
+        run.release(inbox.release(&[])).await;
     });
     drop(server);
     run.finish();

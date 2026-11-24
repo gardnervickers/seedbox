@@ -27,6 +27,8 @@ pub struct DriverExecutor {
     /// Seed of a host stop policy for the worker's Driver (see
     /// [`STOP_POLICY`]).
     stop_policy: Option<String>,
+    /// The launch environment's [`TIMED_INBOX`] value.
+    timed_inbox: Option<String>,
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
@@ -42,6 +44,14 @@ pub struct DriverExecutor {
 /// draws from to its stderr; `exact:` and that seed gives a later run the
 /// same policy, for repeating one run's stops.
 pub const STOP_POLICY: &str = "SEEDBOX_STOP_POLICY";
+/// Performance parameter, and launch environment variable, that turns the
+/// worker's timed inboxes off when set to `0`, its only value: each machine
+/// then runs once per frame arrival instead of taking the frames that arrive
+/// inside a run at their times (`seedbox_driver::driver::Driver::
+/// set_timed_inbox`), which must change no result. The whole-run oracle uses
+/// it to compare. Only a worker built with `test-support` takes it; any other
+/// refuses the run.
+pub const TIMED_INBOX: &str = "SEEDBOX_TIMED_INBOX";
 /// Prefix of a [`STOP_POLICY`] value that is used as given.
 const EXACT: &str = "exact:";
 /// The seed a worker's stop policy draws from: `value` is the
@@ -97,6 +107,7 @@ impl DriverExecutor {
             environment: vec![],
             session_lease: None,
             stop_policy: None,
+            timed_inbox: None,
             #[cfg(feature = "worker-failure")]
             failure_test: None,
         })
@@ -151,7 +162,8 @@ impl DriverExecutor {
     /// environment discovered by this library. These are transient host inputs,
     /// never retained simulation metadata. Without this builder the environment
     /// is empty and no session is borrowed. A [`STOP_POLICY`] seed in
-    /// `environment` selects a stop policy, as [`Self::with_stop_policy`] does.
+    /// `environment` selects a stop policy, as [`Self::with_stop_policy`] does,
+    /// and [`TIMED_INBOX`] turns timed inboxes off.
     // The monitor crosses a process boundary; ambient inheritance or searching
     // output ancestors would lose explicit cleanup authority.
     pub fn with_launch_context(
@@ -162,6 +174,10 @@ impl DriverExecutor {
         if let Some((_, seed)) = environment.iter().find(|(key, _)| key == STOP_POLICY) {
             // The run refuses a value that names no seed.
             self.stop_policy = Some(seed.to_string_lossy().into_owned());
+        }
+        if let Some((_, value)) = environment.iter().find(|(key, _)| key == TIMED_INBOX) {
+            // The run refuses any value but `0`.
+            self.timed_inbox = Some(value.to_string_lossy().into_owned());
         }
         self.environment = environment;
         self.session_lease = session_lease;
@@ -215,6 +231,9 @@ impl ExecutionBackend for DriverExecutor {
             BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())]);
         if let Some(seed) = &self.stop_policy {
             parameters.insert(STOP_POLICY.into(), seed.clone());
+        }
+        if let Some(value) = &self.timed_inbox {
+            parameters.insert(TIMED_INBOX.into(), value.clone());
         }
         parameters
     }

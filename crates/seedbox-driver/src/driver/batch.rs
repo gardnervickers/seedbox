@@ -7,16 +7,18 @@ use super::*;
 /// time base, and the simulation time its machine times map from.
 pub(super) type BatchBounds = BTreeMap<MachineId, (Timestamp, Timestamp, usize, Timestamp)>;
 
-/// A batch machine's start, bound and due inputs, in its own time base.
-pub(super) type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>);
+/// A batch machine's start, bound and due inputs, in its own time base, and
+/// whether its inbox is a timed one: inputs after the due ones are dated
+/// inside the run ([`Inbox::with_timed`]).
+pub(super) type BatchView = (MachineId, Timestamp, Timestamp, VecDeque<Input>, bool);
 
-/// A worker's finished run: the lent machine and RNG, how many offered
-/// inputs it left, and its outputs and stop, in its own time base.
+/// A worker's finished run: the lent machine and RNG, the offered inputs it
+/// left, and its outputs and stop, in its own time base.
 pub(super) struct RunResult<M: Machine> {
     pub(super) id: MachineId,
     machine: M,
     rng: SeededRng,
-    remaining: usize,
+    pub(super) leftover: VecDeque<Input>,
     outputs: Vec<crate::pv::Output>,
     stopped: Result<StopReason, Error<M::Error>>,
 }
@@ -32,6 +34,7 @@ pub(super) struct Flight<M: Machine> {
     outputs: Vec<crate::pv::Output>,
     start: Timestamp,
     bound: Timestamp,
+    timed: bool,
     execution: crate::execution::ExecutionConfig,
 }
 
@@ -57,7 +60,7 @@ impl<M: Machine> Flight<M> {
                     clock: &FixedClock(self.start.as_nanos()),
                     rng: &mut self.rng,
                     execution: self.execution,
-                    inbox: Inbox::new(&mut self.inbox, self.start),
+                    inbox: run_inbox(&mut self.inbox, self.start, self.bound, self.timed),
                     outbox: Outbox::new(&mut self.outputs, self.start, self.bound),
                 },
             )
@@ -94,12 +97,28 @@ impl<M: Machine> Flight<M> {
     pub(super) fn result(self, stopped: Result<StopReason, Error<M::Error>>) -> RunResult<M> {
         RunResult {
             id: self.id,
-            remaining: self.inbox.len(),
+            leftover: self.inbox,
             machine: self.machine,
             rng: self.rng,
             outputs: self.outputs,
             stopped,
         }
+    }
+}
+
+/// A run's inbox, due through `start`, and in a timed run also offering the
+/// inputs dated before `bound`.
+fn run_inbox(
+    inputs: &mut VecDeque<Input>,
+    start: Timestamp,
+    bound: Timestamp,
+    timed: bool,
+) -> Inbox<'_> {
+    let inbox = Inbox::new(inputs, start);
+    if timed {
+        inbox.with_timed(bound)
+    } else {
+        inbox
     }
 }
 
@@ -123,6 +142,18 @@ pub(super) struct AcceptedRun {
     /// A pending timer, in machine time.
     timer: Option<Timestamp>,
     last_ended: Option<u64>,
+}
+
+impl AcceptedRun {
+    /// The simulation time the run reached.
+    pub(super) fn reached(&self) -> Timestamp {
+        self.reached
+    }
+
+    /// Its stop, in simulation time.
+    pub(super) fn stopped(&self) -> StopReason {
+        self.stopped
+    }
 }
 
 impl<M> Driver<M>
@@ -249,7 +280,8 @@ where
 
     /// Inputs and bounds for one machine, also used directly by a lane, and
     /// the simulation time its machine times map from. `admission` is as
-    /// for [`Self::batch_views`].
+    /// for [`Self::batch_views`]. Its inbox is not a timed one; a lane makes
+    /// it one and adds the inputs dated inside the run.
     pub(super) fn batch_view(
         &self,
         id: MachineId,
@@ -281,7 +313,7 @@ where
                 })
             })
             .collect::<Result<VecDeque<_>, ClockOverflow>>()?;
-        Ok(((id, start, bound, inbox), lower))
+        Ok(((id, start, bound, inbox, false), lower))
     }
 
     /// Run every view on the workers and return each machine and its RNG to
@@ -316,7 +348,7 @@ where
     /// Lend one view's machine and RNG to a job that runs it on a worker.
     pub(super) fn run_job(
         &mut self,
-        (id, start, bound, mut inbox): BatchView,
+        (id, start, bound, inbox, timed): BatchView,
     ) -> (
         usize,
         impl FnOnce(&mut M::Context) -> RunResult<M> + Send + 'static,
@@ -326,6 +358,7 @@ where
         let mut rng = entry.rng.take().expect("stopped machine RNG");
         let execution = entry.lifecycle.execution();
         let job = move |context: &mut M::Context| {
+            let mut leftover = inbox;
             let mut outputs = Vec::new();
             let stopped = catch_unwind(AssertUnwindSafe(|| {
                 machine.run(
@@ -334,7 +367,7 @@ where
                         clock: &FixedClock(start.as_nanos()),
                         rng: &mut rng,
                         execution,
-                        inbox: Inbox::new(&mut inbox, start),
+                        inbox: run_inbox(&mut leftover, start, bound, timed),
                         outbox: Outbox::new(&mut outputs, start, bound),
                     },
                     bound,
@@ -346,7 +379,7 @@ where
                 id,
                 machine,
                 rng,
-                remaining: inbox.len(),
+                leftover,
                 outputs,
                 stopped,
             }
@@ -367,7 +400,10 @@ where
 
     /// Start one view's run on this thread, as [`Driver::run_job`]'s job
     /// would run it, and keep it in flight unless it finished at once.
-    pub(super) fn start_flight(&mut self, (id, start, bound, inbox): BatchView) -> Started<M> {
+    pub(super) fn start_flight(
+        &mut self,
+        (id, start, bound, inbox, timed): BatchView,
+    ) -> Started<M> {
         let entry = &mut self.execution.machines[id.0];
         let mut flight = Flight {
             id,
@@ -377,6 +413,7 @@ where
             outputs: Vec::new(),
             start,
             bound,
+            timed,
             execution: entry.lifecycle.execution(),
         };
         match flight.call(self.workers.caller(), |machine, context| {
@@ -400,10 +437,11 @@ where
             id,
             machine,
             rng,
-            remaining,
+            leftover,
             outputs,
             stopped,
         } = result;
+        let remaining = leftover.len();
         let entry = &mut self.execution.machines[id.0];
         entry.machine = Some(machine);
         entry.rng = Some(rng);

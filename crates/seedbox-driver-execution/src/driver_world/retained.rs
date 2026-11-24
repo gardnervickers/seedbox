@@ -485,6 +485,11 @@ pub(crate) fn request(
                 .ok_or_else(|| bad("invalid Driver stop policy seed"))
         })
         .transpose()?;
+    let no_timed_inbox = match request.performance_parameters.get(super::TIMED_INBOX) {
+        None => false,
+        Some(value) if value == "0" => true,
+        Some(_) => return Err(bad("invalid Driver timed inbox parameter")),
+    };
     super::build::check_program_engine(request.program, &prepared.inventory)?;
     Ok(wire::Request {
         prepared,
@@ -495,6 +500,7 @@ pub(crate) fn request(
         output,
         machine_workers: workers,
         stop_policy,
+        no_timed_inbox,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode
             == crate::execution::WitnessMode::FullState,

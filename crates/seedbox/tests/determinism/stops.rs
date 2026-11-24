@@ -37,12 +37,15 @@ impl Session {
     /// rounds, whose barrier counts after each of the first steps are
     /// `reference`. Each must have the results of the baseline, which an
     /// earlier server ran: its retained record gives its outcome, witness,
-    /// full state and fault history, and `output` is what it wrote.
+    /// full state and fault history, and `output` is what it wrote. Each
+    /// must also have run with the performance parameters in `also`, which
+    /// the baseline did not.
     pub async fn stop_invariance(
         &self,
         baseline: (&SimulationId, &RunRecord),
         output: &[Record],
         reference: &[u64],
+        also: &[(&str, &str)],
     ) -> Outcome {
         let (first, first_counts) = self.stepped().await?;
         let (second, second_counts) = self.stepped().await?;
@@ -63,6 +66,12 @@ impl Session {
                 baseline.0
             ));
         }
+        if let Some((key, _)) = also
+            .iter()
+            .find(|(key, _)| baseline.1.performance_parameters.contains_key(*key))
+        {
+            return Err(format!("the baseline {} ran with {key}", baseline.0));
+        }
         // Each worker names the seed its stops came from; a failure repeats
         // it, so that the run's stops can be had again.
         let seeds = format!("{}\n{}", self.stop_seed(&first)?, self.stop_seed(&second)?);
@@ -75,6 +84,11 @@ impl Session {
                 let record = self.record(run)?;
                 if !record.performance_parameters.contains_key(policy) {
                     return Err(format!("{run} ran without a stop policy"));
+                }
+                for &(key, value) in also {
+                    if record.performance_parameters.get(key).map(String::as_str) != Some(value) {
+                        return Err(format!("{run} ran without {key}={value}"));
+                    }
                 }
                 let comparison = seedbox_artifacts::record::compare(baseline, (run, &record));
                 if comparison.status != ComparisonStatus::Match
