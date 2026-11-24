@@ -126,6 +126,10 @@ where
         driver.set_frame_capacity(if observations.is_some() { 1024 } else { 0 });
         let mut state = state;
         state.world.publication.session = Default::default();
+        let mut publisher = Publisher::connect(observations)?;
+        // Readiness is published as the Ready that latches it commits
+        // (`Publisher::publish`); a restored world latched it before.
+        publisher.restored_ready(&mut state)?;
         Ok(Self {
             driver,
             state,
@@ -133,7 +137,7 @@ where
             output,
             names,
             constructed,
-            publisher: Publisher::connect(observations)?,
+            publisher,
             prepared: None,
             checkpoint: None,
             checkpoint_refusal: None,
@@ -173,17 +177,6 @@ where
                             return Err(fail("Driver machine identity committed twice"));
                         }
                         self.state.world.machine_names.push(name);
-                    }
-                    driver::EventKind::Output(driver::MachineResponse {
-                        machine,
-                        payload: Response::Ready,
-                        ..
-                    }) => {
-                        let name = self
-                            .names
-                            .get(machine)
-                            .ok_or_else(|| fail("Driver ready fact has no machine binding"))?;
-                        self.state.world.readiness.observe(name);
                     }
                     driver::EventKind::FaultAdmitted(record) => {
                         facts.admissions.push(record.clone())

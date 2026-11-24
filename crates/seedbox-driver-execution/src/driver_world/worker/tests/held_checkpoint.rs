@@ -287,7 +287,15 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture_one_and_four_
             for workers in [1, 4] {
                 for step in [false, true] {
                     let mut branch = restore(&envelope, workers, root.path());
-                    assert_eq!(branch.state.world.publication.session, Default::default());
+                    // A fresh session whose only record says the restored
+                    // world's application is ready.
+                    assert_eq!(
+                        branch.state.world.publication.session,
+                        seedbox_engine_protocol::driver_world::PublicationSession {
+                            observation_records: 1,
+                            ..Default::default()
+                        }
+                    );
                     let mut observed = Observed::attach(
                         &mut branch,
                         &root.path().join(format!("branch-{workers}-{step}.sock")),
