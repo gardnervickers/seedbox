@@ -18,7 +18,8 @@ where
     /// machine bytes, callbacks, execution contexts, wall-clock playback pacing,
     /// already-published host-drain queues and frame-observation buffers, and
     /// whatever records where rounds ended: the quantum and the commit count.
-    /// Evidence taken at one time is the same under every stop schedule.
+    /// Evidence taken at one time is the same under every stop schedule,
+    /// provided every machine keeps the [`Machine::run`] contract.
     /// No machine callback, native capture, allocation of a checkpoint or RNG
     /// draw occurs. An externally supplied RNG has no cursor evidence and fails.
     /// This is one component of a run witness, not CPU or RAM evidence; callers
