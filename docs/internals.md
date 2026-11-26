@@ -148,12 +148,12 @@ What follows from a machine's output or exit (a guest call's admission, a reply,
 is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
-commit count or commit time, so evidence at one time is the same under any stops or quantum.
+commit count or commit time, so evidence at one time is the same under any stops or quantum, as long as
+each machine blocks where it goes idle (the `Machine::run` contract).
 Tests end rounds at seeded times with a [stop policy](../crates/seedbox-driver/src/driver/stops.rs): scripted
-machines in `tests/driver_stop_policy.rs`, and whole runs through the worker's `SEEDBOX_STOP_POLICY` performance
-parameter, which only a `test-support` worker (the long suites' CLI build) accepts. A plain seed is mixed with
-each run's output directory, so runs stop differently; the worker writes the seed it draws from to its stderr
-(the run's `vmm.stderr` diagnostic), and `exact:` with that seed repeats that run's stops.
+machines in `tests/driver_stop_policy.rs`, and whole runs through a submission's `stopPolicy` seed, which only
+a server built with test support (the long suites' CLI build) accepts; any other refuses the submission. The
+worker writes the seed to its stderr (the run's `vmm.stderr` diagnostic); submitting it again repeats the stops.
 
 ## Machine network delivery
 

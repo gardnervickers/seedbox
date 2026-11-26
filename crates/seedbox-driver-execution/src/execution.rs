@@ -16,6 +16,12 @@ pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 pub struct ExecutionRequest<'a> {
     /// Initial host playback state; never part of guest experiment identity.
     pub start_paused: bool,
+    /// Test support only: a seed from which the Driver draws where its rounds
+    /// end, instead of ending them where it needs to. That must change no
+    /// result, so it is never part of the experiment identity. Only a worker
+    /// built with test support takes it
+    /// ([`crate::driver_world::TAKES_STOP_POLICY`]); others refuse the run.
+    pub stop_policy: Option<u64>,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
     /// Optional durable semantic-input journal, read after the worker stops.

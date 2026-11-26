@@ -281,7 +281,6 @@ pub(crate) fn request(
     request: &ExecutionRequest<'_>,
     host_control: &Path,
     runtime: Option<&super::binding::Binding>,
-    stop_policy: Option<&str>,
 ) -> Result<wire::Request> {
     validate_contract(&request.prepared.profile)?;
     let manifest = request
@@ -460,13 +459,6 @@ pub(crate) fn request(
             machine.filesystem = super::boot::retain_view(&bytes, request.output)?;
         }
     }
-    let output = request.output.join(crate::execution::MACHINE_OUTPUT_DIR);
-    let stop_policy = stop_policy
-        .map(|value| {
-            super::executor::stop_seed(value, &output)
-                .ok_or_else(|| bad("invalid Driver stop policy seed"))
-        })
-        .transpose()?;
     super::build::check_program_engine(request.program, &prepared.inventory)?;
     Ok(wire::Request {
         prepared,
@@ -474,8 +466,8 @@ pub(crate) fn request(
         seed: request.seed,
         program: request.program.to_vec(),
         simulated_time_ns: request.limits.simulated_time_ns,
-        output,
-        stop_policy,
+        output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
+        stop_policy: request.stop_policy,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode
             == crate::execution::WitnessMode::FullState,
@@ -644,5 +636,5 @@ fn visit(
 
 /// Adapt verified prepared inputs without selecting runtime paths or starting a worker.
 pub fn adapt_request(request: &ExecutionRequest<'_>, host_control: &Path) -> Result<wire::Request> {
-    self::request(request, host_control, None, None)
+    self::request(request, host_control, None)
 }

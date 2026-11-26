@@ -886,6 +886,7 @@ mod tests {
         simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
         let request = crate::execution::ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,

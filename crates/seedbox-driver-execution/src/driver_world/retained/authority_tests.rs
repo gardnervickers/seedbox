@@ -161,6 +161,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -181,19 +182,19 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             spawner: None,
         };
         mismatch(
-            super::request(&request, &output.join("host.sock"), None, None)
+            super::request(&request, &output.join("host.sock"), None)
                 .err()
                 .unwrap(),
         );
         // Generic WorkerLaunch used to pass backend=None and bypass comparison.
         // There is now NO optional CPU argument; both launch routes use profile.
         mismatch(
-            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None, None)
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
                 .err()
                 .unwrap(),
         );
         mismatch(
-            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None, None)
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
                 .err()
                 .unwrap(),
         );
@@ -247,6 +248,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -267,7 +269,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             spawner: None,
         };
         let launch =
-            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None, None)
+            crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&request, None)
                 .unwrap();
         let args: Vec<_> = launch
             .command
@@ -306,8 +308,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             ..request
         };
         let yields = backend == CpuBackend::Pv && cfg!(target_arch = "aarch64");
-        match crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&refused, None, None)
-        {
+        match crate::worker_process::WorkerLaunch::prepare_driver_with_runtime(&refused, None) {
             Ok(_) => assert!(yields, "{backend:?} launched a preempt program"),
             Err(error) => {
                 assert!(!yields, "{error}");
@@ -395,6 +396,7 @@ fn request_reports_mapping_and_import_errors() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -414,7 +416,7 @@ fn request_reports_mapping_and_import_errors() {
             cancellation: &cancellation,
             spawner: None,
         };
-        let error = super::request(&request, &output.join("host.sock"), None, None)
+        let error = super::request(&request, &output.join("host.sock"), None)
             .expect_err("fixture must reject invalid input")
             .to_string();
         assert!(error.contains(expected), "{case}: {error}");
@@ -698,6 +700,7 @@ fn adapt_prepared(
     let cancellation = CancellationToken::default();
     let request = ExecutionRequest {
         start_paused: true,
+        stop_policy: None,
         resume_checkpoint: None,
         intervention_history: None,
         observations: None,
@@ -717,7 +720,7 @@ fn adapt_prepared(
         cancellation: &cancellation,
         spawner: None,
     };
-    super::request(&request, &output.join("host.sock"), None, None)
+    super::request(&request, &output.join("host.sock"), None)
 }
 fn refused(backend: CpuBackend, edit: impl FnOnce(&mut Edited)) -> String {
     refused_prepared(backend, |_| {}, edit)
