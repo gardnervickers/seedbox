@@ -125,7 +125,6 @@ fn driver_components(
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         std::time::Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         oracle,

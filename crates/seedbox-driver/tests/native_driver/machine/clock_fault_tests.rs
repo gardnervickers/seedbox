@@ -202,7 +202,6 @@ impl Plan {
 /// mid-drift, inside the same Driver.
 fn scenario<M, F>(
     backend: &str,
-    workers: usize,
     migrate: bool,
     plan: Plan,
     mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
@@ -221,7 +220,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(3),
         || Ok(()),
         oracle,
@@ -881,13 +879,12 @@ fn check_refusal(backend: &str, (events, clock, runs, _, _): &Outcome) {
     assert!(find(&lines, 0, "CANCELED").is_empty());
 }
 
-fn tcg(workers: usize, migrate: bool, plan: Plan) -> Outcome {
+fn tcg(migrate: bool, plan: Plan) -> Outcome {
     let qemu = input("SEEDBOX_TCG_QEMU");
     let mut factory =
         super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "TCG",
-        workers,
         migrate,
         plan,
         move |definition| factory.create(definition).unwrap(),
@@ -896,32 +893,28 @@ fn tcg(workers: usize, migrate: bool, plan: Plan) -> Outcome {
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
-fn tcg_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
-    let serial = tcg(1, false, Plan::Guest);
+fn tcg_clock_faults_guest_drift_step_reboot_and_snapshot() {
+    let serial = tcg(false, Plan::Guest);
     check_guest("TCG", &serial);
-    assert_eq!(serial, tcg(4, false, Plan::Guest), "workers");
-    assert_eq!(serial, tcg(1, true, Plan::Guest), "restored mid-drift");
+    assert_eq!(serial, tcg(true, Plan::Guest), "restored mid-drift");
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
-fn tcg_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
-    let serial = tcg(1, false, Plan::Host);
-    check_host("TCG", &serial);
-    assert_eq!(serial, tcg(4, false, Plan::Host), "workers");
+fn tcg_clock_faults_host_drift_negative_step_heal_and_holds() {
+    check_host("TCG", &tcg(false, Plan::Host));
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
 fn tcg_clock_faults_step_below_monotonic_is_refused() {
-    check_refusal("TCG", &tcg(1, false, Plan::Refusal));
+    check_refusal("TCG", &tcg(false, Plan::Refusal));
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize, migrate: bool, plan: Plan) -> Outcome {
+fn pv(migrate: bool, plan: Plan) -> Outcome {
     let worker = input("SEEDBOX_PV_WORKER");
     let mut factory =
         super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "PV",
-        workers,
         migrate,
         plan,
         move |definition| factory.create(definition).unwrap(),
@@ -933,25 +926,22 @@ fn pv(workers: usize, migrate: bool, plan: Plan) -> Outcome {
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
-fn pv_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
-    let serial = pv(1, false, Plan::Guest);
+fn pv_clock_faults_guest_drift_step_reboot_and_snapshot() {
+    let serial = pv(false, Plan::Guest);
     check_guest("PV", &serial);
-    assert_eq!(serial, pv(4, false, Plan::Guest), "workers");
-    assert_eq!(serial, pv(1, true, Plan::Guest), "restored mid-drift");
+    assert_eq!(serial, pv(true, Plan::Guest), "restored mid-drift");
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
-fn pv_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
-    let serial = pv(1, false, Plan::Host);
-    check_host("PV", &serial);
-    assert_eq!(serial, pv(4, false, Plan::Host), "workers");
+fn pv_clock_faults_host_drift_negative_step_heal_and_holds() {
+    check_host("PV", &pv(false, Plan::Host));
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
 fn pv_clock_faults_step_below_monotonic_is_refused() {
-    check_refusal("PV", &pv(1, false, Plan::Refusal));
+    check_refusal("PV", &pv(false, Plan::Refusal));
 }
 
 #[test]

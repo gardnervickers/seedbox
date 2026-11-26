@@ -325,7 +325,7 @@ fn a_heal_queued_behind_its_skew_survives_a_checkpoint() {
     advance(&mut d, 12);
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     drop(d);
-    let mut d = restore(&decode(&bytes, &store), 1);
+    let mut d = restore(&decode(&bytes, &store));
     let events = advance(&mut d, 100);
     assert_eq!(settlement(&events, "skew").0, SettlementStatus::Applied);
     assert_eq!(settlement(&events, "heal").0, SettlementStatus::Applied);
@@ -359,7 +359,7 @@ fn a_heal_released_but_not_yet_sent_survives_a_checkpoint() {
     let expected = advance(&mut d, 100);
     assert_eq!(settlement(&expected, "heal").0, SettlementStatus::Applied);
     assert_eq!(steps(&d), [7, -7]);
-    let mut restored = restore(&decode(&bytes, &store), 1);
+    let mut restored = restore(&decode(&bytes, &store));
     assert_eq!(advance(&mut restored, 100), expected);
     assert_eq!(states(&restored), states(&d));
 }
@@ -374,7 +374,6 @@ fn an_undelivered_skew_takes_its_queued_heal_with_it() {
     let mut d = super::fixture::driver(
         at(0),
         Duration::from_millis(100),
-        1,
         SeededRng::new(51),
         || Ok(Context(None)),
         || {

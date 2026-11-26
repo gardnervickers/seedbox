@@ -33,7 +33,7 @@ fn tcg_policy_option_survives_envelope_and_descriptor_roundtrip_without_defaulti
             let older: wire::Inventory = serde_json::from_value(older).unwrap();
             assert!(older.backend_policy().is_none());
         }
-        let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+        let mut driver = driver(1, Arc::default(), Arc::default(), None);
         let mut state = state(1);
         let path = capture(
             &mut driver,
@@ -91,7 +91,7 @@ fn pv_optional_policy_roundtrips_envelope_and_driver_metadata_without_defaulting
             unreachable!()
         };
         *policy = selected.clone();
-        let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+        let mut driver = driver(1, Arc::default(), Arc::default(), None);
         let mut state = state(1);
         let path = capture(
             &mut driver,
@@ -146,7 +146,7 @@ fn complete_boot_factory_authority_survives_checkpoint_source_deletion() {
         unreachable!()
     };
     boot_archives.insert("future-machine".into(), artifact.clone());
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let path = capture(
         &mut driver,
@@ -187,7 +187,7 @@ fn distinct_runtime_closure_bytes_are_retained_and_exported_independently() {
     *runtime = reference.clone();
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let path = capture(
         &mut driver,
@@ -257,7 +257,7 @@ fn config_artifact_map_above_64_entries_keeps_large_contents_outside_metadata() 
     );
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let path = capture(
         &mut driver,
@@ -307,7 +307,7 @@ fn valid_future_named_handle_above_64k_captures_and_reads_exactly() {
     let inventory = fixture_inventory(&root.path().join("authority"));
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let input = future("x".repeat(65_537));
     state.world.input_program.inputs.push(input.clone());
@@ -341,7 +341,7 @@ fn envelope_exceeding_whole_resource_budget_is_rejected_before_manifest_publicat
     let inventory = fixture_inventory(&root.path().join("authority"));
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     state
         .world

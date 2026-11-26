@@ -218,7 +218,7 @@ async fn clock_case(backend: CpuBackend, case: ClockCase) {
         // Existing backend boot allowance plus idle role's exact 12.5s guest
         // sleep. A clock/timer bug cannot survive until a host-time deadline.
         session.bound = simulated_bound(backend) + 12_500_000_000;
-        let source = session.submit(clock_request(session), 1).await;
+        let source = session.submit(clock_request(session)).await;
         session.worker(&source).await;
         session.control(&source, "clock-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         until_output(session, &source, match case {
@@ -237,7 +237,7 @@ async fn clock_case(backend: CpuBackend, case: ClockCase) {
         applied_once(session, &source, &[fault, heal]).await;
         let healed = session.client.playback(&source).await.unwrap().state.position.simulated_time_ns;
         session.control(&source, "clock-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let witness = session.complete(&source, false, 1, SEED).await.unwrap();
+        let witness = session.complete(&source, false, SEED).await.unwrap();
         let (output, times) = session.stdout_timed(&source, TARGET, false).await;
         assert_clocks(case, &output, &times, healed);
         let resource = session.client.describe(&source).await.unwrap();
@@ -245,9 +245,9 @@ async fn clock_case(backend: CpuBackend, case: ClockCase) {
         let replay = session.submit(SubmitRequest {
             metadata: Default::default(), options: Default::default(),
             request_id: "clock-replay".into(), spec: resource.spec,
-        }, 1).await;
+        }).await;
         session.worker(&replay).await;
-        let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
+        let replay_witness = session.complete(&replay, false, SEED).await.unwrap();
         let (replay_output, replay_times) = session.stdout_timed(&replay, TARGET, false).await;
         assert_eq!(output, replay_output, "real clock payload changed on retained replay");
         assert_eq!(times, replay_times, "clock output simulation times changed on replay");

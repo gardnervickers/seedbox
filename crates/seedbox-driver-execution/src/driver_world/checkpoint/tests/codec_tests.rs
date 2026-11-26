@@ -126,7 +126,6 @@ fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
         let mut source = Driver::new_seeded(
             Timestamp::from_nanos(0),
             Duration::from_nanos(10),
-            1,
             9338,
             || Ok(()),
             definition("oracle"),
@@ -188,10 +187,9 @@ fn codec_service_descriptor_roundtrip_distinguishes_none_and_some_zero() {
             .unwrap();
         drop(source);
         let mut expected = None;
-        for workers in [1, 4] {
+        for _ in 0..2 {
             let mut branch = Driver::<EndModel>::from_checkpoint(
                 &checkpoint,
-                workers,
                 || Ok(()),
                 decode,
                 |_| Err("unexpected spawn".into()),

@@ -233,7 +233,6 @@ where
 /// shutdown, crash and reboot. Process commands settle on the guest's own
 /// acknowledgment, never on queue acceptance.
 fn scenario<M>(
-    workers: usize,
     definition: machine_crate::definition::MachineDefinition,
     mut construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
 ) -> Vec<Event>
@@ -244,7 +243,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(7),
         || Ok(()),
         {
@@ -596,7 +594,7 @@ where
         .collect()
 }
 
-fn tcg(workers: usize) -> Vec<Event> {
+fn tcg() -> Vec<Event> {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
         256 << 20,
@@ -607,19 +605,17 @@ fn tcg(workers: usize) -> Vec<Event> {
         TEST_EPOCH_SECONDS,
     )
     .unwrap();
-    scenario(workers, definition, move |definition| {
+    scenario(definition, move |definition| {
         backend.create(definition).unwrap()
     })
 }
 #[test]
 #[ignore = "requires patched QEMU and SEEDBOX_TCG_SERVICE_INITRD static guest fixtures"]
-fn tcg_driver_queues_boot_tags_and_worker_count_match() {
-    let serial = tcg(1);
-    assert_eq!(serial, tcg(2));
-    assert_eq!(serial, tcg(4));
+fn tcg_driver_queues_boot_tags() {
+    tcg();
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize) -> Vec<Event> {
+fn pv() -> Vec<Event> {
     let definition = prepared::definition(
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
         128 << 20,
@@ -630,21 +626,20 @@ fn pv(workers: usize) -> Vec<Event> {
         TEST_EPOCH_SECONDS,
     )
     .unwrap();
-    scenario(workers, definition, move |definition| {
+    scenario(definition, move |definition| {
         backend.create(definition).unwrap()
     })
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor and SEEDBOX_PV_SERVICE_INITRD static guest fixtures"]
-fn pv_driver_queues_boot_tags_and_worker_count_match() {
-    assert_eq!(pv(1), pv(4));
+fn pv_driver_queues_boot_tags() {
+    pv();
 }
 
 /// A real guest consumes every automatic RPC reply. The peer's Stop/Restart
 /// completions come from its supervisor, not from a host acceptance stub.
 fn automatic_rpc_scenario<M>(
-    workers: usize,
     mut base: machine_crate::definition::MachineDefinition,
     application: Vec<u8>,
     construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
@@ -659,7 +654,7 @@ where
     oracle_definition.application.launch.argv = vec!["/application".into(), "oracle".into()];
     base.name = "peer".into();
     base.application.launch.argv = vec!["/application".into(), "peer".into()];
-    automatic_rpc_driver(workers, oracle_definition, base, construct)
+    automatic_rpc_driver(oracle_definition, base, construct)
 }
 
 fn install_application(
@@ -681,7 +676,6 @@ fn install_application(
 }
 
 fn automatic_rpc_driver<M>(
-    workers: usize,
     oracle_definition: machine_crate::definition::MachineDefinition,
     base: machine_crate::definition::MachineDefinition,
     mut construct: impl FnMut(&machine_crate::definition::MachineDefinition) -> M + Send + 'static,
@@ -693,7 +687,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(9),
         || Ok(()),
         oracle_definition,
@@ -907,65 +900,52 @@ where
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
 fn tcg_driver_guest_receives_automatic_replies_and_real_peer_effects() {
-    let run = |workers| {
-        let definition = prepared::definition(
-            fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
-            256 << 20,
-        );
-        let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
-            &input("SEEDBOX_TCG_QEMU"),
-            &input("SEEDBOX_TCG_ASSETS"),
-            TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        automatic_rpc_scenario(
-            workers,
-            definition,
-            fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |definition| backend.create(definition).unwrap(),
-        )
-    };
-    let serial = run(1);
-    assert_eq!(serial, run(2));
-    assert_eq!(serial, run(4));
+    let definition = prepared::definition(
+        fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
+        256 << 20,
+    );
+    let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
+        &input("SEEDBOX_TCG_QEMU"),
+        &input("SEEDBOX_TCG_ASSETS"),
+        TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    automatic_rpc_scenario(
+        definition,
+        fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
+        move |definition| backend.create(definition).unwrap(),
+    );
 }
 
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV kernel/helper and driver-control application"]
 fn pv_driver_guest_receives_automatic_replies_and_real_peer_effects() {
-    let run = |workers| {
-        let definition = prepared::definition(
-            fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
-            128 << 20,
-        );
-        let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
-            &input("SEEDBOX_PV_WORKER"),
-            &input("SEEDBOX_PV_ASSETS"),
-            TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        automatic_rpc_scenario(
-            workers,
-            definition,
-            fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |definition| backend.create(definition).unwrap(),
-        )
-    };
-    assert_eq!(run(1), run(2));
+    let definition = prepared::definition(
+        fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
+        128 << 20,
+    );
+    let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
+        &input("SEEDBOX_PV_WORKER"),
+        &input("SEEDBOX_PV_ASSETS"),
+        TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    automatic_rpc_scenario(
+        definition,
+        fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
+        move |definition| backend.create(definition).unwrap(),
+    );
 }
 
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
 fn tcg_native_repeat_run_has_identical_trace() {
-    for workers in [1, 2, 4] {
-        assert_eq!(tcg(workers), tcg(workers), "workers={workers}");
-    }
+    assert_eq!(tcg(), tcg());
 }
 
 /// Real guest spawn with an oracle-only initial set and a separately declared peer.
 fn spawn_scenario<M>(
-    workers: usize,
     mut definition: machine_crate::definition::MachineDefinition,
     application: Vec<u8>,
     factory: impl FnMut(&machine_crate::definition::MachineDefinition) -> Result<M, M::Error>
@@ -986,7 +966,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(9),
         || Ok(()),
         oracle,
@@ -1087,53 +1066,45 @@ where
 }
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
-fn tcg_driver_oracle_spawns_declared_peer_workers_match() {
-    let run = |workers| {
-        let definition = prepared::definition(
-            fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
-            256 << 20,
-        );
-        let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
-            &input("SEEDBOX_TCG_QEMU"),
-            &input("SEEDBOX_TCG_ASSETS"),
-            TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        spawn_scenario(
-            workers,
-            definition,
-            fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |d| backend.create(d),
-        )
-    };
-    assert_eq!(run(1), run(4));
+fn tcg_driver_oracle_spawns_declared_peer() {
+    let definition = prepared::definition(
+        fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
+        256 << 20,
+    );
+    let mut backend = seedbox_machine_tcg::machine::tcg::Factory::new(
+        &input("SEEDBOX_TCG_QEMU"),
+        &input("SEEDBOX_TCG_ASSETS"),
+        TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    spawn_scenario(
+        definition,
+        fs::read(input("SEEDBOX_TCG_DRIVER_CONTROL_APPLICATION")).unwrap(),
+        move |d| backend.create(d),
+    );
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV kernel/helper and driver-control application"]
-fn pv_driver_oracle_spawns_declared_peer_workers_match() {
-    let run = |workers| {
-        let definition = prepared::definition(
-            fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
-            128 << 20,
-        );
-        let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
-            &input("SEEDBOX_PV_WORKER"),
-            &input("SEEDBOX_PV_ASSETS"),
-            TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        spawn_scenario(
-            workers,
-            definition,
-            fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
-            move |d| backend.create(d),
-        )
-    };
-    assert_eq!(run(1), run(4));
+fn pv_driver_oracle_spawns_declared_peer() {
+    let definition = prepared::definition(
+        fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
+        128 << 20,
+    );
+    let mut backend = seedbox_machine_pv::machine::pv::Factory::new(
+        &input("SEEDBOX_PV_WORKER"),
+        &input("SEEDBOX_PV_ASSETS"),
+        TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    spawn_scenario(
+        definition,
+        fs::read(input("SEEDBOX_PV_DRIVER_CONTROL_APPLICATION")).unwrap(),
+        move |d| backend.create(d),
+    );
 }
 
-fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
+fn boot_epoch() -> Vec<MachineResponse> {
     let mut oracle = prepared::definition(
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
         256 << 20,
@@ -1152,7 +1123,6 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
     let driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(9),
         || Ok(()),
         oracle,
@@ -1194,9 +1164,7 @@ fn boot_epoch(workers: usize) -> Vec<MachineResponse> {
 #[test]
 #[ignore = "requires native TCG owned kernel/helper and driver-control application"]
 fn tcg_native_boot_realtime_is_epoch_plus_machine_counter() {
-    let serial = boot_epoch(1);
-    assert_eq!(serial, boot_epoch(2));
-    assert_eq!(serial, boot_epoch(4));
+    let serial = boot_epoch();
     let output: Vec<_> = serial
         .iter()
         .filter_map(|event| match &event.payload {

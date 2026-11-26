@@ -6,7 +6,7 @@ use crate::pv::{CommandResult, SimulationControlId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
-fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
+fn source_destroyed_capture_and_nonclone_snapshots() {
     let mut d = build(
         vec![
             spec(
@@ -38,22 +38,20 @@ fn source_destroyed_capture_reused_workers_and_nonclone_snapshots() {
     let expected_states = states(&d);
     let expected_position = d.position();
     drop(d);
-    for workers in [1, 4] {
-        let mut branch = restore(&c, workers);
-        assert_eq!(branch.position(), before);
-        assert_eq!(
-            Duration::from_nanos(branch.execution.quantum_ns),
-            c.quantum()
-        );
-        assert_eq!(advance(&mut branch, 60), expected);
-        assert_eq!(states(&branch), expected_states);
-        assert_eq!(branch.position(), expected_position);
-        assert_eq!(
-            branch.execution.machines.len(),
-            3,
-            "future spawn did not occur"
-        );
-    }
+    let mut branch = restore(&c);
+    assert_eq!(branch.position(), before);
+    assert_eq!(
+        Duration::from_nanos(branch.execution.quantum_ns),
+        c.quantum()
+    );
+    assert_eq!(advance(&mut branch, 60), expected);
+    assert_eq!(states(&branch), expected_states);
+    assert_eq!(branch.position(), expected_position);
+    assert_eq!(
+        branch.execution.machines.len(),
+        3,
+        "future spawn did not occur"
+    );
 }
 
 #[test]
@@ -96,11 +94,9 @@ fn source_keeps_publications_but_imported_session_has_no_suffix() {
         assert_eq!(d.observations.published.is_empty(), drain);
         reference_observer_session(&mut d);
         let expected = advance(&mut d, 11);
-        for workers in [1, 4] {
-            let mut b = restore(&c, workers);
-            assert_eq!(advance(&mut b, 11), expected);
-            assert!(b.drain_events().is_empty());
-        }
+        let mut b = restore(&c);
+        assert_eq!(advance(&mut b, 11), expected);
+        assert!(b.drain_events().is_empty());
     }
 }
 
@@ -223,25 +219,15 @@ fn invalid_restore_is_rejected_before_context_or_machine_callbacks() {
     c.quantum_ns = 0;
     let result = Driver::<Mock>::from_checkpoint(
         &c,
-        1,
         || panic!("context before validation"),
         |_| panic!("machine before validation"),
         fresh,
     );
     assert!(matches!(result, Err(Error::InvalidCheckpoint(_))));
-    c.quantum_ns = 10;
-    let result = Driver::<Mock>::from_checkpoint(
-        &c,
-        0,
-        || panic!("context with zero workers"),
-        |_| panic!("restore with zero workers"),
-        fresh,
-    );
-    assert!(matches!(result, Err(Error::InvalidWorkerCount)));
 }
 
 #[test]
-fn partial_restore_and_context_failure_drop_machines_and_join_contexts() {
+fn partial_restore_and_context_failure_drop_machines_and_contexts() {
     let mut d = build(
         vec![spec(0, true, vec![]), spec(1, true, vec![])],
         vec![],
@@ -257,7 +243,6 @@ fn partial_restore_and_context_failure_drop_machines_and_join_contexts() {
     let mut restored = 0;
     let result = Driver::<Mock>::from_checkpoint(
         &c,
-        4,
         move || Ok(Context(Some(count.clone()))),
         move |s| {
             restored += 1;
@@ -280,31 +265,25 @@ fn partial_restore_and_context_failure_drop_machines_and_join_contexts() {
     assert_eq!(machines.load(Ordering::SeqCst), 1);
     assert_eq!(
         contexts.load(Ordering::SeqCst),
-        4,
-        "return must join contexts"
+        1,
+        "return must drop the context"
     );
     let attempts = Arc::new(AtomicUsize::new(0));
-    let count = contexts.clone();
     let attempt = attempts.clone();
     let result = Driver::<Mock>::from_checkpoint(
         &c,
-        4,
         move || {
-            let n = attempt.fetch_add(1, Ordering::SeqCst);
-            if n == 2 {
-                Err(io("context failure"))
-            } else {
-                Ok(Context(Some(count.clone())))
-            }
+            attempt.fetch_add(1, Ordering::SeqCst);
+            Err::<Context, _>(io("context failure"))
         },
         |_| panic!("restore before context startup completed"),
         fresh,
     );
-    assert!(matches!(result, Err(Error::Context { worker: 2, .. })));
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    assert_eq!(contexts.load(Ordering::SeqCst), 6);
+    assert!(matches!(result, Err(Error::Context(_))));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(contexts.load(Ordering::SeqCst), 1);
     assert!(
-        restore(&c, 1).checkpoint().is_ok(),
+        restore(&c).checkpoint().is_ok(),
         "failure damaged reusable capture"
     );
 }
@@ -370,13 +349,11 @@ fn paused_lagging_blocked_fractional_timer_and_handles_continue() {
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 25);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 25), expected);
-        assert_eq!(states(&b), states(&d));
-        assert!(!b.execution.inputs.contains_key(&key("drift")));
-        assert_eq!(b.position(), d.position());
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 25), expected);
+    assert_eq!(states(&b), states(&d));
+    assert!(!b.execution.inputs.contains_key(&key("drift")));
+    assert_eq!(b.position(), d.position());
 }
 
 #[test]
@@ -418,26 +395,24 @@ fn before_fault_keeps_admitted_handle_and_applies_held_effect_once() {
             .factor_permille(),
         2000
     );
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(status(&mut b), held);
-        let position = b.position();
-        assert!(matches!(
-            b.step(at(100)).unwrap(),
-            StepOutcome::BeforeFault { .. }
-        ));
-        assert_eq!(b.position(), position);
-        b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        assert_eq!(advance(&mut b, 20), expected);
-        assert_eq!(
-            b.execution.machines[1]
-                .lifecycle
-                .execution()
-                .factor_permille(),
-            2000
-        );
-    }
+    let mut b = restore(&c);
+    assert_eq!(status(&mut b), held);
+    let position = b.position();
+    assert!(matches!(
+        b.step(at(100)).unwrap(),
+        StepOutcome::BeforeFault { .. }
+    ));
+    assert_eq!(b.position(), position);
+    b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    assert_eq!(advance(&mut b, 20), expected);
+    assert_eq!(
+        b.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
+        2000
+    );
 }
 
 #[test]
@@ -488,12 +463,10 @@ fn pending_commands_replies_and_sleep_keep_control_cursors() {
             .count()
             >= 1
     );
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 30), expected);
-        assert_eq!(states(&b), states(&d));
-        assert_eq!(b.position(), d.position());
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 30), expected);
+    assert_eq!(states(&b), states(&d));
+    assert_eq!(b.position(), d.position());
 }
 
 #[test]
@@ -560,38 +533,36 @@ fn causal_network_flights_pair_cursors_fifo_and_stacked_cuts_continue() {
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 35);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 35), expected);
-        assert_eq!(states(&b), states(&d));
-        assert_eq!(
-            b.execution.network.pair_cursor(MachineId(1), MachineId(0)),
-            d.execution.network.pair_cursor(MachineId(1), MachineId(0))
-        );
-        assert!(
-            b.execution.network.is_idle(),
-            "remaining flights: {:?}",
-            b.execution.network.in_flight()
-        );
-        // Even an empty-flight capture must retain pair RNG and FIFO history.
-        let c2 = b.checkpoint().unwrap();
-        reference_observer_session(&mut b);
-        let mut b2 = restore(&c2, workers);
-        for router in [&mut b.execution.network, &mut b2.execution.network] {
-            let Response::TransmitFrame { bytes } = frame(mac(0), 6) else {
-                unreachable!()
-            };
-            router.route(MachineId(1), 35, &bytes).unwrap();
-        }
-        assert_eq!(
-            b.execution.network.in_flight(),
-            b2.execution.network.in_flight()
-        );
-        assert_eq!(
-            b.execution.network.pair_cursor(MachineId(1), MachineId(0)),
-            b2.execution.network.pair_cursor(MachineId(1), MachineId(0))
-        );
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 35), expected);
+    assert_eq!(states(&b), states(&d));
+    assert_eq!(
+        b.execution.network.pair_cursor(MachineId(1), MachineId(0)),
+        d.execution.network.pair_cursor(MachineId(1), MachineId(0))
+    );
+    assert!(
+        b.execution.network.is_idle(),
+        "remaining flights: {:?}",
+        b.execution.network.in_flight()
+    );
+    // Even an empty-flight capture must retain pair RNG and FIFO history.
+    let c2 = b.checkpoint().unwrap();
+    reference_observer_session(&mut b);
+    let mut b2 = restore(&c2);
+    for router in [&mut b.execution.network, &mut b2.execution.network] {
+        let Response::TransmitFrame { bytes } = frame(mac(0), 6) else {
+            unreachable!()
+        };
+        router.route(MachineId(1), 35, &bytes).unwrap();
     }
+    assert_eq!(
+        b.execution.network.in_flight(),
+        b2.execution.network.in_flight()
+    );
+    assert_eq!(
+        b.execution.network.pair_cursor(MachineId(1), MachineId(0)),
+        b2.execution.network.pair_cursor(MachineId(1), MachineId(0))
+    );
 }
 
 #[test]
@@ -633,12 +604,10 @@ fn nameserver_replies_in_flight_survive_capture() {
         replies(&d),
         [(at(7), (1, 0, Some([10, 0, 0, 2]))), (at(9), (2, 3, None))]
     );
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 20), expected);
-        assert_eq!(states(&b), states(&d));
-        assert_eq!(replies(&b), replies(&d));
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 20), expected);
+    assert_eq!(states(&b), states(&d));
+    assert_eq!(replies(&b), replies(&d));
 }
 
 #[test]
@@ -668,11 +637,9 @@ fn frames_waiting_for_the_receivers_next_run_survive_capture() {
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 30);
     assert_eq!(states(&d)[1].received.len(), 1);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 30), expected);
-        assert_eq!(states(&b), states(&d));
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 30), expected);
+    assert_eq!(states(&b), states(&d));
 }
 
 #[test]
@@ -708,11 +675,9 @@ fn a_timer_due_at_the_capture_barrier_survives_capture() {
     let expected = crash(&mut d);
     assert!(states(&d)[1].dead);
     assert!(states(&d)[1].sends.is_empty());
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(crash(&mut b), expected);
-        assert_eq!(states(&b), states(&d));
-    }
+    let mut b = restore(&c);
+    assert_eq!(crash(&mut b), expected);
+    assert_eq!(states(&b), states(&d));
 }
 
 #[test]
@@ -748,7 +713,7 @@ fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
         let expected = d.step(at(100)).unwrap();
         let publications = d.drain_events();
         drop(d);
-        let mut b = restore(&c, 4);
+        let mut b = restore(&c);
         assert_eq!(b.step(at(100)).unwrap(), expected);
         assert_eq!(b.position(), before);
         assert_eq!(b.drain_events(), publications);
@@ -827,11 +792,9 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
     assert!(expected.iter().any(
         |e| matches!(&e.kind, EventKind::InputRejected { key: k, .. } if k == &key("reject-pause"))
     ));
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 40), expected);
-        assert_eq!(states(&b), states(&d));
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 40), expected);
+    assert_eq!(states(&b), states(&d));
 }
 
 #[test]
@@ -880,16 +843,14 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
     drop(d);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        b.commit_boundary().unwrap();
-        assert!(b.execution.finishing.is_none());
-        assert!(b.execution.oracle_stops.contains(&(1, command)));
-        b.execution.machines[0].staged.push(ack(1));
-        b.commit_boundary().unwrap();
-        assert_eq!(b.execution.finishing, Some((at(10), ExitReason::Shutdown)));
-        assert!(!b.execution.oracle_stops.contains(&(1, command)));
-    }
+    let mut b = restore(&c);
+    b.commit_boundary().unwrap();
+    assert!(b.execution.finishing.is_none());
+    assert!(b.execution.oracle_stops.contains(&(1, command)));
+    b.execution.machines[0].staged.push(ack(1));
+    b.commit_boundary().unwrap();
+    assert_eq!(b.execution.finishing, Some((at(10), ExitReason::Shutdown)));
+    assert!(!b.execution.oracle_stops.contains(&(1, command)));
 }
 
 #[test]
@@ -923,30 +884,26 @@ fn reserved_spawn_identity_is_retained_without_factory_or_seed_re_admission() {
     let expected = advance(&mut d, 20);
     assert_eq!(d.execution.machines.len(), 2);
     drop(d);
-    for workers in [1, 4] {
-        let count = Arc::new(AtomicUsize::new(0));
-        let calls = count.clone();
-        let mut b = Driver::from_checkpoint(
-            &c,
-            workers,
-            || Ok(Context(None)),
-            Mock::restore,
-            move |definition| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                fresh(definition)
-            },
-        )
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let mut b = Driver::from_checkpoint(
+        &c,
+        || Ok(Context(None)),
+        Mock::restore,
+        move |definition| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            fresh(definition)
+        },
+    )
+    .unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(b.execution.control.spawn_pending());
+    b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
         .unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-        assert!(b.execution.control.spawn_pending());
-        b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        assert_eq!(advance(&mut b, 20), expected);
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-    }
+    assert_eq!(advance(&mut b, 20), expected);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     let mut failed = Driver::from_checkpoint(
         &c,
-        1,
         || Ok(Context(None)),
         Mock::restore,
         |_| Err(io("future construction failed")),
@@ -988,7 +945,7 @@ fn spawn_waiting_for_its_definition_is_captured_and_waits_again_after_restore() 
     let expected = advance(&mut d, 20);
     assert_eq!(d.execution.machines.len(), 2);
     drop(d);
-    let mut b = Driver::from_checkpoint(&c, 1, || Ok(Context(None)), Mock::restore, fresh).unwrap();
+    let mut b = Driver::from_checkpoint(&c, || Ok(Context(None)), Mock::restore, fresh).unwrap();
     assert_eq!(b.step(at(10)).unwrap(), waiting);
     b.with_barrier(|b| b.provide(prepared[0].clone())).unwrap();
     assert_eq!(advance(&mut b, 20), expected);
@@ -999,7 +956,6 @@ fn paused_machine_need_not_map_the_current_shared_time_to_be_captured() {
     let mut d = Driver::new_seeded(
         at(0),
         Duration::from_nanos(u64::MAX - 1),
-        1,
         51,
         || Ok(Context(None)),
         fixture::definition(0),
@@ -1041,7 +997,7 @@ fn paused_machine_need_not_map_the_current_shared_time_to_be_captured() {
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
     drop(d);
-    let mut b = restore(&c, 4);
+    let mut b = restore(&c);
     assert_eq!(b.now(), at(u64::MAX - 2));
     assert!(b.execution.machines[0].lifecycle.paused());
     assert!(b.checkpoint().is_ok());
@@ -1083,26 +1039,24 @@ fn limited_playback_reanchors_at_restored_time_without_charging_downtime() {
         Some(Duration::from_nanos(1))
     );
     drop(d);
-    for workers in [1, 4] {
-        // A controlled future Instant, not a sleep or a real wall deadline.
-        let after_downtime = origin + Duration::from_secs(3600);
-        let mut b = restore(&c, workers);
-        assert_eq!(status(&mut b), logical);
-        assert_eq!(b.playback.delay(position, after_downtime), None);
-        b.step_at(at(4), after_downtime).unwrap();
-        assert_eq!(b.drain_events(), expected);
-        // The hour of host downtime cannot pay for new simulation progress.
-        assert_eq!(
-            b.playback.delay(b.position(), after_downtime),
-            Some(Duration::from_nanos(1))
-        );
-        assert_eq!(
-            b.playback
-                .delay(b.position(), after_downtime + Duration::from_nanos(1)),
-            None
-        );
-        assert_eq!(status(&mut b).rate, rate);
-    }
+    // A controlled future Instant, not a sleep or a real wall deadline.
+    let after_downtime = origin + Duration::from_secs(3600);
+    let mut b = restore(&c);
+    assert_eq!(status(&mut b), logical);
+    assert_eq!(b.playback.delay(position, after_downtime), None);
+    b.step_at(at(4), after_downtime).unwrap();
+    assert_eq!(b.drain_events(), expected);
+    // The hour of host downtime cannot pay for new simulation progress.
+    assert_eq!(
+        b.playback.delay(b.position(), after_downtime),
+        Some(Duration::from_nanos(1))
+    );
+    assert_eq!(
+        b.playback
+            .delay(b.position(), after_downtime + Duration::from_nanos(1)),
+        None
+    );
+    assert_eq!(status(&mut b).rate, rate);
 }
 
 #[test]
@@ -1172,13 +1126,11 @@ fn simulation_admission_rng_crosses_cache_boundary_after_three_captured_seeds() 
         );
     }
     drop(d);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(admit(&mut b), expected);
-        assert_eq!(states(&b), expected_states);
-        assert_eq!(b.position(), expected_position);
-        assert_eq!(next_simulation_bytes(&b), reference_next);
-    }
+    let mut b = restore(&c);
+    assert_eq!(admit(&mut b), expected);
+    assert_eq!(states(&b), expected_states);
+    assert_eq!(b.position(), expected_position);
+    assert_eq!(next_simulation_bytes(&b), reference_next);
 }
 
 #[test]
@@ -1245,13 +1197,11 @@ fn in_flight_frame_is_delivered_to_receivers_rebooted_current_boot() {
     };
     assert_eq!(frames[0].1.payload, Request::ReceiveFrame { bytes });
     drop(d);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert_eq!(advance(&mut b, 15), expected);
-        assert_eq!(states(&b), expected_states);
-        assert_eq!(b.position(), expected_position);
-        assert_eq!(b.execution.machines[1].lifecycle.boot(), 1);
-    }
+    let mut b = restore(&c);
+    assert_eq!(advance(&mut b, 15), expected);
+    assert_eq!(states(&b), expected_states);
+    assert_eq!(b.position(), expected_position);
+    assert_eq!(b.execution.machines[1].lifecycle.boot(), 1);
 }
 
 #[test]
@@ -1318,16 +1268,14 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
     let expected = advance(&mut d, 10);
     assert_eq!(d.execution.completed_quanta(d.now()), 1);
     assert!(!status(&mut d).stepping);
-    for workers in [1, 4] {
-        let mut b = restore(&c, workers);
-        assert!(status(&mut b).stepping);
-        assert_eq!(advance(&mut b, 10), expected);
-        assert_eq!(status(&mut b), status(&mut d));
-        assert!(matches!(
-            b.step(at(20)).unwrap(),
-            StepOutcome::Waiting { .. }
-        ));
-    }
+    let mut b = restore(&c);
+    assert!(status(&mut b).stepping);
+    assert_eq!(advance(&mut b, 10), expected);
+    assert_eq!(status(&mut b), status(&mut d));
+    assert!(matches!(
+        b.step(at(20)).unwrap(),
+        StepOutcome::Waiting { .. }
+    ));
 }
 
 /// Capturing at any boundary of a busy world must not perturb it, and the
@@ -1461,26 +1409,16 @@ fn capture_at_every_boundary_is_transparent_and_restores_the_remaining_run() {
         assert_eq!(d.position(), expected_position, "{label}");
         assert_eq!(policy(&mut d), expected_policy, "{label}");
         let continuation = facts(&events[prefix..]);
-        for workers in [1, 4] {
-            let mut b = restore(&captured, workers);
-            assert_eq!(b.position(), position, "{label}");
-            let mut restored = b.drain_events();
-            while !done(&b) {
-                step(&mut b, &mut restored);
-            }
-            assert_eq!(facts(&restored), continuation, "{label}, {workers} workers");
-            assert_eq!(states(&b), expected_states, "{label}, {workers} workers");
-            assert_eq!(
-                b.position(),
-                expected_position,
-                "{label}, {workers} workers"
-            );
-            assert_eq!(
-                policy(&mut b),
-                expected_policy,
-                "{label}, {workers} workers"
-            );
+        let mut b = restore(&captured);
+        assert_eq!(b.position(), position, "{label}");
+        let mut restored = b.drain_events();
+        while !done(&b) {
+            step(&mut b, &mut restored);
         }
+        assert_eq!(facts(&restored), continuation, "{label}");
+        assert_eq!(states(&b), expected_states, "{label}");
+        assert_eq!(b.position(), expected_position, "{label}");
+        assert_eq!(policy(&mut b), expected_policy, "{label}");
     }
     assert!(boundaries >= 5, "{boundaries} boundaries");
     assert_eq!(

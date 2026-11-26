@@ -423,7 +423,6 @@ fn run_as(
     let mut driver = Driver::new_seeded(
         at(0),
         quantum,
-        2,
         7,
         || Ok(()),
         definitions[0].clone(),

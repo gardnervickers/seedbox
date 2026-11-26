@@ -1,21 +1,14 @@
-//! Machine worker count is a per-submission performance option
-//! (`options.machineWorkers`); it must never change any result.
+//! Machine lifecycle faults and live controls beside the shared program.
 use crate::session::{err, Session, REAL_TIME};
 use crate::trace::{same_output, suffix, Trace};
 use crate::{input, Outcome, SECOND};
 use seedbox_api::{ComparisonStatus, PlaybackRate, SimulationId};
 use serde_json::{json, Value};
 
-/// Single-thread reference runs and what their observers saw.
+/// Reference runs, the documents that rerun them, and what their observers saw.
 pub struct References {
     /// Name, the document that reruns it, the reference run and its trace.
     runs: Vec<(&'static str, Value, SimulationId, Trace)>,
-}
-
-impl References {
-    pub fn ids(&self) -> Vec<&SimulationId> {
-        self.runs.iter().map(|(_, _, id, _)| id).collect()
-    }
 }
 
 /// The shared definition with machines slowed by different factors (so
@@ -83,10 +76,15 @@ pub fn lifecycle_document(document: &Value) -> Result<Value, String> {
 }
 
 impl Session {
-    /// On one machine thread: the baseline, the lifecycle variant, an
-    /// interactively controlled and checkpointed lifecycle run, and a branch
-    /// from that checkpoint, each with everything its observers saw.
-    pub async fn worker_references(&self, baseline: &SimulationId) -> Result<References, String> {
+    /// The lifecycle variant applies every fault and differs from the
+    /// baseline; an interactively controlled and checkpointed lifecycle run
+    /// replays from its retained timeline, and a branch from that checkpoint
+    /// continues its output exactly. Returns the baseline, lifecycle,
+    /// controlled and branch references with everything their observers saw.
+    pub async fn lifecycle_references(
+        &self,
+        baseline: &SimulationId,
+    ) -> Result<References, String> {
         let lifecycle = lifecycle_document(&self.document)?;
         let varied = self.submit(&lifecycle, false).await?;
         self.complete(&varied).await?;
@@ -153,13 +151,13 @@ impl Session {
 
         // Live admission and checkpoint capture publish host-timed events
         // that a rerun of the retained timeline does not, so the controlled
-        // run's observations are those of its single-thread rerun.
+        // run's observations are those of its replay.
         let recorded = self.recorded_document(&interactive).await?;
         let replayed = self.submit(&recorded, false).await?;
         self.complete(&replayed).await?;
         self.same_results(&interactive, &replayed)
             .await
-            .map_err(|e| format!("single-thread replay of the controlled run: {e}"))?;
+            .map_err(|e| format!("replay of the controlled run: {e}"))?;
 
         let mut runs = Vec::new();
         for (name, document, id, observed) in [
@@ -168,11 +166,6 @@ impl Session {
             ("interactive", recorded, &interactive, &replayed),
             ("branch", branched, &branch, &branch),
         ] {
-            for id in [id, observed] {
-                if self.machine_workers(id).await? != 1 {
-                    return Err(format!("{id}: the reference did not run on one thread"));
-                }
-            }
             runs.push((
                 name,
                 document,
@@ -183,18 +176,14 @@ impl Session {
         Ok(References { runs })
     }
 
-    /// With `workers` machine threads: rerunning each reference (including
-    /// its retained live controls) and branching from its checkpoint must
+    /// An independent fresh rerun of each reference document (including its
+    /// retained live controls, and the branch from its checkpoint) must
     /// reproduce outcome, witness, full state and fault history, and exactly
-    /// the logs, events, faults and timeline of the single-thread references.
-    pub async fn worker_invariance(&self, workers: u32, references: &References) -> Outcome {
+    /// the logs, events, faults and timeline its reference's observers saw.
+    pub async fn fresh_reruns(&self, references: &References) -> Outcome {
         for (name, document, reference, trace) in &references.runs {
-            let rerun = &self.submit_with(document, false, Some(workers)).await?;
+            let rerun = &self.submit(document, false).await?;
             self.complete(rerun).await?;
-            let used = self.machine_workers(rerun).await?;
-            if used != workers {
-                return Err(format!("{name}: {rerun} ran on {used} machine workers"));
-            }
             self.same_results(reference, rerun)
                 .await
                 .map_err(|e| format!("{name}: {e}"))?;

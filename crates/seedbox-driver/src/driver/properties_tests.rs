@@ -143,11 +143,9 @@ fn checkpoints_retain_the_ledger_and_allowed_crashes() {
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     advance(&mut d, 30);
     let expected = (d.properties(), states(&d));
-    for workers in [1, 2] {
-        let mut branch = restore(&decode(&bytes, &store), workers);
-        advance(&mut branch, 30);
-        assert_eq!((branch.properties(), states(&branch)), expected);
-    }
+    let mut branch = restore(&decode(&bytes, &store));
+    advance(&mut branch, 30);
+    assert_eq!((branch.properties(), states(&branch)), expected);
 }
 
 /// The oracle's exit ends the run one floor later: every machine's records

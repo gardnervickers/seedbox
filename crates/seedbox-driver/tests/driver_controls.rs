@@ -9,7 +9,7 @@ fn held_record(outcome: &StepOutcome) -> Option<seedbox_driver::driver::FaultRec
 
 #[test]
 fn initial_pause_holds_current_time_actions_and_dynamic_resume() {
-    let mut driver = controlled(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -46,7 +46,7 @@ fn initial_pause_holds_current_time_actions_and_dynamic_resume() {
 
 #[test]
 fn one_quantum_survives_short_barriers_and_zero_time_actions() {
-    let mut driver = controlled(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -106,7 +106,7 @@ fn one_quantum_survives_short_barriers_and_zero_time_actions() {
 
 #[test]
 fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
-    let mut driver = controlled(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -170,7 +170,7 @@ fn pre_crash_hold_retains_exact_current_time_cursor_and_allows_only_playback() {
 
 #[test]
 fn pre_crash_hold_precedes_same_time_timer_and_counts_quantum_once() {
-    let mut driver = controlled(2, &[&[Op::Work(1), Op::Sleep(9), Op::Fail]]);
+    let mut driver = controlled(&[&[Op::Work(1), Op::Sleep(9), Op::Fail]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -203,7 +203,7 @@ fn pre_crash_hold_precedes_same_time_timer_and_counts_quantum_once() {
 #[test]
 fn explicit_rate_and_step_controls_cancel_a_pre_crash_arm() {
     for step in [false, true] {
-        let mut driver = controlled(1, &[&[Op::Work(100)]]);
+        let mut driver = controlled(&[&[Op::Work(100)]]);
         let id = ids(&mut driver)[0];
         driver
             .with_barrier(|barrier| {
@@ -244,7 +244,7 @@ fn explicit_rate_and_step_controls_cancel_a_pre_crash_arm() {
 
 #[test]
 fn blocked_single_quantum_reports_blocked_without_polling_and_keeps_admission() {
-    let mut driver = controlled(1, &[&[Op::Park, Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Park, Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -294,7 +294,7 @@ fn blocked_single_quantum_reports_blocked_without_polling_and_keeps_admission() 
 
 #[test]
 fn permanent_stop_prevents_action_work_factory_and_resume() {
-    let mut driver = controlled(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -344,65 +344,44 @@ fn permanent_stop_prevents_action_work_factory_and_resume() {
 }
 
 #[test]
-fn controls_preserve_worker_independent_results_positions_and_action_order() {
-    let mut reference = None;
-    for workers in [1, 2, 4] {
-        let mut driver = controlled(
-            workers,
-            &[
-                &[Op::Work(1), Op::Sleep(5), Op::Work(30), Op::Exit],
-                &[Op::Sleep(10), Op::Fail],
-            ],
-        );
-        let id = ids(&mut driver)[1];
-        driver
-            .with_barrier(|barrier| {
-                barrier.schedule(at(10), key("pause"), Action::Pause(Target::Machine(id)))?;
-                barrier.schedule(at(10), key("crash"), Action::Crash(Target::Machine(id)))?;
-                barrier.pause_before_next_fault(PlaybackRate::Unlimited)
-            })
-            .unwrap();
-        let held = driver.step(at(100)).unwrap();
-        assert!(matches!(held, StepOutcome::BeforeFault { .. }));
-        let held_status = status(&mut driver);
-        driver
-            .with_barrier(|barrier| barrier.step_quantum())
-            .unwrap();
-        let resumed = driver.step(at(100)).unwrap();
-        let paused = status(&mut driver);
-        assert!(!paused.stepping);
-        driver
-            .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        let mut outcomes = vec![held, resumed];
-        loop {
-            let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome.clone());
-            if matches!(outcome, StepOutcome::Finished { .. }) {
-                break;
-            }
-            assert!(outcomes.len() < 20);
+fn controls_preserve_positions_and_action_order() {
+    let mut driver = controlled(&[
+        &[Op::Work(1), Op::Sleep(5), Op::Work(30), Op::Exit],
+        &[Op::Sleep(10), Op::Fail],
+    ]);
+    let id = ids(&mut driver)[1];
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(10), key("pause"), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(10), key("crash"), Action::Crash(Target::Machine(id)))?;
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    let held = driver.step(at(100)).unwrap();
+    assert!(matches!(held, StepOutcome::BeforeFault { .. }));
+    driver
+        .with_barrier(|barrier| barrier.step_quantum())
+        .unwrap();
+    let resumed = driver.step(at(100)).unwrap();
+    let paused = status(&mut driver);
+    assert!(!paused.stepping);
+    driver
+        .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    let mut outcomes = vec![held, resumed];
+    loop {
+        let outcome = driver.step(at(100)).unwrap();
+        outcomes.push(outcome.clone());
+        if matches!(outcome, StepOutcome::Finished { .. }) {
+            break;
         }
-        let logs = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(_, guest)| guest.log.lock().unwrap().clone())
-                    .collect::<Vec<_>>())
-            })
-            .unwrap();
-        let observed = (held_status, paused, status(&mut driver), outcomes, logs);
-        if let Some(reference) = &reference {
-            assert_eq!(&observed, reference);
-        } else {
-            reference = Some(observed);
-        }
+        assert!(outcomes.len() < 20);
     }
 }
 
 #[test]
 fn rearming_held_crash_resumes_only_that_occurrence_and_skips_noop_crashes() {
-    let mut driver = controlled_targets(2, &[&[Op::Work(100)], &[Op::Work(100)]]);
+    let mut driver = controlled_targets(&[&[Op::Work(100)], &[Op::Work(100)]]);
     let ids = ids(&mut driver);
     driver
         .with_barrier(|barrier| {
@@ -446,7 +425,7 @@ fn rearming_held_crash_resumes_only_that_occurrence_and_skips_noop_crashes() {
 
 #[test]
 fn dynamic_pause_cancels_an_inflight_quantum_and_stop_holds_existing_progress() {
-    let mut driver = controlled(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {

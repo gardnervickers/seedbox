@@ -41,7 +41,6 @@ pub(super) fn assert_saved_pending(saved: &wire::Checkpoint, fault_id: u32) {
     let checkpoint = Checkpoint::read_from(&mut &bytes[..], limits).unwrap();
     let mut driver = Driver::<OpaqueReference>::from_checkpoint(
         &checkpoint,
-        1,
         || Ok(()),
         |reference| Ok(OpaqueReference(*reference)),
         |_| panic!("saved-authority inspection must not create a machine"),
