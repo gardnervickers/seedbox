@@ -70,19 +70,12 @@ impl Observed {
             .collect()
     }
 }
-/// Each mock's state, without its last draw: the mock draws once per run,
-/// so its draws follow where rounds end, which a single quantum step moves.
+/// Each mock's state, including its last draw, which shows its RNG stream
+/// continued across the restore.
 fn states(worker: &mut Worker<Mock>) -> Vec<Data> {
     worker
         .driver
-        .with_barrier(|b| {
-            Ok(b.machines()
-                .map(|(_, m)| Data {
-                    random: [0; 8],
-                    ..m.data.clone()
-                })
-                .collect())
-        })
+        .with_barrier(|b| Ok(b.machines().map(|(_, m)| m.data.clone()).collect()))
         .unwrap()
 }
 fn drive(worker: &mut Worker<Mock>, observed: &mut Observed, upto: u64) {

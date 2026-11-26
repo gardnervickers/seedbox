@@ -25,6 +25,8 @@ struct Data {
     crashes: u64,
     random: [u8; 8],
 }
+/// The machine-time grid at whose points a [`Mock`] draws from its RNG.
+const DRAW_GRID_NS: u64 = 10;
 struct Mock {
     data: Data,
     runs: Arc<AtomicUsize>,
@@ -69,11 +71,14 @@ impl Machine for Mock {
                 .unwrap();
             self.data.first = false;
         }
-        if upto.as_nanos() > c.clock.now() {
+        // One draw, and one output of it, at each grid point the run crosses:
+        // where the run ends never changes what is drawn (C3).
+        let first = (c.clock.now() / DRAW_GRID_NS + 1) * DRAW_GRID_NS;
+        for at in (first..=upto.as_nanos()).step_by(DRAW_GRID_NS as usize) {
             c.rng.fill_bytes(&mut self.data.random);
             c.outbox
                 .emit(Output {
-                    at: upto,
+                    at: Timestamp::from_nanos(at),
                     payload: Response::ApplicationOutput {
                         stream: Stream::Stdout,
                         bytes: self.data.random.to_vec(),
