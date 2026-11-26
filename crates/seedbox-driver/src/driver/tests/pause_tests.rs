@@ -6,7 +6,6 @@ fn invalid_adoption_report_is_rejected_and_pause_schedule_validation_is_atomic()
     let mut driver = crate::driver::fixture::driver(
         at(0),
         Duration::from_nanos(10),
-        1,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || {

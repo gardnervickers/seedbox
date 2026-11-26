@@ -39,8 +39,6 @@ pub struct ExecutionRequest<'a> {
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,
     pub output: &'a Path,
     pub cancellation: &'a CancellationToken,
-    /// Recorded per attempt, excluded from semantic identity/profile comparison.
-    pub performance_parameters: &'a BTreeMap<String, String>,
     /// Prepares machines the oracle spawns that `prepared` does not retain.
     /// Without one, such a spawn ends the run with an error.
     pub spawner: Option<&'a dyn Spawner>,
@@ -85,10 +83,6 @@ pub trait ExecutionBackend: Send + Sync {
     }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
-    /// Only knobs whose witness invariance has been qualified belong here.
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        BTreeMap::new()
-    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport>;
     /// Add the machines this attempt's spawns prepared to `inputs`, so a
     /// replay builds them without preparing them again. Returns whether

@@ -57,7 +57,6 @@ fn cold_mock_without_reports_keeps_evidence_getter_apis_available() {
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         std::time::Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         oracle,

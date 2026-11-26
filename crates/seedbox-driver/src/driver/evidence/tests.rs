@@ -51,7 +51,7 @@ fn policy_projection_does_not_capture_native_state_draw_rng_or_retain_publicatio
     reference_observer_session(&mut d);
     let expected = advance(&mut d, 60);
     let expected_states = states(&d);
-    let mut reference = restore(&captured, 1);
+    let mut reference = restore(&captured);
     assert_eq!(advance(&mut reference, 60), expected);
     assert_eq!(states(&reference), expected_states);
     assert_eq!(evidence(&mut reference), evidence(&mut d));
@@ -75,7 +75,7 @@ fn actual_pending_and_applied_policy_not_only_events_enters_the_projection() {
     assert_ne!(evidence(&mut d), pending);
 }
 #[test]
-fn logical_policy_continuation_is_independent_of_worker_resources() {
+fn logical_policy_continuation_is_independent_of_execution_resources() {
     let mut d = build(
         vec![spec(0, true, vec![]), spec(1, true, vec![])],
         vec![],
@@ -84,14 +84,12 @@ fn logical_policy_continuation_is_independent_of_worker_resources() {
     advance(&mut d, 20);
     let captured = d.checkpoint().unwrap();
     let expected = evidence(&mut d);
-    for workers in [1, 4] {
-        let mut branch = restore(&captured, workers);
-        assert_eq!(evidence(&mut branch), expected);
-        advance(&mut branch, 80);
-        let mut reference = restore(&captured, 1);
-        advance(&mut reference, 80);
-        assert_eq!(evidence(&mut branch), evidence(&mut reference));
-    }
+    let mut branch = restore(&captured);
+    assert_eq!(evidence(&mut branch), expected);
+    advance(&mut branch, 80);
+    let mut reference = restore(&captured);
+    advance(&mut reference, 80);
+    assert_eq!(evidence(&mut branch), evidence(&mut reference));
 }
 #[test]
 fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
@@ -136,7 +134,6 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
         Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            1,
             51,
             || Ok(Context(None)),
             definitions[0].clone(),
@@ -155,7 +152,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     disabled.set_frame_capacity(0);
     let (encoded, store) = artifact(disabled.checkpoint().unwrap());
     let captured = decode(&encoded, &store);
-    let mut restored_cleared = restore(&captured, 4);
+    let mut restored_cleared = restore(&captured);
     let cleared = disabled.drain_observations().frames;
     assert_eq!(
         restored_cleared.drain_observations().frames,
@@ -176,7 +173,7 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     assert_eq!(evidence(&mut observed), before);
 
     // Capture while deliveries are still pending. Restore host observation
-    // independently of the captured buffer, with either worker count.
+    // independently of the captured buffer.
     // The capture is at a round's natural end: a barrier the caller asks for
     // inside a round adds a commit, which policy evidence counts.
     let mut source = make(8);
@@ -187,15 +184,13 @@ fn optional_frame_capture_capacity_and_draining_never_change_policy_evidence() {
     let mut uninterrupted = make(0);
     advance(&mut uninterrupted, 80);
     let expected = evidence(&mut uninterrupted);
-    for workers in [1, 4] {
-        for capacity in [0, 8] {
-            let mut branch = restore(&checkpoint, workers);
-            branch.set_frame_capacity(capacity);
-            let observations = branch.drain_observations().frames;
-            assert_eq!(observations, FrameFacts::default());
-            advance(&mut branch, 80);
-            assert_eq!(evidence(&mut branch), expected);
-        }
+    for capacity in [0, 8] {
+        let mut branch = restore(&checkpoint);
+        branch.set_frame_capacity(capacity);
+        let observations = branch.drain_observations().frames;
+        assert_eq!(observations, FrameFacts::default());
+        advance(&mut branch, 80);
+        assert_eq!(evidence(&mut branch), expected);
     }
 }
 #[test]
@@ -243,9 +238,9 @@ fn one_component_mutations_change_only_their_own_part_of_the_projection() {
     advance(&mut source, 10);
     assert!(source.execution.network.is_idle());
     let captured = source.checkpoint().unwrap();
-    let mut base = restore(&captured, 1);
+    let mut base = restore(&captured);
     let original = (evidence(&mut base), components(&base));
-    let mut again = restore(&captured, 4);
+    let mut again = restore(&captured);
     assert_eq!((evidence(&mut again), components(&again)), original);
     let changed = |d: &mut Driver<Mock>| {
         let parts = components(d);
@@ -254,7 +249,7 @@ fn one_component_mutations_change_only_their_own_part_of_the_projection() {
     };
 
     // One link-queue entry: a frame in flight between the two machines.
-    let mut queued = restore(&captured, 1);
+    let mut queued = restore(&captured);
     let Response::TransmitFrame { bytes } = frame(mac(1), 9) else {
         unreachable!()
     };
@@ -272,7 +267,7 @@ fn one_component_mutations_change_only_their_own_part_of_the_projection() {
     );
 
     // One pending host fault, with links and control untouched.
-    let mut pending = restore(&captured, 1);
+    let mut pending = restore(&captured);
     pending
         .with_barrier(|b| {
             b.schedule(
@@ -291,7 +286,7 @@ fn one_component_mutations_change_only_their_own_part_of_the_projection() {
     // An applied partition is network state held by its input's handle; once
     // applied it is no longer scheduled work, and healing changes the network
     // part again.
-    let mut cut = restore(&captured, 1);
+    let mut cut = restore(&captured);
     cut.with_barrier(|b| {
         b.schedule(
             at(10),

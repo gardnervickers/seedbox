@@ -22,8 +22,7 @@ fn tcg(scenario: &Scenario) -> Run {
         factory.create(definition)
     });
     eprintln!(
-        "tcg driver run (workers {}): {} events, {} TCP retransmissions, client {:?}, outcome {:?}",
-        scenario.workers,
+        "tcg driver run: {} events, {} TCP retransmissions, client {:?}, outcome {:?}",
         result.events.len(),
         result.tcp_retransmissions(),
         result.stdout[2],
@@ -34,7 +33,7 @@ fn tcg(scenario: &Scenario) -> Run {
 
 #[test]
 #[ignore = "requires patched QEMU, TCG assets and network fixtures"]
-fn tcg_driver_network_exchange_is_identical_across_worker_counts() {
+fn tcg_driver_network_exchange_is_clean() {
     scenario::clean_exchange(tcg);
 }
 
