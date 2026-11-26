@@ -73,7 +73,6 @@ fn driver(fail: bool) -> (Driver<EvidenceMachine>, Arc<AtomicUsize>) {
         fixture::driver(
             Timestamp::from_nanos(0),
             Duration::from_nanos(100),
-            1,
             SeededRng::new(0),
             || Ok(()),
             || Ok(vec![machine]),

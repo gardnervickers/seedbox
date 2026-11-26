@@ -128,7 +128,6 @@ fn make_with(target: Fixture) -> (Driver<Fixture>, MachineId) {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        2,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
@@ -387,7 +386,6 @@ fn failed_admission_run_poisons_before_any_response_can_be_observed() {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        2,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),

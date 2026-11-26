@@ -31,13 +31,6 @@ pub fn engine() -> Result<PathBuf> {
     })
 }
 
-/// Machine worker threads when `--machine-workers` is omitted: one per machine,
-/// within 1..=64.
-pub fn machine_workers(machines: usize) -> u32 {
-    // Bounded by the clamp, so the conversion cannot truncate.
-    machines.clamp(1, 64) as u32
-}
-
 /// An explicitly named input, checked before any slow preparation starts.
 pub fn existing(what: &str, path: PathBuf) -> Result<PathBuf> {
     if path.exists() {
@@ -64,14 +57,6 @@ fn missing(what: &str, searched: &[PathBuf], fix: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn machine_workers_are_one_per_machine_within_bounds() {
-        assert_eq!(machine_workers(3), 3);
-        assert_eq!(machine_workers(0), 1);
-        assert_eq!(machine_workers(64), 64);
-        assert_eq!(machine_workers(100), 64);
-    }
-
     #[test]
     fn project_directory_resolves_only_native_files() {
         let directory = tempfile::tempdir().unwrap();

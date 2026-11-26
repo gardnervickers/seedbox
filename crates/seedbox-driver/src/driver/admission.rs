@@ -90,9 +90,7 @@ impl PreparedInput {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Drain all work already due now, bypassing host pacing only for dispatch.
     ///
@@ -304,9 +302,7 @@ where
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Same dispatch owners/order as apply_due: timeline, then frames.
     /// Runnable machines are not zero-time work, including those whose timer
@@ -364,9 +360,7 @@ where
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     #[cfg(test)]
     pub(super) fn input_admission(

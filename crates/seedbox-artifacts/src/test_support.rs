@@ -77,7 +77,6 @@ pub fn fixture() -> sb::record::RunRecord {
         run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
         identity,
         attempt: "fixture".into(),
-        performance_parameters: BTreeMap::new(),
         log_policy: LogPolicy::default(),
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
