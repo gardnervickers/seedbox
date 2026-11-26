@@ -55,7 +55,6 @@ pub struct RunRecord {
     /// Distinct executions of the same identity never share output paths.
     pub attempt: String,
     pub identity: RunIdentity,
-    pub performance_parameters: BTreeMap<String, String>,
     pub log_policy: LogPolicy,
     pub omitted_logs: BTreeMap<String, String>,
     pub outcome: Outcome,

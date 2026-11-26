@@ -13,7 +13,7 @@ fn receive(socket: &UnixDatagram) -> Observation {
 }
 #[test]
 fn routed_frame_fates_and_overflow_map_to_observations_not_witness() {
-    let (root, worker, _) = worker(1);
+    let (root, worker, _) = worker();
     let socket_path = root.path().join("frames.sock");
     let socket = UnixDatagram::bind(&socket_path).unwrap();
     observation::configure_socket(&socket).unwrap();
@@ -133,11 +133,8 @@ impl Machine for FrameMock {
         self.0.snapshot()
     }
 }
-fn frame_worker(
-    workers: usize,
-    observed: bool,
-) -> (tempfile::TempDir, Worker<FrameMock>, UnixDatagram) {
-    let (root, old, runs) = worker(1);
+fn frame_worker(observed: bool) -> (tempfile::TempDir, Worker<FrameMock>, UnixDatagram) {
+    let (root, old, runs) = worker();
     let socket_path = root.path().join("network.sock");
     let socket = UnixDatagram::bind(&socket_path).unwrap();
     observation::configure_socket(&socket).unwrap();
@@ -171,7 +168,6 @@ fn frame_worker(
     let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         42,
         || Ok(()),
         definition("oracle"),
@@ -218,52 +214,50 @@ fn frame_worker(
     (root, w, socket)
 }
 #[test]
-fn routed_frame_draining_keeps_policy_and_event_witness_equal_off_on_and_workers_1_4() {
+fn routed_frame_draining_keeps_policy_and_event_witness_equal_off_and_on() {
     let mut evidence = vec![];
-    for workers in [1, 4] {
-        for observed in [false, true] {
-            let (_root, mut worker, socket) = frame_worker(workers, observed);
-            for at in [10, 20, 30] {
-                worker.step(Timestamp::from_nanos(at)).unwrap();
-            }
-            let mut frames = vec![];
-            while let Ok(observation) = {
-                let mut bytes = [0; observation::MAX_DATAGRAM_BYTES + 1];
-                socket
-                    .recv(&mut bytes)
-                    .map(|n| serde_json::from_slice::<Observation>(&bytes[..n]).unwrap())
-            } {
-                if let Kind::Frames { frames: batch } = observation.kind {
-                    frames.extend(batch);
-                }
-            }
-            assert_eq!(frames.len(), 3 * usize::from(observed));
-            if observed {
-                assert_eq!(frames[0].from, "sender");
-                assert_eq!(frames[0].to, "receiver");
-                assert_eq!(frames[0].fate, observation::FrameFate::Scheduled);
-                assert_eq!(frames[0].due_ns, Some(frames[0].sent_ns + 10));
-                assert_eq!(frames[0].bytes, 64);
-            }
-            let mut policy = vec![];
-            worker
-                .driver
-                .with_barrier(|b| {
-                    b.write_policy_evidence(&mut policy).unwrap();
-                    Ok(())
-                })
-                .unwrap();
-            let publication = &worker.state.world.publication;
-            evidence.push((
-                policy,
-                worker.publisher.published.clone(),
-                publication.session.next_driver_sequence,
-            ));
-            assert_eq!(
-                worker.driver.drain_observations().frames,
-                FrameFacts::default()
-            );
+    for observed in [false, true] {
+        let (_root, mut worker, socket) = frame_worker(observed);
+        for at in [10, 20, 30] {
+            worker.step(Timestamp::from_nanos(at)).unwrap();
         }
+        let mut frames = vec![];
+        while let Ok(observation) = {
+            let mut bytes = [0; observation::MAX_DATAGRAM_BYTES + 1];
+            socket
+                .recv(&mut bytes)
+                .map(|n| serde_json::from_slice::<Observation>(&bytes[..n]).unwrap())
+        } {
+            if let Kind::Frames { frames: batch } = observation.kind {
+                frames.extend(batch);
+            }
+        }
+        assert_eq!(frames.len(), 3 * usize::from(observed));
+        if observed {
+            assert_eq!(frames[0].from, "sender");
+            assert_eq!(frames[0].to, "receiver");
+            assert_eq!(frames[0].fate, observation::FrameFate::Scheduled);
+            assert_eq!(frames[0].due_ns, Some(frames[0].sent_ns + 10));
+            assert_eq!(frames[0].bytes, 64);
+        }
+        let mut policy = vec![];
+        worker
+            .driver
+            .with_barrier(|b| {
+                b.write_policy_evidence(&mut policy).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let publication = &worker.state.world.publication;
+        evidence.push((
+            policy,
+            worker.publisher.published.clone(),
+            publication.session.next_driver_sequence,
+        ));
+        assert_eq!(
+            worker.driver.drain_observations().frames,
+            FrameFacts::default()
+        );
     }
     for result in &evidence[1..] {
         assert_eq!(result, &evidence[0]);
@@ -274,7 +268,7 @@ fn routed_frame_draining_keeps_policy_and_event_witness_equal_off_on_and_workers
 fn actual_bounded_routing_overflow_reports_a_source_gap_and_keeps_authority() {
     let mut evidence = vec![];
     for capacity in [1, 1024] {
-        let (_root, mut worker, socket) = frame_worker(1, true);
+        let (_root, mut worker, socket) = frame_worker(true);
         worker.driver.set_frame_capacity(capacity);
         worker.step(Timestamp::from_nanos(10)).unwrap();
         let mut observations = vec![];

@@ -1,5 +1,5 @@
 //! Test-only structural encoding of committed Driver events. Unit tests compare
-//! these values across worker counts and observation settings; production keeps
+//! these values across observation settings and restores; production keeps
 //! no per-event evidence.
 use super::{action_name, control_action, invalid, members, name};
 use crate::Result;

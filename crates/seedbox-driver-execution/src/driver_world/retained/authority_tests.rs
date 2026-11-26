@@ -159,7 +159,6 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         fs::create_dir(&output).unwrap();
         let simulation = crate::fixture_simulation("oracle");
         let cancellation = CancellationToken::default();
-        let performance = BTreeMap::new();
         let request = ExecutionRequest {
             start_paused: true,
             resume_checkpoint: None,
@@ -179,7 +178,6 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
             artifacts: &artifacts,
             output: &output,
             cancellation: &cancellation,
-            performance_parameters: &performance,
             spawner: None,
         };
         mismatch(
@@ -247,7 +245,6 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         fs::create_dir(&output).unwrap();
         let simulation = crate::fixture_simulation("oracle");
         let cancellation = CancellationToken::default();
-        let performance = BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "4".into())]);
         let request = ExecutionRequest {
             start_paused: true,
             resume_checkpoint: None,
@@ -267,7 +264,6 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             artifacts: &artifacts,
             output: &output,
             cancellation: &cancellation,
-            performance_parameters: &performance,
             spawner: None,
         };
         let launch =
@@ -291,7 +287,6 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
             prepared.oracle.process.argv
         );
         assert_eq!(retained.seed, 42);
-        assert_eq!(retained.machine_workers, 4);
         assert!(retained.start_paused);
         assert!(!output.join("world.json").exists());
         drop(launch);
@@ -335,21 +330,17 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
 }
 
 #[test]
-fn request_keeps_mapping_import_and_worker_option_error_order() {
+fn request_reports_mapping_and_import_errors() {
     use crate::execution::PreparedImage;
     use seedbox_artifacts::image::Launch;
 
     for (case, expected) in [
-        ("mapping_before_workers", "was not retained/materialized"),
-        (
-            "import_before_workers",
-            "truncated complete newc boot archive",
-        ),
-        ("invalid_workers", "worker count must be in 1..64"),
+        ("missing_mapping", "was not retained/materialized"),
+        ("truncated_import", "truncated complete newc boot archive"),
     ] {
         let root = tempfile::tempdir().unwrap();
         let store = ContentStore::new(root.path().join("store"));
-        let bytes: &[u8] = if case == "import_before_workers" {
+        let bytes: &[u8] = if case == "truncated_import" {
             b"070701"
         } else {
             b"metadata fixture"
@@ -381,7 +372,7 @@ fn request_keeps_mapping_import_and_worker_option_error_order() {
             ..artifact
         };
         if let wire::Inventory::Tcg { kernel, .. } = &mut prepared.inventory {
-            if case == "mapping_before_workers" {
+            if case == "missing_mapping" {
                 *kernel = missing;
             }
         }
@@ -401,7 +392,6 @@ fn request_keeps_mapping_import_and_worker_option_error_order() {
         fs::create_dir(&output).unwrap();
         let simulation = crate::fixture_simulation("oracle");
         let cancellation = CancellationToken::default();
-        let performance = BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "0".into())]);
         let request = ExecutionRequest {
             start_paused: true,
             resume_checkpoint: None,
@@ -421,7 +411,6 @@ fn request_keeps_mapping_import_and_worker_option_error_order() {
             artifacts: &artifacts,
             output: &output,
             cancellation: &cancellation,
-            performance_parameters: &performance,
             spawner: None,
         };
         let error = super::request(&request, &output.join("host.sock"), None)
@@ -706,7 +695,6 @@ fn adapt_prepared(
     fs::create_dir(&output).unwrap();
     let simulation = crate::fixture_simulation("oracle");
     let cancellation = CancellationToken::default();
-    let performance = BTreeMap::new();
     let request = ExecutionRequest {
         start_paused: true,
         resume_checkpoint: None,
@@ -726,7 +714,6 @@ fn adapt_prepared(
         artifacts: &artifacts,
         output: &output,
         cancellation: &cancellation,
-        performance_parameters: &performance,
         spawner: None,
     };
     super::request(&request, &output.join("host.sock"), None)

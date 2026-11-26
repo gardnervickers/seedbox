@@ -81,7 +81,7 @@ impl Machine for NetworkModel {
         }))
     }
 }
-fn make(workers: usize, capacity: usize) -> Driver<NetworkModel> {
+fn make(capacity: usize) -> Driver<NetworkModel> {
     let mut sender = factory_definition::definition(0);
     sender.name = "sender".into();
     let mut receiver = factory_definition::definition(1);
@@ -99,7 +99,6 @@ fn make(workers: usize, capacity: usize) -> Driver<NetworkModel> {
     Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(()),
         sender,
@@ -157,59 +156,54 @@ fn assert_delivered(driver: &mut Driver<NetworkModel>) {
         .unwrap();
 }
 #[test]
-fn fresh_and_restored_frame_observation_and_workers_preserve_policy_and_native_composition() {
+fn fresh_and_restored_frame_observation_preserve_policy_and_native_composition() {
     let mut expected_pending = None;
     let mut expected_final = None;
-    for workers in [1, 4] {
-        // Zero disables observation; one exercises retained facts AND overflow.
-        for capacity in [0, 1] {
-            let mut source = make(workers, capacity);
-            advance(&mut source, 1, 10);
-            let pending = evidence(&mut source);
-            if let Some(expected) = &expected_pending {
-                assert_eq!(&pending, expected);
-            } else {
-                expected_pending = Some(pending.clone());
-            }
-            let checkpoint = source.checkpoint().unwrap();
-            // Capture leaves source observations intact but does not retain them.
-            let retained = source.drain_observations().frames;
-            assert_eq!(retained.facts.len(), capacity);
-            assert_eq!(retained.omitted, if capacity == 0 { 0 } else { 2 });
-            advance(&mut source, 11, 80);
-            assert_delivered(&mut source);
-            let finished = evidence(&mut source);
-            assert_ne!(
-                pending.0, finished.0,
-                "delivery must change policy evidence"
-            );
-            assert_ne!(
-                pending.1, finished.1,
-                "delivery must change native composition"
-            );
-            if let Some(expected) = &expected_final {
-                assert_eq!(&finished, expected);
-            } else {
-                expected_final = Some(finished.clone());
-            }
-            for restored_workers in [1, 4] {
-                for restored_capacity in [0, 1] {
-                    let mut branch = Driver::<NetworkModel>::from_checkpoint(
-                        &checkpoint,
-                        restored_workers,
-                        || Ok(()),
-                        |snapshot| Ok(snapshot.clone()),
-                        |definition| Ok(NetworkModel::new(definition.name == "sender")),
-                    )
-                    .unwrap();
-                    assert_eq!(branch.drain_observations().frames, FrameFacts::default());
-                    branch.set_frame_capacity(restored_capacity);
-                    assert_eq!(evidence(&mut branch), pending);
-                    advance(&mut branch, 11, 80);
-                    assert_delivered(&mut branch);
-                    assert_eq!(evidence(&mut branch), finished);
-                }
-            }
+    // Zero disables observation; one exercises retained facts AND overflow.
+    for capacity in [0, 1] {
+        let mut source = make(capacity);
+        advance(&mut source, 1, 10);
+        let pending = evidence(&mut source);
+        if let Some(expected) = &expected_pending {
+            assert_eq!(&pending, expected);
+        } else {
+            expected_pending = Some(pending.clone());
+        }
+        let checkpoint = source.checkpoint().unwrap();
+        // Capture leaves source observations intact but does not retain them.
+        let retained = source.drain_observations().frames;
+        assert_eq!(retained.facts.len(), capacity);
+        assert_eq!(retained.omitted, if capacity == 0 { 0 } else { 2 });
+        advance(&mut source, 11, 80);
+        assert_delivered(&mut source);
+        let finished = evidence(&mut source);
+        assert_ne!(
+            pending.0, finished.0,
+            "delivery must change policy evidence"
+        );
+        assert_ne!(
+            pending.1, finished.1,
+            "delivery must change native composition"
+        );
+        if let Some(expected) = &expected_final {
+            assert_eq!(&finished, expected);
+        } else {
+            expected_final = Some(finished.clone());
+        }
+        for restored_capacity in [0, 1] {
+            let mut branch = Driver::<NetworkModel>::from_checkpoint(
+                &checkpoint,
+                || Ok(()),
+                |snapshot| Ok(snapshot.clone()),
+                |definition| Ok(NetworkModel::new(definition.name == "sender")),
+            )
+            .unwrap();
+            assert_eq!(branch.drain_observations().frames, FrameFacts::default());
+            branch.set_frame_capacity(restored_capacity);
+            assert_eq!(evidence(&mut branch), pending);
+            advance(&mut branch, 11, 80);
+            assert_delivered(&mut branch);
+            assert_eq!(evidence(&mut branch), finished);
         }
     }
 }

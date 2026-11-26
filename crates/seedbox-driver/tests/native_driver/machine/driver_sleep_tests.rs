@@ -108,7 +108,6 @@ fn reply_read_times(events: &[MachineResponse], machine: MachineId) -> Vec<u64> 
 }
 fn scenario<M>(
     backend: &str,
-    workers: usize,
     migrate: bool,
     mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
 ) -> (Vec<StepOutcome>, Vec<MachineResponse>)
@@ -158,7 +157,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(19),
         || Ok(()),
         oracle,
@@ -340,7 +338,7 @@ where
         .unwrap();
     (outcomes, events)
 }
-fn tcg(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
+fn tcg(migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
     let qemu = input("SEEDBOX_TCG_QEMU");
     let mut factory = super::tcg::Factory::new(
         &qemu,
@@ -348,7 +346,7 @@ fn tcg(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>
         crate::machine::TEST_EPOCH_SECONDS,
     )
     .unwrap();
-    scenario("TCG", workers, migrate, move |definition| {
+    scenario("TCG", migrate, move |definition| {
         let qemu = qemu.clone();
         Migrating {
             inner: factory.create(definition).unwrap(),
@@ -360,17 +358,11 @@ fn tcg(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and driver-control application"]
-fn tcg_driver_guest_sleep_matches_workers_and_snapshot() {
-    let serial = tcg(1, false);
-    for workers in [1, 2, 4] {
-        if workers != 1 {
-            assert_eq!(serial, tcg(workers, false), "workers={workers}");
-        }
-        assert_eq!(serial, tcg(workers, true), "restored workers={workers}");
-    }
+fn tcg_driver_guest_sleep_matches_snapshot() {
+    assert_eq!(tcg(false), tcg(true), "restored");
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
+fn pv(migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>) {
     let worker = input("SEEDBOX_PV_WORKER");
     let mut factory = super::pv::Factory::new(
         &worker,
@@ -378,7 +370,7 @@ fn pv(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>)
         crate::machine::TEST_EPOCH_SECONDS,
     )
     .unwrap();
-    scenario("PV", workers, migrate, move |definition| {
+    scenario("PV", migrate, move |definition| {
         let worker = worker.clone();
         Migrating {
             inner: factory.create(definition).unwrap(),
@@ -391,12 +383,6 @@ fn pv(workers: usize, migrate: bool) -> (Vec<StepOutcome>, Vec<MachineResponse>)
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and driver-control application"]
-fn pv_driver_guest_sleep_matches_workers_and_snapshot() {
-    let serial = pv(1, false);
-    for workers in [1, 2, 4] {
-        if workers != 1 {
-            assert_eq!(serial, pv(workers, false), "workers={workers}");
-        }
-        assert_eq!(serial, pv(workers, true), "restored workers={workers}");
-    }
+fn pv_driver_guest_sleep_matches_snapshot() {
+    assert_eq!(pv(false), pv(true), "restored");
 }

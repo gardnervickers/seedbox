@@ -1,11 +1,10 @@
 use super::fixture::auto_key;
 use super::*;
 
-fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
+fn controlled(programs: &[&[Op]]) -> Driver<TestMachine> {
     crate::driver::fixture::driver(
         at(0),
         Duration::from_nanos(10),
-        workers,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || {
@@ -21,7 +20,7 @@ fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
 
 #[test]
 fn reboot_schedule_errors_leave_queue_unchanged() {
-    let mut driver = controlled(1, &[&[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(3)).unwrap(),

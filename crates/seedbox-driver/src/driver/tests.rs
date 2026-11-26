@@ -180,7 +180,6 @@ fn build(start: u64, programs: &[&[Op]]) -> Driver<TestMachine> {
     super::fixture::driver(
         at(start),
         std::time::Duration::from_nanos(1000),
-        2,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || {
@@ -252,7 +251,6 @@ fn failed_construction_preserves_existing_machines_and_id_order() {
     let failed = Driver::<TestMachine>::new(
         at(0),
         std::time::Duration::from_nanos(1000),
-        2,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         super::fixture::definition(0),
@@ -535,43 +533,37 @@ fn execution_and_invalid_stop_failures_prevent_all_further_dispatch() {
 
 #[test]
 fn crash_failure_and_backwards_step_prevent_retry() {
-    // Any pool, even one larger than the world, fails the crash the same way,
-    // and a retry is refused before any machine runs again.
-    for workers in [1, 2, 8] {
-        let peer = Arc::new(Mutex::new(Vec::new()));
-        let log = peer.clone();
-        let mut driver = super::fixture::driver(
-            at(3),
-            std::time::Duration::from_nanos(1000),
-            workers,
-            crate::rng::SeededRng::new(0),
-            || Ok(()),
-            move || {
-                let mut guest = machine(0, &[Op::Fail]);
-                guest.fail_crash = true;
-                let mut peer = machine(1, &[Op::Park]);
-                peer.log = log;
-                Ok(vec![guest, peer])
-            },
-        )
-        .unwrap();
-        let id = ids(&mut driver)[0];
-        schedule(&mut driver, 3, Action::Crash(Target::Machine(id))).unwrap();
-        assert!(
-            matches!(
-                driver.step(at(3)),
-                Err(Error::Machine {
-                    id: MachineId(0),
-                    ..
-                })
-            ),
-            "{workers} workers"
-        );
-        let runs = peer.lock().unwrap().len();
-        assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
-        assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
-        assert_eq!(peer.lock().unwrap().len(), runs, "{workers} workers");
-    }
+    // A failed crash poisons the driver, and a retry is refused before any
+    // machine runs again.
+    let peer = Arc::new(Mutex::new(Vec::new()));
+    let log = peer.clone();
+    let mut driver = super::fixture::driver(
+        at(3),
+        std::time::Duration::from_nanos(1000),
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        move || {
+            let mut guest = machine(0, &[Op::Fail]);
+            guest.fail_crash = true;
+            let mut peer = machine(1, &[Op::Park]);
+            peer.log = log;
+            Ok(vec![guest, peer])
+        },
+    )
+    .unwrap();
+    let id = ids(&mut driver)[0];
+    schedule(&mut driver, 3, Action::Crash(Target::Machine(id))).unwrap();
+    assert!(matches!(
+        driver.step(at(3)),
+        Err(Error::Machine {
+            id: MachineId(0),
+            ..
+        })
+    ));
+    let runs = peer.lock().unwrap().len();
+    assert!(matches!(driver.step(at(4)), Err(Error::Failed)));
+    assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
+    assert_eq!(peer.lock().unwrap().len(), runs);
     let mut driver = build(3, &[&[Op::Park]]);
     assert!(matches!(driver.step(at(2)), Err(Error::PastTime { .. })));
     assert!(matches!(driver.step(at(3)), Err(Error::Failed)));
@@ -607,7 +599,6 @@ fn quantum_boundaries_survive_short_steps_actions_and_additions() {
     let mut driver = super::fixture::driver(
         at(7),
         Duration::from_nanos(10),
-        2,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || Ok(vec![machine(0, &[Op::Work(100), Op::Exit])]),
@@ -640,7 +631,6 @@ fn idle_time_does_not_skip_quantum_boundaries() {
     let mut driver = super::fixture::driver(
         at(0),
         Duration::from_nanos(10),
-        2,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || Ok(vec![machine(0, &[Op::Sleep(25), Op::Exit])]),
@@ -664,16 +654,14 @@ fn idle_time_does_not_skip_quantum_boundaries() {
 
 #[test]
 fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
-    for (start, quantum, workers) in [
-        (0, Duration::ZERO, 1),
-        (0, Duration::from_secs(u64::MAX), 1),
-        (0, Duration::from_nanos(1), 0),
-        (u64::MAX, Duration::from_nanos(1), 1),
+    for (start, quantum) in [
+        (0, Duration::ZERO),
+        (0, Duration::from_secs(u64::MAX)),
+        (u64::MAX, Duration::from_nanos(1)),
     ] {
         assert!(Driver::<TestMachine>::new(
             at(start),
             quantum,
-            workers,
             crate::rng::SeededRng::new(0),
             || panic!("invalid configuration created a context"),
             super::fixture::definition(0),
@@ -687,7 +675,6 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
     let mut driver = super::fixture::driver(
         at(u64::MAX - 3),
         Duration::from_nanos(2),
-        1,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || Ok(vec![machine(0, &[Op::Work(100)])]),
@@ -710,62 +697,52 @@ fn invalid_configuration_never_calls_factories_and_overflow_never_runs_work() {
 }
 
 #[test]
-fn worker_count_preserves_barriers_machine_progress_and_action_order() {
-    let mut reference = None;
-    for workers in [1, 2, 4] {
-        let mut driver = super::fixture::driver(
-            at(0),
-            Duration::from_nanos(7),
-            workers,
-            crate::rng::SeededRng::new(0),
-            || Ok(()),
-            || {
-                Ok(vec![
-                    machine(0, &[Op::Work(2), Op::Sleep(15), Op::Work(3), Op::Exit]),
-                    machine(1, &[Op::Sleep(4), Op::Work(1), Op::Sleep(8), Op::Exit]),
-                    machine(2, &[Op::Sleep(7), Op::Fail]),
-                ])
-            },
-        )
-        .unwrap();
-        schedule(&mut driver, 7, Action::Pause(Target::Machine(MachineId(2)))).unwrap();
-        schedule(&mut driver, 7, Action::Crash(Target::Machine(MachineId(2)))).unwrap();
-        let mut outcomes = Vec::new();
-        loop {
-            let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome.clone());
-            if matches!(outcome, StepOutcome::Finished { .. }) {
-                break;
-            }
-            assert!(outcomes.len() < 20);
+fn barriers_preserve_machine_progress_and_action_order() {
+    let mut driver = super::fixture::driver(
+        at(0),
+        Duration::from_nanos(7),
+        crate::rng::SeededRng::new(0),
+        || Ok(()),
+        || {
+            Ok(vec![
+                machine(0, &[Op::Work(2), Op::Sleep(15), Op::Work(3), Op::Exit]),
+                machine(1, &[Op::Sleep(4), Op::Work(1), Op::Sleep(8), Op::Exit]),
+                machine(2, &[Op::Sleep(7), Op::Fail]),
+            ])
+        },
+    )
+    .unwrap();
+    schedule(&mut driver, 7, Action::Pause(Target::Machine(MachineId(2)))).unwrap();
+    schedule(&mut driver, 7, Action::Crash(Target::Machine(MachineId(2)))).unwrap();
+    let mut outcomes = Vec::new();
+    loop {
+        let outcome = driver.step(at(100)).unwrap();
+        outcomes.push(outcome.clone());
+        if matches!(outcome, StepOutcome::Finished { .. }) {
+            break;
         }
-        let machines = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(id, machine)| {
-                        (
-                            barrier.stopped(id).unwrap(),
-                            machine.log.lock().unwrap().clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>())
-            })
-            .unwrap();
-        // Both inputs' effects apply before the same-time timer: the paused
-        // machine crashes without ever running its failing work.
-        assert_eq!(machines[2].1, [(2, 0, 7)]);
-        let observed = (outcomes, machines);
-        if let Some(reference) = &reference {
-            assert_eq!(&observed, reference);
-        } else {
-            reference = Some(observed);
-        }
+        assert!(outcomes.len() < 20);
     }
+    let machines = driver
+        .with_barrier(|barrier| {
+            Ok(barrier
+                .machines()
+                .map(|(id, machine)| {
+                    (
+                        barrier.stopped(id).unwrap(),
+                        machine.log.lock().unwrap().clone(),
+                    )
+                })
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    // Both inputs' effects apply before the same-time timer: the paused
+    // machine crashes without ever running its failing work.
+    assert_eq!(machines[2].1, [(2, 0, 7)]);
 }
 
-// The callback lets concurrency tests coordinate host execution without giving
-// production machines any dependency on worker timing.
+// The callback lets tests observe host execution without giving production
+// machines any dependency on host timing.
 struct ProbeMachine(Box<dyn FnMut() -> Result<StopReason, std::io::Error> + Send>);
 impl Machine for ProbeMachine {
     type Context = ();
@@ -814,42 +791,23 @@ impl Machine for ProbeMachine {
 }
 
 #[test]
-fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
-    use std::sync::Condvar;
+fn clock_stays_fixed_and_failure_finishes_the_whole_batch() {
     for panic_first in [false, true] {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let peer_completed = Arc::new(AtomicBool::new(false));
         let completed = peer_completed.clone();
-        let overlapped = Arc::new(AtomicBool::new(false));
-        let observed_overlap = overlapped.clone();
         let mut driver = super::fixture::driver(
             at(0),
             Duration::from_nanos(10),
-            2,
             crate::rng::SeededRng::new(0),
             || Ok(()),
             || {
-                let waiter = gate.clone();
                 let first = ProbeMachine(Box::new(move || {
-                    let (lock, signal) = &*waiter;
-                    let (ready, _) = signal
-                        .wait_timeout_while(
-                            lock.lock().unwrap(),
-                            Duration::from_secs(30),
-                            |ready| !*ready,
-                        )
-                        .unwrap();
-                    assert!(*ready, "peer completion signal did not arrive");
-                    observed_overlap.store(true, Ordering::Relaxed);
                     if panic_first {
                         panic!("fixture panic");
                     }
                     Err(std::io::Error::other("first machine failed"))
                 }));
                 let second = ProbeMachine(Box::new(move || {
-                    let (lock, signal) = &*gate;
-                    *lock.lock().unwrap() = true;
-                    signal.notify_one();
                     completed.store(true, Ordering::Relaxed);
                     Err(std::io::Error::other("second machine failed"))
                 }));
@@ -870,7 +828,6 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
             ));
         }
         assert!(peer_completed.load(Ordering::Relaxed));
-        assert!(overlapped.load(Ordering::Relaxed));
         assert!(matches!(driver.step(at(10)), Err(Error::Failed)));
         assert!(matches!(
             driver.with_barrier::<()>(|_| panic!("failed barrier")),
@@ -879,63 +836,59 @@ fn calls_overlap_clock_stays_fixed_and_failure_joins_the_whole_batch() {
     }
 }
 
-/// A machine that panics on a pool thread fails its round like an error, on
-/// pools smaller than, equal to and larger than the world: every submitted call
-/// finishes, the round is not committed, and the lowest failing machine is
-/// reported whether it panicked or failed.
+/// A machine that panics fails its round like an error: every call in the
+/// round finishes, the round is not committed, and the lowest failing machine
+/// is reported whether it panicked or failed.
 #[test]
-fn a_panicking_machine_fails_its_round_on_every_pool_size() {
+fn a_panicking_machine_fails_its_round() {
     for (panicking, failing, reported) in [(2, None, 2), (2, Some(1), 1), (1, Some(2), 1)] {
-        for workers in [1, 2, 4, 8] {
-            let ran = Arc::new(AtomicUsize::new(0));
-            let calls = ran.clone();
-            let mut driver = super::fixture::driver(
-                at(0),
-                Duration::from_nanos(10),
-                workers,
-                crate::rng::SeededRng::new(0),
-                || Ok(()),
-                || {
-                    Ok((0..4)
-                        .map(|index| {
-                            let calls = calls.clone();
-                            ProbeMachine(Box::new(move || {
-                                calls.fetch_add(1, Ordering::SeqCst);
-                                if index == panicking {
-                                    panic!("fixture panic in machine {index}");
-                                }
-                                if Some(index) == failing {
-                                    return Err(std::io::Error::other("fixture failure"));
-                                }
-                                Ok(StopReason::Blocked {
-                                    reached: at(0),
-                                    deadline: None,
-                                })
-                            }))
-                        })
-                        .collect())
-                },
-            )
-            .unwrap();
-            let before = driver.position();
-            let error = driver.step(at(10)).unwrap_err();
-            let label = format!("panic {panicking}, fail {failing:?}, {workers} workers");
-            if reported == panicking {
-                assert!(
-                    matches!(error, Error::Panicked { id } if id == MachineId(reported)),
-                    "{label}: {error}"
-                );
-            } else {
-                assert!(
-                    matches!(error, Error::Machine { id, .. } if id == MachineId(reported)),
-                    "{label}: {error}"
-                );
-            }
-            assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
-            assert_eq!(driver.position(), before, "{label}");
-            assert!(matches!(driver.step(at(10)), Err(Error::Failed)), "{label}");
-            assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let calls = ran.clone();
+        let mut driver = super::fixture::driver(
+            at(0),
+            Duration::from_nanos(10),
+            crate::rng::SeededRng::new(0),
+            || Ok(()),
+            || {
+                Ok((0..4)
+                    .map(|index| {
+                        let calls = calls.clone();
+                        ProbeMachine(Box::new(move || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            if index == panicking {
+                                panic!("fixture panic in machine {index}");
+                            }
+                            if Some(index) == failing {
+                                return Err(std::io::Error::other("fixture failure"));
+                            }
+                            Ok(StopReason::Blocked {
+                                reached: at(0),
+                                deadline: None,
+                            })
+                        }))
+                    })
+                    .collect())
+            },
+        )
+        .unwrap();
+        let before = driver.position();
+        let error = driver.step(at(10)).unwrap_err();
+        let label = format!("panic {panicking}, fail {failing:?}");
+        if reported == panicking {
+            assert!(
+                matches!(error, Error::Panicked { id } if id == MachineId(reported)),
+                "{label}: {error}"
+            );
+        } else {
+            assert!(
+                matches!(error, Error::Machine { id, .. } if id == MachineId(reported)),
+                "{label}: {error}"
+            );
         }
+        assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
+        assert_eq!(driver.position(), before, "{label}");
+        assert!(matches!(driver.step(at(10)), Err(Error::Failed)), "{label}");
+        assert_eq!(ran.load(Ordering::SeqCst), 4, "{label}");
     }
 }
 
@@ -947,7 +900,6 @@ fn a_failed_step_waits_for_a_still_running_peer() {
     let mut driver = super::fixture::driver(
         at(0),
         Duration::from_nanos(10),
-        2,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         || {
@@ -1035,7 +987,6 @@ impl Machine for RandomMachine {
             context.rng.fill_bytes(&mut bytes);
             self.bytes.push(bytes);
             self.reached = upto.as_nanos();
-            std::thread::yield_now();
         }
         Ok(StopReason::BoundaryReached)
     }
@@ -1046,73 +997,64 @@ impl Machine for RandomMachine {
 }
 
 #[test]
-fn machine_rng_cursors_follow_identity_across_work_stealing_and_failed_addition() {
-    let mut reference = None;
-    for workers in [1, 2, 4] {
-        let mut driver = super::fixture::driver(
-            at(0),
-            Duration::from_nanos(10),
-            workers,
-            crate::rng::SeededRng::new(123),
-            || Ok(std::rc::Rc::new(std::cell::Cell::new(0))),
-            || {
-                Ok((0..7)
-                    .map(|_| RandomMachine {
-                        bytes: Vec::new(),
-                        reached: 0,
-                    })
-                    .collect())
-            },
-        )
+fn machine_rng_cursors_follow_identity_across_failed_addition() {
+    let mut driver = super::fixture::driver(
+        at(0),
+        Duration::from_nanos(10),
+        crate::rng::SeededRng::new(123),
+        || Ok(std::rc::Rc::new(std::cell::Cell::new(0))),
+        || {
+            Ok((0..7)
+                .map(|_| RandomMachine {
+                    bytes: Vec::new(),
+                    reached: 0,
+                })
+                .collect())
+        },
+    )
+    .unwrap();
+    driver.step(at(10)).unwrap();
+    driver
+        .with_barrier(|barrier| {
+            assert!(barrier
+                .add(|| Err(std::io::Error::other("fixture failed addition")))
+                .is_err());
+            let id = barrier.add(|| {
+                Ok(RandomMachine {
+                    bytes: Vec::new(),
+                    reached: 0,
+                })
+            })?;
+            barrier.schedule(at(20), auto_key(), Action::Pause(Target::Machine(id)))?;
+            barrier.schedule(at(40), auto_key(), Action::Resume(Target::Machine(id)))?;
+            // Capturing machine state never borrows or advances its RNG.
+            let first = barrier.machines().next().unwrap().0;
+            barrier.snapshot(first)?;
+            Ok(())
+        })
         .unwrap();
-        driver.step(at(10)).unwrap();
-        driver
-            .with_barrier(|barrier| {
-                assert!(barrier
-                    .add(|| Err(std::io::Error::other("fixture failed addition")))
-                    .is_err());
-                let id = barrier.add(|| {
-                    Ok(RandomMachine {
-                        bytes: Vec::new(),
-                        reached: 0,
-                    })
-                })?;
-                barrier.schedule(at(20), auto_key(), Action::Pause(Target::Machine(id)))?;
-                barrier.schedule(at(40), auto_key(), Action::Resume(Target::Machine(id)))?;
-                // Capturing machine state never borrows or advances its RNG.
-                let first = barrier.machines().next().unwrap().0;
-                barrier.snapshot(first)?;
-                Ok(())
-            })
-            .unwrap();
-        while driver.now() < at(60) {
-            driver.step(at(60)).unwrap();
-        }
-        let histories = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(_, m)| m.bytes.clone())
-                    .collect::<Vec<_>>())
-            })
-            .unwrap();
-        let mut global = crate::rng::SeededRng::new(123);
-        use crate::rng::{RngStream, RngStreamExt};
-        for history in &histories {
-            let mut child = crate::rng::SeededRng::new(global.next_u64());
-            for observed in history {
-                let mut expected = [0; 9];
-                child.fill_bytes(&mut expected);
-                assert_eq!(*observed, expected);
-            }
-        }
-        assert_ne!(histories[0], histories[1]);
-        if let Some(expected) = &reference {
-            assert_eq!(&histories, expected);
-        } else {
-            reference = Some(histories);
+    while driver.now() < at(60) {
+        driver.step(at(60)).unwrap();
+    }
+    let histories = driver
+        .with_barrier(|barrier| {
+            Ok(barrier
+                .machines()
+                .map(|(_, m)| m.bytes.clone())
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    let mut global = crate::rng::SeededRng::new(123);
+    use crate::rng::{RngStream, RngStreamExt};
+    for history in &histories {
+        let mut child = crate::rng::SeededRng::new(global.next_u64());
+        for observed in history {
+            let mut expected = [0; 9];
+            child.fill_bytes(&mut expected);
+            assert_eq!(*observed, expected);
         }
     }
+    assert_ne!(histories[0], histories[1]);
 }
 
 #[test]
@@ -1126,7 +1068,6 @@ fn stale_adoption_reports_are_rejected_and_poison_before_another_dispatch() {
             let mut driver = super::fixture::driver(
                 at(0),
                 Duration::from_nanos(10),
-                1,
                 crate::rng::SeededRng::new(0),
                 || Ok(()),
                 || {

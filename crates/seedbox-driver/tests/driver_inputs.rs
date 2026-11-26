@@ -120,7 +120,6 @@ impl RngStream for Rng {
 
 /// `oracle` followed by `names`, plus spawnable `spawn`; returns the initial IDs.
 fn world(
-    workers: usize,
     names: &[&str],
     spawn: &[&str],
     script: impl Fn(&str) -> Scripted + Send + 'static,
@@ -128,7 +127,6 @@ fn world(
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(1),
-        workers,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
@@ -239,7 +237,7 @@ fn guest_faults(name: &str) -> Scripted {
 #[test]
 fn enqueue_reserves_no_fault_handle_or_command_ids() {
     let run = |future: bool| {
-        let (mut driver, ids) = world(2, &["caller", "target"], &[], guest_faults);
+        let (mut driver, ids) = world(&["caller", "target"], &[], guest_faults);
         if future {
             // Not yet due: queued only, and never reaching admission.
             schedule(
@@ -294,7 +292,7 @@ fn enqueue_reserves_no_fault_handle_or_command_ids() {
 
 #[test]
 fn invalid_inputs_error_without_changing_the_queue() {
-    let (mut driver, ids) = world(1, &["target"], &["spare"], |_| Scripted::default());
+    let (mut driver, ids) = world(&["target"], &["spare"], |_| Scripted::default());
     let target = Target::Machine(ids[1]);
     assert_eq!(
         InputKey::new("bad key"),
@@ -348,7 +346,7 @@ fn invalid_inputs_error_without_changing_the_queue() {
         })
         .unwrap();
     // A foreign identity is unknown here.
-    let (mut other, _) = world(1, &["target"], &[], |_| Scripted::default());
+    let (mut other, _) = world(&["target"], &[], |_| Scripted::default());
     let foreign = other
         .with_barrier(|b| b.add(|| Ok(Scripted::default())))
         .unwrap();
@@ -379,7 +377,7 @@ fn invalid_inputs_error_without_changing_the_queue() {
 
 #[test]
 fn boot_binds_when_the_input_becomes_due() {
-    let (mut driver, ids) = world(1, &["target"], &[], |_| Scripted::default());
+    let (mut driver, ids) = world(&["target"], &[], |_| Scripted::default());
     let target = ids[1];
     // All scheduled at time zero; each binds the boot current at its due time.
     schedule(
@@ -418,7 +416,7 @@ fn boot_binds_when_the_input_becomes_due() {
 
 #[test]
 fn heal_by_key_or_handle_restores_nominal_and_rejects_inactive_targets() {
-    let (mut driver, ids) = world(1, &["caller", "target", "other"], &[], guest_faults);
+    let (mut driver, ids) = world(&["caller", "target", "other"], &[], guest_faults);
     let (target, other) = (ids[2], ids[3]);
     // Healing a key whose throttle is not yet admitted is rejected.
     schedule(
@@ -562,7 +560,7 @@ fn hold_script(name: &str) -> Scripted {
 
 #[test]
 fn pause_before_next_fault_holds_guest_and_input_effects_alike() {
-    let (mut driver, ids) = world(1, &["caller", "target"], &[], hold_script);
+    let (mut driver, ids) = world(&["caller", "target"], &[], hold_script);
     let target = ids[2];
     schedule(
         &mut driver,
@@ -671,7 +669,7 @@ fn pause_before_next_fault_holds_guest_and_input_effects_alike() {
 #[test]
 fn pending_inputs_are_never_admitted_after_stop_or_failure() {
     // Permanent stop.
-    let (mut driver, ids) = world(1, &["target"], &[], |_| Scripted::default());
+    let (mut driver, ids) = world(&["target"], &[], |_| Scripted::default());
     schedule(
         &mut driver,
         3,
@@ -691,7 +689,7 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
     );
     assert!(driver.drain_observations().events.is_empty());
     // Failure before the input is due.
-    let (mut driver, ids) = world(1, &["target"], &[], |name| Scripted {
+    let (mut driver, ids) = world(&["target"], &[], |name| Scripted {
         fail_at: (name == "target").then_some(2),
         ..Scripted::default()
     });
@@ -714,13 +712,10 @@ fn pending_inputs_are_never_admitted_after_stop_or_failure() {
     assert!(driver.drain_observations().events.is_empty());
 }
 
-fn mixed(workers: usize, by_name: bool) -> Vec<Event> {
-    let (mut driver, ids) = world(
-        workers,
-        &["caller", "target", "other"],
-        &["spare"],
-        |name| guest_script(name, false),
-    );
+fn mixed(by_name: bool) -> Vec<Event> {
+    let (mut driver, ids) = world(&["caller", "target", "other"], &["spare"], |name| {
+        guest_script(name, false)
+    });
     let target = |id: MachineId, name: &str| {
         if by_name {
             Target::Name(name.into())
@@ -783,13 +778,9 @@ fn mixed(workers: usize, by_name: bool) -> Vec<Event> {
 }
 
 #[test]
-fn name_targets_match_identity_targets_and_streams_are_worker_independent() {
-    let reference = mixed(1, false);
-    assert_eq!(mixed(1, true), reference);
-    for workers in [2, 4] {
-        assert_eq!(mixed(workers, false), reference);
-        assert_eq!(mixed(workers, true), reference);
-    }
+fn name_targets_match_identity_targets() {
+    let reference = mixed(false);
+    assert_eq!(mixed(true), reference);
     // Spawn admits once through the shared path; the duplicate is rejected.
     let spawned = reference
         .iter()
@@ -824,7 +815,7 @@ fn name_targets_match_identity_targets_and_streams_are_worker_independent() {
 
 #[test]
 fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
-    let (mut driver, ids) = world(1, &["target"], &[], |name| Scripted {
+    let (mut driver, ids) = world(&["target"], &[], |name| Scripted {
         script: if name == "oracle" {
             vec![Output {
                 at: at(3),
@@ -874,7 +865,7 @@ fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
 #[test]
 fn a_display_name_equal_to_an_internal_key_is_only_a_name() {
     // Machine 1 is named "machine:0"; no machine is named "machine:2".
-    let (mut driver, ids) = world(1, &["machine:0", "caller", "other"], &[], |name| Scripted {
+    let (mut driver, ids) = world(&["machine:0", "caller", "other"], &[], |name| Scripted {
         script: if name == "caller" {
             vec![
                 call(2, 1, on("pause", "machine:0")),
@@ -938,7 +929,7 @@ fn a_display_name_equal_to_an_internal_key_is_only_a_name() {
 
 #[test]
 fn a_key_is_reusable_after_its_stale_boot_settlement() {
-    let (mut driver, ids) = world(1, &["target"], &[], |_| Scripted::default());
+    let (mut driver, ids) = world(&["target"], &[], |_| Scripted::default());
     let target = Target::Machine(ids[1]);
     schedule(&mut driver, 1, "crash", Action::Crash(target.clone()));
     run_to(&mut driver, 2);

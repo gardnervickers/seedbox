@@ -83,7 +83,6 @@ fn acknowledged(events: &[Event], machine: MachineId, command: u32) -> bool {
 fn scenario<M>(
     memory: u64,
     initrd: Vec<u8>,
-    workers: usize,
     migrate: bool,
     mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
 ) -> Vec<Event>
@@ -99,7 +98,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(23),
         || Ok(()),
         oracle,
@@ -254,7 +252,7 @@ where
         })
         .collect()
 }
-fn tcg(workers: usize, migrate: bool) -> Vec<Event> {
+fn tcg(migrate: bool) -> Vec<Event> {
     let qemu = input("SEEDBOX_TCG_QEMU");
     let mut factory = super::tcg::Factory::new(
         &qemu,
@@ -265,7 +263,6 @@ fn tcg(workers: usize, migrate: bool) -> Vec<Event> {
     scenario(
         256 << 20,
         fs::read(input("SEEDBOX_TCG_SERVICE_INITRD")).unwrap(),
-        workers,
         migrate,
         move |definition| {
             let qemu = qemu.clone();
@@ -281,13 +278,10 @@ fn tcg(workers: usize, migrate: bool) -> Vec<Event> {
 #[test]
 #[ignore = "requires native TCG kernel/helper and service initramfs"]
 fn tcg_host_inputs_continue_after_snapshot_with_pending_input_and_unacknowledged_command() {
-    let serial = tcg(1, false);
-    assert_eq!(serial, tcg(4, false), "workers=4");
-    assert_eq!(serial, tcg(1, true), "restored workers=1");
-    assert_eq!(serial, tcg(4, true), "restored workers=4");
+    assert_eq!(tcg(false), tcg(true), "restored");
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize, migrate: bool) -> Vec<Event> {
+fn pv(migrate: bool) -> Vec<Event> {
     let worker = input("SEEDBOX_PV_WORKER");
     let mut factory = super::pv::Factory::new(
         &worker,
@@ -298,7 +292,6 @@ fn pv(workers: usize, migrate: bool) -> Vec<Event> {
     scenario(
         128 << 20,
         fs::read(input("SEEDBOX_PV_SERVICE_INITRD")).unwrap(),
-        workers,
         migrate,
         move |definition| {
             let worker = worker.clone();
@@ -316,8 +309,5 @@ fn pv(workers: usize, migrate: bool) -> Vec<Event> {
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and service initramfs"]
 fn pv_host_inputs_continue_after_snapshot_with_pending_input_and_unacknowledged_command() {
-    let serial = pv(1, false);
-    assert_eq!(serial, pv(4, false), "workers=4");
-    assert_eq!(serial, pv(1, true), "restored workers=1");
-    assert_eq!(serial, pv(4, true), "restored workers=4");
+    assert_eq!(pv(false), pv(true), "restored");
 }
