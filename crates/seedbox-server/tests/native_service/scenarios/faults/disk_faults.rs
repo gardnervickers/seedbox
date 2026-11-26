@@ -84,7 +84,7 @@ pub async fn pv_disk_crash_reboot_replay() {
         // boot allowance; this is a simulated workload bound, not host speed.
         session.bound = simulated_bound(session.backend) + 12_500_000_000;
         let request = disk_request(session);
-        let source = session.submit(request, 1).await;
+        let source = session.submit(request).await;
         session.worker(&source).await;
         session.control(&source, "disk-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let (before, boots) = until_disk(session, &source, "DISK dirty 1\n").await;
@@ -107,14 +107,14 @@ pub async fn pv_disk_crash_reboot_replay() {
         assert!(recovered.contains("DISK synced 2\n"));
         assert_eq!(recovered_boots, vec![boots[0], boots[0].checked_add(1).unwrap()]);
         session.control(&source, "disk-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let witness = session.complete(&source, false, 1, SEED).await.unwrap();
+        let witness = session.complete(&source, false, SEED).await.unwrap();
         applied_once(session, &source, &[crash, reboot]).await;
         let final_output = lifecycle::target_log(session, &source).await;
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "disk-fault-replay".into(), spec: resource.spec }, 1).await;
+        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "disk-fault-replay".into(), spec: resource.spec }).await;
         session.worker(&replay).await;
-        assert_eq!(session.complete(&replay, false, 1, SEED).await.unwrap(), witness);
+        assert_eq!(session.complete(&replay, false, SEED).await.unwrap(), witness);
         assert_eq!(lifecycle::target_log(session, &replay).await, final_output);
         applied_once(session, &replay, &[crash, reboot]).await;
         let compared = session.client.compare(&source, &replay).await.unwrap();

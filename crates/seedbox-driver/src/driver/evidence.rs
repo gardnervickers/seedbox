@@ -7,9 +7,7 @@ use std::io::Write;
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Write canonical Driver-owned policy state at this stopped boundary.
     ///
@@ -17,10 +15,11 @@ where
     /// lifecycle/time/input state, fault/controller and network policy/queues,
     /// pending scheduled work, unstarted definitions and reduced guest property
     /// evidence. It excludes native
-    /// machine bytes, callbacks, worker resources, wall-clock playback pacing,
+    /// machine bytes, callbacks, execution contexts, wall-clock playback pacing,
     /// already-published host-drain queues and frame-observation buffers, and
     /// whatever records where rounds ended: the quantum and the commit count.
-    /// Evidence taken at one time is the same under every stop schedule.
+    /// Evidence taken at one time is the same under every stop schedule,
+    /// provided every machine keeps the [`Machine::run`] contract.
     /// No machine callback, native capture, allocation of a checkpoint or RNG
     /// draw occurs. An externally supplied RNG has no cursor evidence and fails.
     /// This is one component of a run witness, not CPU or RAM evidence; callers

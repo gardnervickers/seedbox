@@ -100,7 +100,6 @@ impl BackendProvider for NativeBackends {
         let executor = seedbox_driver_execution::driver_world::DriverExecutor::new(
             inputs.profile.clone(),
             backend,
-            1,
         )?
         .with_runtime(selected)?
         .with_launch_context(self.environment.clone(), Some(self.session_lease.clone()));

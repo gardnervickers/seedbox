@@ -56,15 +56,9 @@ impl Session {
                  {first_counts:?} and {second_counts:?}, and the Driver's own {reference:?}"
             ));
         }
-        let policy = seedbox_driver_execution::driver_world::STOP_POLICY;
-        if baseline.1.performance_parameters.contains_key(policy) {
-            return Err(format!(
-                "the baseline {} ran with a stop policy",
-                baseline.0
-            ));
-        }
-        // Each worker names the seed its stops came from; a failure repeats
-        // it, so that the run's stops can be had again.
+        // Each worker names the seed its stops came from, which shows it took
+        // the policy; a failure repeats it, so that the run's stops can be
+        // had again.
         let seeds = format!("{}\n{}", self.stop_seed(&first)?, self.stop_seed(&second)?);
         let checked = async {
             for run in [&first, &second] {
@@ -73,9 +67,6 @@ impl Session {
                 // the same comparison, on the same evidence. All three ran
                 // the one resolved document, so their inputs are the same.
                 let record = self.record(run)?;
-                if !record.performance_parameters.contains_key(policy) {
-                    return Err(format!("{run} ran without a stop policy"));
-                }
                 let comparison = seedbox_artifacts::record::compare(baseline, (run, &record));
                 if comparison.status != ComparisonStatus::Match
                     || !comparison.outcome_matches

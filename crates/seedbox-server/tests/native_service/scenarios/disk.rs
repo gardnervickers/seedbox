@@ -95,26 +95,26 @@ fn driver_blob_bytes(session: &NativeSession, id: &seedbox_api::SimulationId) ->
         .expect("Driver blob length")
 }
 
-/// Same input twice, on one and four machine workers: both runs pass with the
+/// Same input twice: both runs pass with the
 /// expected durable volume contents and equal raw/compared witnesses.
-pub async fn disk_repeat_workers(backend: CpuBackend) {
+pub async fn disk_repeat(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);
             let request = request(session);
             let mut runs = vec![];
-            for workers in [1, 4] {
-                let id = session.submit(request.clone(), workers).await;
+            for _ in 0..2 {
+                let id = session.submit(request.clone()).await;
                 session.worker(&id).await;
-                let witness = session.complete(&id, false, workers, SEED).await.unwrap();
+                let witness = session.complete(&id, false, SEED).await.unwrap();
                 manifest_disk(session, &id);
                 let output = text(&session.output(&id).await);
                 assert!(output.starts_with("DISK volume boot=0\n"), "{output:?}");
                 assert!(output.ends_with(DONE), "{output:?}");
                 runs.push((id, witness, output));
             }
-            assert_eq!(runs[0].1, runs[1].1, "workers 1/4 raw witnesses differ");
-            assert_eq!(runs[0].2, runs[1].2, "workers 1/4 outputs differ");
+            assert_eq!(runs[0].1, runs[1].1, "repeat raw witnesses differ");
+            assert_eq!(runs[0].2, runs[1].2, "repeat outputs differ");
             let comparison = session
                 .client
                 .compare(&runs[0].0, &runs[1].0)
@@ -133,22 +133,22 @@ pub async fn disk_repeat_workers(backend: CpuBackend) {
 }
 
 /// Capture while the first round's completed device write is still unflushed
-/// and its sleep pending, export, delete the source, import on four workers and continue:
+/// and its sleep pending, export, delete the source, import and continue:
 /// output and raw witness equal the uninterrupted run.
 pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
     native_case(move |owner| {
         Box::pin(async move {
             let session = owner.session(backend);
             let request = request(session);
-            let baseline = session.submit(request.clone(), 1).await;
+            let baseline = session.submit(request.clone()).await;
             session.worker(&baseline).await;
-            let uninterrupted = session.complete(&baseline, false, 1, SEED).await.unwrap();
+            let uninterrupted = session.complete(&baseline, false, SEED).await.unwrap();
             let full = text(&session.output(&baseline).await);
             assert!(full.ends_with(DONE), "{full:?}");
 
             let mut paused = request;
             paused.options.start_paused = true;
-            let source = session.submit(paused, 1).await;
+            let source = session.submit(paused).await;
             session.worker(&source).await;
             session
                 .control(
@@ -216,7 +216,7 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
                 label(backend),
                 driver_blob_bytes(session, &source)
             );
-            let mut exported = session
+            let exported = session
                 .client
                 .checkpoint_definition(&source, "saved")
                 .await
@@ -226,11 +226,9 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
                 InputSource::Resolved { .. }
             ));
             session.client.stop(&source).await.unwrap();
-            session.complete(&source, true, 1, SEED).await;
+            session.complete(&source, true, SEED).await;
             session.client.delete(&source).await.unwrap();
 
-            session.workers.store(4, Ordering::SeqCst);
-            exported.options.machine_workers = Some(4);
             let restored = session
                 .client
                 .submit_definition(&serde_json::to_value(exported).unwrap(), true)
@@ -273,7 +271,7 @@ pub async fn disk_checkpoint_continuation(backend: CpuBackend) {
                     },
                 )
                 .await;
-            let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
+            let continued = session.complete(&restored, false, SEED).await.unwrap();
             let after = text(&session.output(&restored).await);
             assert!(
                 !after.contains("DISK volume boot="),

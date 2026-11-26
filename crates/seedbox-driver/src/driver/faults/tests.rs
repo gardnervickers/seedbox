@@ -227,7 +227,7 @@ fn preview_validation_and_execution_compile_the_same_targets_for_every_public_ac
                 spec(i, true, sends)
             })
             .collect();
-        let mut driver = net(specs, setup(100), 1);
+        let mut driver = net(specs, setup(100));
         advance(&mut driver, 30);
         let prelude = match &public {
             Public::Restart { .. } => Some(json!({"action":"stop","machine":"fixture-1"})),
@@ -343,7 +343,7 @@ fn validation_and_admission_reject_the_same_invalid_target_shapes() {
             "src_port":4000,"dst_port":80,"incarnation":1
         }}),
     ];
-    let mut driver = net(initial(), setup(100), 1);
+    let mut driver = net(initial(), setup(100));
     advance(&mut driver, 30);
     for value in rows {
         let public: Public = serde_json::from_value(value).unwrap();

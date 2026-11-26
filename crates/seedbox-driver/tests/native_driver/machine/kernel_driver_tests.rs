@@ -66,7 +66,6 @@ fn key(text: &str) -> InputKey {
 fn driver_panic<M>(
     binary: Vec<u8>,
     memory: u64,
-    workers: usize,
     construct: impl FnMut(&MachineDefinition) -> M + Send + 'static,
 ) -> (Vec<Event>, Vec<(Timestamp, StopReason)>)
 where
@@ -77,7 +76,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(5),
         || Ok(()),
         definition(&binary, "idle", "oracle", memory),
@@ -190,59 +188,51 @@ where
 
 #[test]
 #[ignore = "requires native TCG QEMU, rebuilt assets and kernel-terminal fixture"]
-fn tcg_driver_guest_panic_is_deterministic_across_workers() {
-    let run = |workers| {
-        let qemu = input("SEEDBOX_TCG_QEMU");
-        let mut factory = super::tcg::Factory::new(
-            &qemu,
-            &input("SEEDBOX_TCG_ASSETS"),
-            super::TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        driver_panic(
-            fs::read(input("SEEDBOX_TCG_TERMINAL_APPLICATION")).unwrap(),
-            256 << 20,
-            workers,
-            move |definition| {
-                let qemu = qemu.clone();
-                Migrating {
-                    inner: factory.create(definition).unwrap(),
-                    restore: move |saved: &super::tcg::Snapshot| {
-                        super::tcg::TcgMachine::from_snapshot(&qemu, saved).unwrap()
-                    },
-                }
-            },
-        )
-    };
-    assert!(run(1) == run(4), "workers=4");
+fn tcg_driver_records_guest_panics() {
+    let qemu = input("SEEDBOX_TCG_QEMU");
+    let mut factory = super::tcg::Factory::new(
+        &qemu,
+        &input("SEEDBOX_TCG_ASSETS"),
+        super::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    driver_panic(
+        fs::read(input("SEEDBOX_TCG_TERMINAL_APPLICATION")).unwrap(),
+        256 << 20,
+        move |definition| {
+            let qemu = qemu.clone();
+            Migrating {
+                inner: factory.create(definition).unwrap(),
+                restore: move |saved: &super::tcg::Snapshot| {
+                    super::tcg::TcgMachine::from_snapshot(&qemu, saved).unwrap()
+                },
+            }
+        },
+    );
 }
 
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and kernel-terminal fixture"]
-fn pv_driver_guest_panic_is_deterministic_across_workers() {
-    let run = |workers| {
-        let worker = input("SEEDBOX_PV_WORKER");
-        let mut factory = super::pv::Factory::new(
-            &worker,
-            &input("SEEDBOX_PV_ASSETS"),
-            super::TEST_EPOCH_SECONDS,
-        )
-        .unwrap();
-        driver_panic(
-            fs::read(input("SEEDBOX_PV_TERMINAL_APPLICATION")).unwrap(),
-            128 << 20,
-            workers,
-            move |definition| {
-                let worker = worker.clone();
-                Migrating {
-                    inner: factory.create(definition).unwrap(),
-                    restore: move |saved: &super::pv::Snapshot| {
-                        super::pv::PVMachine::from_snapshot(&worker, saved).unwrap()
-                    },
-                }
-            },
-        )
-    };
-    assert!(run(1) == run(4), "workers=4");
+fn pv_driver_records_guest_panics() {
+    let worker = input("SEEDBOX_PV_WORKER");
+    let mut factory = super::pv::Factory::new(
+        &worker,
+        &input("SEEDBOX_PV_ASSETS"),
+        super::TEST_EPOCH_SECONDS,
+    )
+    .unwrap();
+    driver_panic(
+        fs::read(input("SEEDBOX_PV_TERMINAL_APPLICATION")).unwrap(),
+        128 << 20,
+        move |definition| {
+            let worker = worker.clone();
+            Migrating {
+                inner: factory.create(definition).unwrap(),
+                restore: move |saved: &super::pv::Snapshot| {
+                    super::pv::PVMachine::from_snapshot(&worker, saved).unwrap()
+                },
+            }
+        },
+    );
 }

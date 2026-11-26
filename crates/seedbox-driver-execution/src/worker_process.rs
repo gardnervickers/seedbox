@@ -47,12 +47,14 @@ impl WorkerLaunch {
     pub(crate) fn prepare_driver_with_runtime(
         request: &ExecutionRequest<'_>,
         runtime: Option<&crate::driver_world::binding::Binding>,
+        stop_policy: Option<&str>,
     ) -> Result<Self> {
-        Self::prepare_driver_impl(request, runtime)
+        Self::prepare_driver_impl(request, runtime, stop_policy)
     }
     fn prepare_driver_impl(
         request: &ExecutionRequest<'_>,
         runtime: Option<&crate::driver_world::binding::Binding>,
+        stop_policy: Option<&str>,
     ) -> Result<Self> {
         let engine = request
             .artifacts
@@ -62,7 +64,12 @@ impl WorkerLaunch {
             fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
         }
         let endpoint = Endpoint::new(request.output)?;
-        let worker = crate::driver_world::retained::request(request, &endpoint.socket(), runtime)?;
+        let worker = crate::driver_world::retained::request(
+            request,
+            &endpoint.socket(),
+            runtime,
+            stop_policy,
+        )?;
         let path = request.output.join(WORKER_REQUEST_FILE);
         fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
         let report = request.output.join("vmm.json");

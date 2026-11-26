@@ -15,10 +15,11 @@ A yield only for the run's bound (before the machine's own wake, taking no defer
 interrupt) depends on where the host ends the run, so the [worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs)
 records nothing for it and advances no reservation epoch; a stopped page publishes the
 machine's wake as its bound, and a run that delivers nothing adopts nothing.
-Two places are easy to miss. Reads before the kernel maps the page count without a
-bound, so at clock setup the guest charges them up to each published bound, yielding
-between runs. And a guest that goes idle exactly at the run's bound blocks there; a
-run ending at the horizon instead would re-enter it for an idle exit of its own.
+Reads before the kernel maps the page count without a bound, so at clock setup the
+guest charges them up to each published bound, yielding between runs. A guest that
+goes idle blocks there, also exactly at the run's bound and before its own wake: a run
+ending at the horizon would re-enter it for an idle exit of its own, and one that ran
+on to the wake would take its timer before an input the host applies at that time.
 
 Some syscalls are not application work at full price. The PV clock leaves the vDSO
 without a clock on both architectures, so time syscalls (`clock_gettime`,
@@ -102,8 +103,10 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## PV round execution
 
-The Driver starts each runnable VM on its own request ring and sweeps the reply
-rings. A ready VM can take its next lane input while another VM is executing.
+Every machine runs on the thread that steps the Driver. A TCG world runs its
+machines inline, one after another. In a PV world the Driver starts each
+runnable VM on its own request ring and sweeps the reply rings. A ready VM can
+take its next lane input while another VM is executing.
 The Driver stages each machine's outputs until the barrier, where occurrence
 time and machine identity determine their order. One producer owns each ring.
 It publishes a completed message with one commit, or streams an oversized
@@ -407,8 +410,9 @@ their own assets. See [xtask](../crates/xtask/src/main.rs).
 external inputs, and need the server's MATCH (witness, outcome, fault history and full
 state) when that definition reruns under slowed or paused playback with stalled
 followers, beside a concurrently controlled simulation, with checkpoints at each marker, after
-fault previews, with keyed controls whose clients disconnect, and with 2, 3 and 8 machine
-workers. Branches of one checkpoint match each other and the source's suffix, including
-from a checkpoint file in a second server session; fresh runs there repeat the first
-session's output. Edited inputs keep everything before their first changed time.
+fault previews, and with keyed controls whose clients disconnect. A lifecycle variant
+with live controls replays from its retained timeline, and fresh reruns of the baseline,
+lifecycle, controlled and branch documents reproduce every observed trace. Branches of
+one checkpoint match each other and the source's suffix, including from a checkpoint file
+in a second server session; fresh runs there repeat the first session's output. Edited inputs keep everything before their first changed time.
 Position targets are reached in real time: the server samples playback every 250 ms.

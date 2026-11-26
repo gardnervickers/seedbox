@@ -56,7 +56,6 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
     let mut driver = fixture::driver(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        2,
         SeededRng::new(0),
         || Ok(()),
         || {
@@ -214,7 +213,6 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
     let mut driver = fixture::driver(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        2,
         SeededRng::new(0),
         || Ok(()),
         move || {

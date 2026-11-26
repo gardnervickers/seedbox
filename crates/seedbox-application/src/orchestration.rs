@@ -16,9 +16,6 @@ pub struct RunOptions {
     /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
-    /// Machine worker threads for this attempt. Performance only; never part
-    /// of the experiment identity. `None` uses the executor's default.
-    pub machine_workers: Option<u32>,
 }
 
 pub enum RunProgress<'a> {
@@ -211,7 +208,6 @@ impl Orchestrator {
                 .to_string_lossy()
                 .into_owned(),
             identity,
-            performance_parameters: performance_parameters(executor, options.machine_workers),
             log_policy: self.log_policy.clone(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,
@@ -305,7 +301,6 @@ impl Orchestrator {
                 artifacts: &artifacts,
                 output: &output,
                 cancellation,
-                performance_parameters: &record.performance_parameters,
                 spawner: self.spawner.as_ref().map(|spawner| &*spawner.0),
             })?;
             // A backend must enforce its own deadline so blocking calls terminate.
@@ -616,20 +611,6 @@ fn apply_final_deadline(
         }
     }
     Ok(())
-}
-
-/// Applies a per-run machine-worker override to an executor that has the setting.
-fn performance_parameters(
-    executor: &dyn ExecutionBackend,
-    machine_workers: Option<u32>,
-) -> BTreeMap<String, String> {
-    let mut parameters = executor.performance_parameters();
-    if let Some(workers) = machine_workers {
-        if let Some(value) = parameters.get_mut("SEEDBOX_MACHINE_WORKERS") {
-            *value = workers.to_string();
-        }
-    }
-    parameters
 }
 
 #[cfg(test)]

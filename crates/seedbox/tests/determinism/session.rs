@@ -48,9 +48,6 @@ pub struct Session {
     pub cli: PathBuf,
     pub state: PathBuf,
     pub client: Client,
-    /// Machine workers this session's submissions request; None leaves the
-    /// count to the server's default.
-    pub workers: Option<u32>,
     /// The shared resolved definition, as a saved simulation document.
     pub document: Value,
     /// Simulations this session created and has not yet deleted.
@@ -58,12 +55,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(cli: &Path, state: &Path, workers: Option<u32>) -> Self {
+    pub fn new(cli: &Path, state: &Path) -> Self {
         Self {
             cli: cli.to_owned(),
             state: state.to_owned(),
             client: Client::connect_to(&state.join("server.sock")).unwrap(),
-            workers,
             document: Value::Null,
             created: Default::default(),
         }
@@ -121,31 +117,11 @@ impl Session {
         Ok(baseline)
     }
 
-    /// Submit a saved document with this session's machine worker count.
+    /// Submit a saved document.
     pub async fn submit(&self, document: &Value, paused: bool) -> Result<SimulationId, String> {
-        self.submit_with(document, paused, self.workers).await
-    }
-
-    pub async fn submit_with(
-        &self,
-        document: &Value,
-        paused: bool,
-        workers: Option<u32>,
-    ) -> Result<SimulationId, String> {
-        let mut document = document.clone();
-        if let Some(options) = document
-            .as_object_mut()
-            .and_then(|d| d.get_mut("options"))
-            .and_then(Value::as_object_mut)
-        {
-            options.remove("machineWorkers");
-        }
-        if let Some(workers) = workers {
-            document["options"]["machineWorkers"] = workers.into();
-        }
         let id = self
             .client
-            .submit_definition(&document, paused)
+            .submit_definition(document, paused)
             .await
             .map_err(err)?
             .metadata
@@ -179,17 +155,6 @@ impl Session {
             }
         }
         Ok(())
-    }
-
-    /// Machine threads the server ran this simulation with.
-    pub async fn machine_workers(&self, id: &SimulationId) -> Result<u32, String> {
-        self.client
-            .describe(id)
-            .await
-            .map_err(err)?
-            .options
-            .machine_workers
-            .ok_or_else(|| format!("{id}: no effective machine worker count"))
     }
 
     /// Wait until the simulation's playback endpoint exists (it is executing).
@@ -491,8 +456,7 @@ impl Session {
         Ok(events)
     }
 
-    /// Resolve and run a project afresh with an explicit seed, at the CLI's
-    /// default machine worker count.
+    /// Resolve and run a project afresh with an explicit seed.
     pub async fn run_project(&self, project: &Path) -> Result<SimulationId, String> {
         let stdout = self.cli(&[
             "run",

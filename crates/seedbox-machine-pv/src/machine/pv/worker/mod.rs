@@ -730,7 +730,9 @@ impl<B: Backend> Machine<B> {
             }
             // An idle guest blocks whether or not the run ends at this time:
             // were it to stop at the horizon instead, the next run would enter
-            // it again and add an idle exit no other schedule has (C3).
+            // it again and add an idle exit no other schedule has (C3). It
+            // blocks even when its wake is before `upto`, so only a run that
+            // starts at the wake takes it (the `Machine::run` contract).
             if effect.idle && self.quiet() {
                 self.state.idle = true;
                 self.finish_stop()?;
