@@ -361,7 +361,8 @@ impl Snapshot {
         self.image().expect("snapshot image")
     }
 }
-// Checkpoints are kept and restored across the Driver's worker threads.
+// Checkpoints are shared with and restored on other threads (lazy restores
+// run on scoped threads).
 const _: fn() = || {
     fn shared<T: Clone + Send + Sync>() {}
     shared::<Snapshot>();
@@ -1495,10 +1496,6 @@ fn priced_syscall_ns(factor_permille: u32) -> u64 {
 }
 
 impl Machine for PVMachine {
-    fn always_split() -> bool {
-        true
-    }
-
     /// The worker stops the guest at each timed frame's time and delivers
     /// it there, as a new run from that time would.
     fn timed_inbox(&self) -> bool {

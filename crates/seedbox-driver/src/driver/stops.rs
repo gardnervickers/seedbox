@@ -85,7 +85,8 @@ impl<M: Machine> Driver<M> {
     /// Every step then returns at the shortened barrier. Rounds that end early
     /// change no result: `tests/driver_stop_policy.rs` checks that on scripted
     /// machines, and the whole-run determinism oracles on real runs, whose
-    /// worker takes a policy through `STOP_POLICY` in seedbox-driver-execution.
+    /// execution request names a policy seed (`ExecutionRequest::stop_policy`
+    /// in seedbox-driver-execution).
     pub fn set_stop_policy(&mut self, policy: Option<StopPolicy>) {
         self.stops.policy = policy;
     }

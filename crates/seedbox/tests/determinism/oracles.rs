@@ -18,13 +18,6 @@ impl Session {
     /// fast followers, and a run paused twice with stalled and disconnecting
     /// subscribers, must both reproduce the unobserved unlimited baseline.
     pub async fn perf_settings(&self, baseline: &SimulationId) -> Outcome {
-        let used = self.machine_workers(baseline).await?;
-        if Some(used) != self.workers {
-            return Err(format!(
-                "{baseline}: {used} machine workers, not {:?}",
-                self.workers
-            ));
-        }
         // Slow playback for the first simulated seconds, with fast followers.
         let slow = self.submit(&self.document, true).await?;
         self.live(&slow).await?;

@@ -25,13 +25,12 @@ impl Machine for Idle {
         Ok(())
     }
 }
-fn driver(workers: usize) -> (Driver<Idle>, Arc<AtomicUsize>) {
+fn driver() -> (Driver<Idle>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let spy = calls.clone();
     let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(()),
         fixture::definition(0),
@@ -50,30 +49,28 @@ fn at(driver: &mut Driver<Idle>) -> u64 {
 }
 #[test]
 fn external_deadline_advances_idle_driver_in_quanta_without_running_idle_machines() {
-    for workers in [1, 4] {
-        let (mut driver, calls) = driver(workers);
+    let (mut driver, calls) = driver();
+    assert!(
+        matches!(driver.step(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == 0)
+    );
+    let initial_calls = calls.load(Ordering::SeqCst);
+    for expected in (10..=100).step_by(10) {
         assert!(
-            matches!(driver.step(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == 0)
+            matches!(driver.step_toward_external(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == expected)
         );
-        let initial_calls = calls.load(Ordering::SeqCst);
-        for expected in (10..=100).step_by(10) {
-            assert!(
-                matches!(driver.step_toward_external(Timestamp::from_nanos(100)).unwrap(), StepOutcome::Blocked { at } if at.as_nanos() == expected)
-            );
-            assert_eq!(at(&mut driver), expected);
-            assert_eq!(calls.load(Ordering::SeqCst), initial_calls);
-        }
-        assert_eq!(
-            driver
-                .with_barrier(|barrier| Ok(barrier.playback().position.completed_quanta))
-                .unwrap(),
-            10
-        );
+        assert_eq!(at(&mut driver), expected);
+        assert_eq!(calls.load(Ordering::SeqCst), initial_calls);
     }
+    assert_eq!(
+        driver
+            .with_barrier(|barrier| Ok(barrier.playback().position.completed_quanta))
+            .unwrap(),
+        10
+    );
 }
 #[test]
 fn external_deadline_honors_global_playback_pause_without_running_or_advancing() {
-    let (mut driver, calls) = driver(4);
+    let (mut driver, calls) = driver();
     driver
         .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
         .unwrap();
@@ -85,7 +82,7 @@ fn external_deadline_honors_global_playback_pause_without_running_or_advancing()
 }
 #[test]
 fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_authority() {
-    let (mut source, _) = driver(1);
+    let (mut source, _) = driver();
     source.step(Timestamp::from_nanos(100)).unwrap();
     source
         .step_toward_external(Timestamp::from_nanos(100))
@@ -96,7 +93,6 @@ fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_aut
     let create_calls = calls.clone();
     let mut restored = Driver::from_checkpoint(
         &checkpoint,
-        4,
         || Ok(()),
         move |_| Ok(Idle(restore_calls.clone())),
         move |_| Ok(Idle(create_calls.clone())),

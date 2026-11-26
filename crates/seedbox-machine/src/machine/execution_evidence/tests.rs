@@ -89,33 +89,24 @@ fn specific_shape_rejects_noncanonical_hashes_without_requiring_ram() {
 
 /// Host model only: saved chain/pending bytes, not a native snapshot claim.
 #[test]
-fn saved_model_continuation_is_identical_with_one_or_four_workers() {
-    fn advance(states: &mut [[u8; 32]], workers: usize, from: u64, to: u64) {
-        for batch in states.chunks_mut(workers) {
-            std::thread::scope(|scope| {
-                for h in batch {
-                    scope.spawn(move || {
-                        for t in from..to {
-                            *h = chain::record(h, b'I', 0, t, 33, 0);
-                        }
-                    });
-                }
-            });
+fn saved_model_continuation_is_identical() {
+    fn advance(states: &mut [[u8; 32]], from: u64, to: u64) {
+        for h in states {
+            for t in from..to {
+                *h = chain::record(h, b'I', 0, t, 33, 0);
+            }
         }
     }
     let mut baseline = vec![chain::initial(); 4];
-    advance(&mut baseline, 1, 0, 4);
-    let saved = baseline.clone();
-    advance(&mut baseline, 1, 4, 9);
-    for workers in [1, 4] {
-        let mut restored = saved.clone();
-        advance(&mut restored, workers, 4, 9);
-        assert_eq!(restored, baseline);
-        for h in restored {
-            assert_eq!(
-                chain::observe(&h, b"pending"),
-                chain::observe(&baseline[0], b"pending")
-            );
-        }
+    advance(&mut baseline, 0, 4);
+    let mut restored = baseline.clone();
+    advance(&mut baseline, 4, 9);
+    advance(&mut restored, 4, 9);
+    assert_eq!(restored, baseline);
+    for h in restored {
+        assert_eq!(
+            chain::observe(&h, b"pending"),
+            chain::observe(&baseline[0], b"pending")
+        );
     }
 }

@@ -882,11 +882,11 @@ mod tests {
         let output = temporary.path().join("worker-output");
         std::fs::create_dir(&output).unwrap();
         let cancellation = crate::execution::CancellationToken::default();
-        let performance = BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "4".into())]);
         let mut simulation = simulation;
         simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
         let request = crate::execution::ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -904,7 +904,6 @@ mod tests {
             artifacts: &artifacts,
             output: &output,
             cancellation: &cancellation,
-            performance_parameters: &performance,
             spawner: None,
         };
         let worker = seedbox_driver_execution::driver_world::retained::adapt_request(
@@ -917,7 +916,6 @@ mod tests {
             definition.oracle.process.argv
         );
         assert!(worker.start_paused);
-        assert_eq!(worker.machine_workers, 4);
         assert_eq!(worker.prepared.quantum_ns, 2_500_000);
         let wire::Inventory::Pv {
             epoch_seconds,

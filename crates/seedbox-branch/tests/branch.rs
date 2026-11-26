@@ -125,7 +125,6 @@ fn driver(scripts: Scripts) -> Driver<Speaker> {
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         names(0),
@@ -151,7 +150,6 @@ fn restore(
 ) -> Result<Driver<Speaker>, seedbox_driver::driver::Error<std::io::Error>> {
     let mut driver = Driver::from_checkpoint(
         checkpoint,
-        1,
         || Ok(()),
         |saved: &Speaker| Ok(saved.clone()),
         |_| unreachable!("no spawns"),

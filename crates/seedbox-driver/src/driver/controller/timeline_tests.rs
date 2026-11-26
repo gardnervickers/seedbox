@@ -9,7 +9,7 @@ fn call_and_boot_pinned_reply_are_both_closed_codec_state() {
             spec(0, true, vec![(2, call(1, r#""op":"now""#))]),
             spec(1, true, vec![]),
         ];
-        let mut d = configured(specs.clone(), Some(Some(MachineId::ORACLE)), 1);
+        let mut d = configured(specs.clone(), Some(Some(MachineId::ORACLE)));
         advance(&mut d, boundary);
         assert_eq!(
             d.execution
@@ -30,18 +30,16 @@ fn call_and_boot_pinned_reply_are_both_closed_codec_state() {
         let (bytes, store) = artifact(c);
         let expected = advance(&mut d, 25);
         let state = states(&d);
-        for workers in [1, 4] {
-            let c = decode(&bytes, &store);
-            let mut branch = restore(&c, workers);
-            assert_eq!(advance(&mut branch, 25), expected);
-            assert_eq!(states(&branch), state);
-            assert_eq!(replies(&branch).len(), 1);
-        }
-        let mut fresh_four = configured(specs, Some(Some(MachineId::ORACLE)), 4);
-        advance(&mut fresh_four, boundary);
-        reference_observer_session(&mut fresh_four);
-        assert_eq!(advance(&mut fresh_four, 25), expected);
-        assert_eq!(states(&fresh_four), state);
+        let c = decode(&bytes, &store);
+        let mut branch = restore(&c);
+        assert_eq!(advance(&mut branch, 25), expected);
+        assert_eq!(states(&branch), state);
+        assert_eq!(replies(&branch).len(), 1);
+        let mut fresh = configured(specs, Some(Some(MachineId::ORACLE)));
+        advance(&mut fresh, boundary);
+        reference_observer_session(&mut fresh);
+        assert_eq!(advance(&mut fresh, 25), expected);
+        assert_eq!(states(&fresh), state);
     }
 }
 #[test]
@@ -65,7 +63,6 @@ fn acknowledgement_effect_time_not_commit_time_sets_reply_deadline() {
             spec(1, true, vec![(0, Response::Ready)]),
         ],
         Some(Some(MachineId::ORACLE)),
-        4,
     );
     let events = advance(&mut d, 30);
     let r = replies(&d);
@@ -93,7 +90,6 @@ fn checked_admission_and_reply_overflow_poison_without_wrapping() {
         let mut d = Driver::new_seeded(
             at(u64::MAX - 10),
             Duration::from_nanos(1),
-            1,
             51,
             || Ok(Context(None)),
             fixture::definition(0),
@@ -136,7 +132,6 @@ fn same_time_input_and_reply_keep_existing_fifo_rules() {
             spec(1, true, vec![(0, Response::Ready)]),
         ],
         Some(Some(MachineId::ORACLE)),
-        4,
     );
     d.schedule(
         at(10),
@@ -207,7 +202,6 @@ fn pending_old_boot_call_cannot_steal_reused_successor_rpc_identity() {
             spec(1, true, vec![]),
         ],
         Some(Some(MachineId::ORACLE)),
-        1,
     );
     advance(&mut d, 8);
     let boot = d.execution.machines[0].lifecycle.boot();
@@ -238,11 +232,9 @@ fn pending_old_boot_call_cannot_steal_reused_successor_rpc_identity() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, 19);
     assert_eq!(result[0].1["requested_at_ns"], 9);
-    for workers in [1, 4] {
-        let c = decode(&bytes, &store);
-        let mut branch = restore(&c, workers);
-        assert_eq!(advance(&mut branch, 40), expected);
-        assert_eq!(states(&branch), expected_states);
-        assert_eq!(replies(&branch).len(), 1);
-    }
+    let c = decode(&bytes, &store);
+    let mut branch = restore(&c);
+    assert_eq!(advance(&mut branch, 40), expected);
+    assert_eq!(states(&branch), expected_states);
+    assert_eq!(replies(&branch).len(), 1);
 }

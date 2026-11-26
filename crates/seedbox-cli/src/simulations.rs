@@ -155,7 +155,7 @@ pub(super) fn run(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: selection.machine_workers,
+            stop_policy: None,
         },
         metadata,
         detach,
@@ -188,7 +188,7 @@ pub(super) fn run_checkpoint(
             backend,
             start_paused: paused,
             wall_time_ns: selection.wall_time,
-            machine_workers: selection.machine_workers,
+            stop_policy: None,
         },
         metadata,
         detach,
@@ -219,12 +219,12 @@ pub(super) fn run_count(
     {
         return Err(Error::Setup("seed range overflows u64".into()));
     }
-    let mut request = seedbox_api::SeedRangeRequest {
+    let request = seedbox_api::SeedRangeRequest {
         options: seedbox_api::ExecutionOptions {
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: selection.machine_workers,
+            stop_policy: None,
         },
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -236,7 +236,6 @@ pub(super) fn run_count(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        default_machine_workers(&mut request.options, &request.spec);
         let mut range = client.submit_seeds(&request).await.map_err(client_error)?;
         if detach {
             if json {
@@ -404,7 +403,7 @@ pub(super) fn replay(
             backend,
             start_paused: paused,
             wall_time_ns,
-            machine_workers: selection.machine_workers,
+            stop_policy: None,
         },
         metadata,
         detach,
@@ -422,13 +421,6 @@ fn resource_metadata(resource: &Simulation) -> seedbox_spec::definition::Metadat
         annotations,
     }
 }
-/// Fill in the omitted worker count from the simulation's machines.
-fn default_machine_workers(options: &mut seedbox_api::ExecutionOptions, spec: &SimulationSpec) {
-    options
-        .machine_workers
-        .get_or_insert_with(|| defaults::machine_workers(spec.configuration.services.len()));
-}
-
 fn submit(
     server: &ServerArgs,
     spec: SimulationSpec,
@@ -449,7 +441,7 @@ fn submit_with_comparison(
     json: bool,
     baseline: Option<&SimulationId>,
 ) -> Result<u8> {
-    let mut request = SubmitRequest {
+    let request = SubmitRequest {
         options,
         metadata,
         request_id: Client::request_id().map_err(client_error)?,
@@ -460,7 +452,6 @@ fn submit_with_comparison(
     let _signals = super::signals::Signals::interrupt(&cancellation)?;
     runtime()?.block_on(async {
         client.info().await.map_err(client_error)?;
-        default_machine_workers(&mut request.options, &request.spec);
         let resource = client.submit(&request).await.map_err(client_error)?;
         if detach {
             if json { output::json(&resource)?; } else { output::status("CREATED", &resource.metadata.id); }

@@ -16,9 +16,6 @@ pub struct RunOptions {
     /// An explicit override wins over the resolved seed.
     pub seed: Option<u64>,
     pub cancellation: CancellationToken,
-    /// Machine worker threads for this attempt. Performance only; never part
-    /// of the experiment identity. `None` uses the executor's default.
-    pub machine_workers: Option<u32>,
 }
 
 pub enum RunProgress<'a> {
@@ -31,6 +28,7 @@ pub enum RunProgress<'a> {
 #[derive(Clone, Debug)]
 pub struct Orchestrator {
     pub(crate) start_paused: bool,
+    pub(crate) stop_policy: Option<u64>,
     pub(crate) resume_checkpoint: Option<PathBuf>,
     pub(crate) observations: Option<PathBuf>,
     pub(crate) program: Vec<seedbox_engine_protocol::input_program::TimedInput>,
@@ -61,6 +59,13 @@ impl Orchestrator {
         self
     }
 
+    /// End the Driver's rounds at times drawn from `seed`, which must change
+    /// no result; see [`ExecutionRequest::stop_policy`].
+    pub fn with_stop_policy(mut self, seed: Option<u64>) -> Self {
+        self.stop_policy = seed;
+        self
+    }
+
     /// Continue a saved engine position using the source simulation inputs.
     pub fn with_checkpoint(mut self, path: PathBuf) -> Self {
         self.resume_checkpoint = Some(path);
@@ -75,6 +80,7 @@ impl Orchestrator {
     pub fn new(store: ContentStore, runs: impl Into<PathBuf>) -> Self {
         Self {
             start_paused: false,
+            stop_policy: None,
             resume_checkpoint: None,
             observations: None,
             program: Vec::new(),
@@ -211,7 +217,6 @@ impl Orchestrator {
                 .to_string_lossy()
                 .into_owned(),
             identity,
-            performance_parameters: performance_parameters(executor, options.machine_workers),
             log_policy: self.log_policy.clone(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,
@@ -291,6 +296,7 @@ impl Orchestrator {
                 progress_budget: record.identity.configuration.simulator.progress_budget,
                 allow_crashes: &allow_crashes,
                 start_paused: self.start_paused,
+                stop_policy: self.stop_policy,
                 resume_checkpoint: self.resume_checkpoint.as_deref(),
                 intervention_history: Some(&directory.join("interventions.json")),
                 observations: self.observations.as_deref(),
@@ -305,7 +311,6 @@ impl Orchestrator {
                 artifacts: &artifacts,
                 output: &output,
                 cancellation,
-                performance_parameters: &record.performance_parameters,
                 spawner: self.spawner.as_ref().map(|spawner| &*spawner.0),
             })?;
             // A backend must enforce its own deadline so blocking calls terminate.
@@ -616,20 +621,6 @@ fn apply_final_deadline(
         }
     }
     Ok(())
-}
-
-/// Applies a per-run machine-worker override to an executor that has the setting.
-fn performance_parameters(
-    executor: &dyn ExecutionBackend,
-    machine_workers: Option<u32>,
-) -> BTreeMap<String, String> {
-    let mut parameters = executor.performance_parameters();
-    if let Some(workers) = machine_workers {
-        if let Some(value) = parameters.get_mut("SEEDBOX_MACHINE_WORKERS") {
-            *value = workers.to_string();
-        }
-    }
-    parameters
 }
 
 #[cfg(test)]

@@ -256,12 +256,10 @@ fn stopped_disposition_difference_reports_the_terminal_state() {
 }
 
 #[test]
-fn identity_lists_semantics_and_ignores_attempt_and_performance() {
+fn identity_lists_semantics_and_ignores_attempt() {
     let dir = tempfile::tempdir().unwrap();
     let mut b = fixture();
     b.attempt = "another".into();
-    b.performance_parameters
-        .insert("SEEDBOX_UNDO".into(), "0".into());
     write_fixture(&dir.path().join("a"), &mut fixture(), None);
     write_fixture(&dir.path().join("b"), &mut b, None);
     assert_eq!(

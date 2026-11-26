@@ -24,15 +24,13 @@ pub(crate) fn definition(index: usize) -> MachineDefinition {
 pub(crate) fn driver<M>(
     start: Timestamp,
     quantum: Duration,
-    workers: usize,
     rng: impl RngStream + Send + 'static,
-    context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+    context: impl FnOnce() -> Result<M::Context, M::Error>,
     make: impl FnOnce() -> Result<Vec<M>, M::Error>,
 ) -> Result<Driver<M>, Error<M::Error>>
 where
+    // The `Send + 'static` factory owns the prebuilt machines.
     M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
 {
     let machines = make().map_err(Error::Construction)?;
     assert!(!machines.is_empty(), "fixture requires an oracle");
@@ -41,7 +39,6 @@ where
     Driver::new(
         start,
         quantum,
-        workers,
         rng,
         context,
         definition(0),
@@ -87,9 +84,7 @@ pub(crate) fn auto_key() -> InputKey {
 }
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Scheduling shortcut for private tests: one barrier, one input.
     pub(crate) fn schedule(

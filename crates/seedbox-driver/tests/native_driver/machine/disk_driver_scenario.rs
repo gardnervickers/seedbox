@@ -65,7 +65,7 @@ fn stdout(events: &[Event], machine: MachineId) -> String {
 
 /// Three disk machines under the Driver: both targets write, are snapshotted
 /// in place while live, crash, reboot and report their durable generation.
-fn driver_disks<M>(backend: &Backend<M>, workers: usize) -> Vec<Event>
+fn driver_disks<M>(backend: &Backend<M>) -> Vec<Event>
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
@@ -75,7 +75,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(9),
         || Ok(()),
         definition(
@@ -150,11 +149,10 @@ where
     events
 }
 
-pub(crate) fn driver_is_deterministic_across_workers<M>(backend: &Backend<M>)
+pub(crate) fn driver_runs_the_disk_scenario<M>(backend: &Backend<M>)
 where
     M: Machine<Context = ()> + Send + 'static,
     M::Error: Debug + Send + 'static,
 {
-    let serial = driver_disks(backend, 1);
-    assert!(serial == driver_disks(backend, 4), "workers=4");
+    driver_disks(backend);
 }

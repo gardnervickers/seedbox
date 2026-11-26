@@ -191,7 +191,6 @@ fn terminated_pending_checkpoints_never_become_branchable() {
         ),
         identity,
         attempt: "owned-attempt".into(),
-        performance_parameters: BTreeMap::new(),
         log_policy: Default::default(),
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
