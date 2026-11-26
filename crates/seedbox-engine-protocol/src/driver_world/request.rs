@@ -143,7 +143,6 @@ pub struct Request {
     pub program: Vec<TimedInput>,
     pub simulated_time_ns: u64,
     pub output: PathBuf,
-    pub machine_workers: usize,
     pub start_paused: bool,
     pub full_state: bool,
     pub host_control: PathBuf,

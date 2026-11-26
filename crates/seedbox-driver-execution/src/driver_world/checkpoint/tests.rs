@@ -107,7 +107,6 @@ fn definition(name: &str) -> MachineDefinition {
     }
 }
 fn driver(
-    workers: usize,
     count: usize,
     live: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
@@ -117,7 +116,6 @@ fn driver(
     Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         9338,
         || Ok(()),
         definition("oracle"),
@@ -247,10 +245,9 @@ fn limits() -> seedbox_driver::driver::DecodeLimits {
         archive_expanded_bytes: 16 << 20,
     }
 }
-fn restored(checkpoint: &Checkpoint<Saved>, workers: usize) -> Driver<Mock> {
+fn restored(checkpoint: &Checkpoint<Saved>) -> Driver<Mock> {
     Driver::<Mock>::from_checkpoint(
         checkpoint,
-        workers,
         || Ok(()),
         |saved| {
             Ok(Mock {
@@ -268,7 +265,7 @@ fn restored(checkpoint: &Checkpoint<Saved>, workers: usize) -> Driver<Mock> {
 }
 
 #[test]
-fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_workers() {
+fn streamed_world_capture_survives_source_drop_and_branches() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -277,7 +274,7 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
     let inventory = fixture_inventory(&source);
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut source_driver = driver(4, 4, live.clone(), peak.clone(), None);
+    let mut source_driver = driver(4, live.clone(), peak.clone(), None);
     source_driver.step(Timestamp::from_nanos(10)).unwrap();
     let mut state = state(4);
     let identities = source_driver
@@ -329,16 +326,14 @@ fn streamed_world_capture_survives_source_drop_and_branches_with_one_or_four_wor
         serde_json::to_value(&state).unwrap()
     );
     assert_eq!(envelope.state.world.publication.session, Default::default());
-    for workers in [1, 4] {
-        let checkpoint = resolve(&envelope, limits(), decode).unwrap();
-        let mut branch = restored(&checkpoint, workers);
-        assert!(
-            branch.drain_observations().events.is_empty(),
-            "restoration must not reemit published prefix"
-        );
-        branch.step(Timestamp::from_nanos(20)).unwrap();
-        assert_eq!(session_events(branch.drain_observations().events), expected);
-    }
+    let checkpoint = resolve(&envelope, limits(), decode).unwrap();
+    let mut branch = restored(&checkpoint);
+    assert!(
+        branch.drain_observations().events.is_empty(),
+        "restoration must not reemit published prefix"
+    );
+    branch.step(Timestamp::from_nanos(20)).unwrap();
+    assert_eq!(session_events(branch.drain_observations().events), expected);
 }
 
 #[test]
@@ -349,7 +344,7 @@ fn mapper_failure_drops_current_snapshot_and_publishes_nothing_without_retry() {
     fs::create_dir(&output).unwrap();
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut driver = driver(1, 3, live.clone(), peak.clone(), None);
+    let mut driver = driver(3, live.clone(), peak.clone(), None);
     let mut state = state(3);
     let mut calls = 0;
     let result = capture(
@@ -392,7 +387,7 @@ fn later_native_capture_failure_never_acknowledges_partial_checkpoint() {
     fs::create_dir(&output).unwrap();
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut driver = driver(1, 3, live.clone(), peak, Some(1));
+    let mut driver = driver(3, live.clone(), peak, Some(1));
     let mut state = state(3);
     let error = capture(
         &mut driver,
@@ -418,7 +413,7 @@ fn prepared_capture_refusal_does_not_drain_or_call_native_snapshot() {
     let inventory = fixture_inventory(&root.path().join("authority"));
     let live = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut driver = driver(1, 1, live, peak.clone(), None);
+    let mut driver = driver(1, live, peak.clone(), None);
     let mut state = state(1);
     assert!(capture(
         &mut driver,
@@ -441,7 +436,7 @@ fn prepared_capture_refusal_does_not_drain_or_call_native_snapshot() {
 fn integrity_and_length_are_verified_before_decoding_any_native_body() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let path = capture(
         &mut driver,
@@ -502,7 +497,7 @@ fn flip_first_byte(path: impl AsRef<Path>) -> Vec<u8> {
 fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let path = capture(
         &mut driver,
@@ -539,7 +534,7 @@ fn corrupt_later_body_is_rejected_before_driver_metadata_decodes() {
 fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let path = capture(
         &mut driver,
@@ -573,7 +568,7 @@ fn body_manifest_mismatch_and_unused_entries_are_not_silently_accepted() {
 fn durable_capture_exports_without_source_paths() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let output = root.path().join("source-run");
     fs::create_dir(&output).unwrap();
@@ -624,7 +619,7 @@ fn failed_manifest_publication_preserves_unowned_file_and_removes_unpublished_bo
     let inventory = fixture_inventory(&root.path().join("authority"));
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
-    let mut driver = driver(1, 1, Arc::default(), Arc::default(), None);
+    let mut driver = driver(1, Arc::default(), Arc::default(), None);
     let mut state = state(1);
     let competing = output.join("checkpoint-race.v1.json");
     let result = capture(
@@ -654,7 +649,7 @@ fn publish_failure_is_terminal_for_capture_without_native_calls_or_republication
     let output = root.path().join("output");
     fs::create_dir(&output).unwrap();
     let peak = Arc::new(AtomicUsize::new(0));
-    let mut driver = driver(1, 2, Arc::default(), peak.clone(), None);
+    let mut driver = driver(2, Arc::default(), peak.clone(), None);
     let mut state = state(2);
     let mut publications = 0;
     let result = capture(
@@ -686,7 +681,7 @@ fn publish_failure_is_terminal_for_capture_without_native_calls_or_republication
 fn corrupt_later_body_and_unused_manifest_entries_fail_before_any_backend_decoder() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut driver = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut driver = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let path = capture(
         &mut driver,

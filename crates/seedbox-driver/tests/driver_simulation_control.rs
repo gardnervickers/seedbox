@@ -91,14 +91,13 @@ impl RngStream for Rng {
         bytes.fill(0)
     }
 }
-fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, Vec<MachineId>) {
+fn setup(operation: &'static str) -> (Driver<Caller>, Replies, Vec<MachineId>) {
     let replies = Arc::new(Mutex::new(vec![]));
     let captured = replies.clone();
     let mut next = 0;
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        workers,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
@@ -126,46 +125,43 @@ fn setup(workers: usize, operation: &'static str) -> (Driver<Caller>, Replies, V
 }
 #[test]
 fn distinct_machines_route_identical_rpc_ids_to_exact_sources() {
-    for workers in [1, 2] {
-        let (mut driver, replies, _) = setup(workers, r#"{"version":1,"id":1,"op":"now"}"#);
-        driver.step(at(10)).unwrap();
-        let got = replies.lock().unwrap();
-        assert_eq!(got.len(), 2);
-        for label in [0, 1] {
-            let reply = got.iter().find(|r| r.0 == label).unwrap();
-            assert_eq!(reply.1, 10);
-            let value: serde_json::Value = serde_json::from_slice(&reply.2).unwrap();
-            assert_eq!(value["ok"], true);
-            assert_eq!(value["result"]["now_ns"], 10);
-        }
-        drop(got);
-        let outputs = driver
-            .drain_observations()
-            .events
-            .into_iter()
-            .filter_map(|event| match event.kind {
-                EventKind::Output(output) => Some(output),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        driver
-            .with_barrier(|_| {
-                assert_eq!(
-                    outputs
-                        .iter()
-                        .filter(|o| matches!(o.payload, Response::SimulationControl { .. }))
-                        .count(),
-                    2
-                );
-                Ok(())
-            })
-            .unwrap();
+    let (mut driver, replies, _) = setup(r#"{"version":1,"id":1,"op":"now"}"#);
+    driver.step(at(10)).unwrap();
+    let got = replies.lock().unwrap();
+    assert_eq!(got.len(), 2);
+    for label in [0, 1] {
+        let reply = got.iter().find(|r| r.0 == label).unwrap();
+        assert_eq!(reply.1, 10);
+        let value: serde_json::Value = serde_json::from_slice(&reply.2).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["result"]["now_ns"], 10);
     }
+    drop(got);
+    let outputs = driver
+        .drain_observations()
+        .events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Output(output) => Some(output),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    driver
+        .with_barrier(|_| {
+            assert_eq!(
+                outputs
+                    .iter()
+                    .filter(|o| matches!(o.payload, Response::SimulationControl { .. }))
+                    .count(),
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 #[test]
 fn definitionless_add_and_zero_sleep_finish_due_processing_without_guest_progress() {
-    let (mut driver, replies, ids) =
-        setup(1, r#"{"version":1,"id":1,"op":"sleep","duration_ns":0}"#);
+    let (mut driver, replies, ids) = setup(r#"{"version":1,"id":1,"op":"sleep","duration_ns":0}"#);
     let extra = driver
         .with_barrier(|b| {
             for id in &ids {
@@ -216,7 +212,6 @@ fn queued_pair(
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        2,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),

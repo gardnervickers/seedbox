@@ -72,8 +72,8 @@ pub use view::{MachineState, MachineView, WorldView};
 #[cfg(test)]
 use crate::pv::Output;
 
-mod workers;
-use workers::Workers;
+mod host;
+use host::Host;
 
 /// An insertion-ordered machine identity within one driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -350,7 +350,7 @@ struct ObservationState {
 /// barrier is exposed. Outputs are published in simulation time after
 /// conversion. Execution pricing is not compensated: a fast machine completes
 /// proportionally more work per simulation nanosecond. Conversions happen on
-/// the driver thread and never depend on worker count. A machine time base
+/// the driver thread. A machine time base
 /// that cannot represent a required simulation time fails with
 /// `Error::ClockOverflow`.
 ///
@@ -364,12 +364,13 @@ struct ObservationState {
 /// drifting guest's own clocks run at its rate: a 1 s control `sleep` at
 /// +10% spans 1.1 s of that guest's clocks.
 ///
-/// Execution uses a fixed number of workers: whichever thread steps the
-/// driver, which runs one machine of every batch itself, and a pool of threads
-/// for the rest. Each worker owns its context; contexts must not contain
-/// machine-specific simulation state. Worker count and completion order must
-/// not affect simulation results. Machines share the driver's read-only clock,
-/// which stays fixed throughout each batch of calls.
+/// Every machine runs on the thread that steps the driver, with one execution
+/// context. A blocking backend runs inline; a split backend
+/// ([`Machine::split_run`]) keeps its run in flight in its own process while
+/// this thread starts and polls the others. The context must not contain
+/// machine-specific simulation state, and completion order must not affect
+/// simulation results. Machines share the driver's read-only clock, which
+/// stays fixed throughout each batch of calls.
 ///
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
@@ -392,7 +393,7 @@ struct ObservationState {
 /// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
 /// further admission.
 pub struct Driver<M: Machine> {
-    workers: Workers<M::Context>,
+    host: Host<M::Context>,
     execution: ExecutionState<M>,
     playback: Playback,
     observations: ObservationState,
@@ -401,17 +402,8 @@ pub struct Driver<M: Machine> {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
-    fn execution_workers(
-        requested: usize,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
-    ) -> Result<Workers<M::Context>, Error<M::Error>> {
-        Workers::new(if M::always_split() { 1 } else { requested }, context)
-    }
-
     /// Construct machines and driver-owned simulation dependencies.
     ///
     /// The supplied arbitrary RNG has no capture contract. Whole-Driver
@@ -443,18 +435,13 @@ where
     // them, so each target gets a domain-separated stream from its seed.
     ///
     /// `quantum` is a positive duration representable in u64 nanoseconds; its
-    /// first boundary must fit after `start`. `workers` must be nonzero. Invalid
-    /// configuration is rejected before either factory is called.
+    /// first boundary must fit after `start`. Invalid configuration is
+    /// rejected before either factory is called.
     ///
-    /// The context factory runs once for each worker, before constructing
-    /// machines: first on the calling thread, which is worker 0 and runs machines
-    /// itself, then on each of the `workers - 1` pool threads. A pool context is
-    /// used and destroyed on its own thread, so it need not be Send; worker 0's
-    /// context moves with the driver, which is therefore Send only when the
-    /// context is. Factories and contexts must not make simulation behavior
-    /// depend on worker identity or host timing. Machines can move between the
-    /// caller and workers; their errors must also be transferable between threads.
-    /// Initialization failure joins all started workers before returning.
+    /// The context factory runs once, on the calling thread, before
+    /// constructing machines. The context moves with the driver, which is
+    /// therefore Send only when the context is. Factories and contexts must not
+    /// make simulation behavior depend on host timing.
     ///
     /// # Network
     ///
@@ -503,9 +490,8 @@ where
     pub fn new(
         start: Timestamp,
         quantum: Duration,
-        workers: usize,
         rng: impl RngStream + Send + 'static,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+        context: impl FnOnce() -> Result<M::Context, M::Error>,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
         prepared: Vec<SpawnDefinition>,
@@ -515,7 +501,6 @@ where
         Self::construct(
             start,
             quantum,
-            workers,
             SimulationRng::External(Box::new(rng)),
             context,
             oracle,
@@ -530,9 +515,8 @@ where
     fn construct(
         start: Timestamp,
         quantum: Duration,
-        workers: usize,
         rng: SimulationRng,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+        context: impl FnOnce() -> Result<M::Context, M::Error>,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
         prepared: Vec<SpawnDefinition>,
@@ -549,9 +533,6 @@ where
                 .checked_add(quantum_ns)
                 .ok_or(Error::TimeOverflow)?,
         );
-        if workers == 0 {
-            return Err(Error::InvalidWorkerCount);
-        }
         let all = || {
             std::iter::once(&oracle)
                 .chain(&machines)
@@ -592,7 +573,7 @@ where
                 ));
             }
         }
-        let workers = Self::execution_workers(workers, context)?;
+        let host = Host::new(context)?;
         let clock = Arc::new(SimulationClock::new(start.as_nanos()));
         let definitions: Vec<_> = std::iter::once(oracle).chain(machines).collect();
         let machines = definitions
@@ -627,7 +608,7 @@ where
             );
         }
         let mut driver = Self {
-            workers,
+            host,
             execution: ExecutionState {
                 clock,
                 quantum_ns,
@@ -740,8 +721,7 @@ where
     ///
     /// The stream, including sequences and positions, is a pure function of
     /// the machine definitions, the seed and host inputs (barrier operations
-    /// and the `upto` bounds passed to `step`). Worker count and playback rate
-    /// never change it.
+    /// and the `upto` bounds passed to `step`). Playback rate never changes it.
     // One handoff keeps service input/status continuation independent of
     // optional retention or a second publication path.
     pub fn drain_observations(&mut self) -> FlushResults {
@@ -877,7 +857,7 @@ where
     /// use seedbox_driver::driver::{Driver, Error, MachineId};
     /// use seedbox_machine::machine::Machine;
     /// fn observe<M>(driver: &mut Driver<M>, id: MachineId) -> Result<bool, Error<M::Error>>
-    /// where M: Machine + Send + 'static, M::Context: 'static, M::Error: Send + 'static {
+    /// where M: Machine {
     ///     driver.with_barrier(|barrier| {
     ///         let _machine = barrier.machine(id)?;
     ///         barrier.paused(id)
@@ -891,7 +871,7 @@ where
     /// use seedbox_driver::driver::{Driver, MachineId};
     /// use seedbox_machine::machine::Machine;
     /// fn escape<M>(driver: &mut Driver<M>, id: MachineId) -> &M
-    /// where M: Machine + Send + 'static, M::Context: 'static, M::Error: Send + 'static {
+    /// where M: Machine {
     ///     driver.with_barrier(|barrier| barrier.machine(id)).ok().unwrap()
     /// }
     /// ```
@@ -951,7 +931,7 @@ where
     ///
     /// Except at an explicit `BeforeFault` stop, events due at a returned
     /// barrier are applied in the simulation's defined order before returning. Their effects are visible to subsequent machine
-    /// execution. The ordering must not depend on host timing or worker assignment.
+    /// execution. The ordering must not depend on host timing.
     /// Future events remain pending. Events newly supplied by the caller at the
     /// current barrier must be applied before further machine execution.
     ///
@@ -988,7 +968,7 @@ where
     /// or a resumable simulation. Every submitted call finishes before an error
     /// is returned; no new batch is submitted after a failure. When several
     /// machines fail in one batch, the lowest machine ID determines the reported
-    /// error, independently of completion order. Worker execution panics are
+    /// error, independently of completion order. Machine execution panics are
     /// reported as errors. The caller must stop driving rather than retrying.
     /// Machine exits are simulation outcomes, not driver errors.
     pub fn step(&mut self, upto: Timestamp) -> Result<StepOutcome, Error<M::Error>> {
@@ -1956,9 +1936,7 @@ pub struct Barrier<'a, M: Machine> {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Observe playback and the committed simulation position without progress.
     pub fn playback(&self) -> PlaybackStatus {
@@ -2464,8 +2442,6 @@ pub enum Error<E> {
     Properties(String),
     /// Quantum must be positive and representable in u64 nanoseconds.
     InvalidQuantum,
-    /// At least one execution worker is required.
-    InvalidWorkerCount,
     /// Committed position counters cannot represent another boundary, or a
     /// sender's frame sequence cannot order another routed frame.
     PositionOverflow,
@@ -2499,16 +2475,8 @@ pub enum Error<E> {
     /// The next full quantum boundary, or a frame's arrival, cannot be
     /// represented.
     TimeOverflow,
-    /// A worker's context factory failed.
-    Context {
-        worker: usize,
-        source: E,
-    },
-    /// A host thread could not start or accept work.
-    Worker {
-        worker: usize,
-        source: std::io::Error,
-    },
+    /// The execution context factory failed.
+    Context(E),
     /// Execution panicked; the machine is not resumable.
     Panicked {
         id: MachineId,
@@ -2576,7 +2544,6 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::InvalidQuantum => {
                 f.write_str("quantum must be positive and fit in u64 nanoseconds")
             }
-            Self::InvalidWorkerCount => f.write_str("worker count must be positive"),
             Self::PositionOverflow => f.write_str("simulation position counter overflow"),
             Self::NotPaused => f.write_str("playback must be paused before admitting a quantum"),
             Self::StepPending => f.write_str("a quantum admission is already pending"),
@@ -2596,8 +2563,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::NetworkConfiguration(message) => write!(f, "network configuration: {message}"),
             Self::LiveInputKey(key) => write!(f, "input key {key} is still live"),
             Self::TimeOverflow => f.write_str("quantum boundary exceeds the simulation time range"),
-            Self::Context { worker, source } => write!(f, "worker {worker} context: {source}"),
-            Self::Worker { worker, source } => write!(f, "worker {worker}: {source}"),
+            Self::Context(source) => write!(f, "execution context: {source}"),
             Self::Panicked { id } => write!(f, "machine {} panicked during execution", id.0),
             Self::Construction(source) => write!(f, "machine construction: {source}"),
             Self::PastTime { now, requested } => write!(
@@ -2661,10 +2627,9 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
 impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Construction(source)
-            | Self::Machine { source, .. }
-            | Self::Context { source, .. } => Some(source),
-            Self::Worker { source, .. } => Some(source),
+            Self::Construction(source) | Self::Machine { source, .. } | Self::Context(source) => {
+                Some(source)
+            }
             _ => None,
         }
     }

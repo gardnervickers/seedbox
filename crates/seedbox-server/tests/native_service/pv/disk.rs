@@ -3,8 +3,8 @@
 use crate::scenarios::CpuBackend;
 
 #[tokio::test]
-async fn pv_volume_disk_repeats_on_one_and_four_workers() {
-    crate::scenarios::disk_repeat_workers(CpuBackend::Pv).await;
+async fn pv_volume_disk_repeats() {
+    crate::scenarios::disk_repeat(CpuBackend::Pv).await;
 }
 
 #[tokio::test]

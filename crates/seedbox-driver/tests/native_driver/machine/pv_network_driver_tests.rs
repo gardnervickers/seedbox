@@ -21,8 +21,7 @@ fn pv(scenario: &Scenario) -> Run {
         factory.create(definition)
     });
     eprintln!(
-        "pv driver run (workers {}): {} events, {} TCP retransmissions, client {:?}, outcome {:?}",
-        scenario.workers,
+        "pv driver run: {} events, {} TCP retransmissions, client {:?}, outcome {:?}",
         result.events.len(),
         result.tcp_retransmissions(),
         result.stdout[2],
@@ -33,7 +32,7 @@ fn pv(scenario: &Scenario) -> Run {
 
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and network fixtures"]
-fn pv_driver_network_exchange_is_identical_across_worker_counts() {
+fn pv_driver_network_exchange_is_clean() {
     scenario::clean_exchange(pv);
 }
 

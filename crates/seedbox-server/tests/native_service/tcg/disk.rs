@@ -3,8 +3,8 @@
 use crate::scenarios::CpuBackend;
 
 #[tokio::test]
-async fn tcg_volume_disk_repeats_on_one_and_four_workers() {
-    crate::scenarios::disk_repeat_workers(CpuBackend::Tcg).await;
+async fn tcg_volume_disk_repeats() {
+    crate::scenarios::disk_repeat(CpuBackend::Tcg).await;
 }
 
 #[tokio::test]
