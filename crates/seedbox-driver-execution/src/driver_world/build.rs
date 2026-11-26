@@ -28,9 +28,6 @@ fn bad(message: impl Into<String>) -> Error {
 }
 
 pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
-    if request.machine_workers == 0 {
-        return Err(bad("Driver worker count must be positive"));
-    }
     super::policy::check_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
     super::controller::resolve(
         &request.prepared.inventory,
@@ -66,14 +63,6 @@ fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<(
         ))
     }
 }
-/// Native PV executes each vCPU in its own process. Only TCG needs host
-/// threads for blocking machine calls. Restore uses the same selection.
-fn execution_threads(request: &wire::Request) -> usize {
-    match request.prepared.inventory {
-        Inventory::Pv { .. } => 1,
-        Inventory::Tcg { .. } => request.machine_workers,
-    }
-}
 fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let program = program(request)?;
     let assets = materialize_factory(
@@ -91,8 +80,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     )
     .map_err(bad)?;
     let environments = factory.environments();
-    let (oracle, machines, spawned) =
-        conversion::definitions(&request.prepared, request.machine_workers)?;
+    let (oracle, machines, spawned) = conversion::definitions(&request.prepared)?;
     let mut initial: Vec<_> = std::iter::once(oracle.name.clone())
         .chain(machines.iter().map(|machine| machine.name.clone()))
         .collect();
@@ -137,7 +125,6 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(request.prepared.quantum_ns),
-        execution_threads(request),
         request.seed,
         || Ok(()),
         oracle,
@@ -334,7 +321,6 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     )?;
     let mut driver = Driver::<Native>::from_checkpoint(
         &retained,
-        execution_threads(request),
         || Ok(()),
         |snapshot| {
             let name = names

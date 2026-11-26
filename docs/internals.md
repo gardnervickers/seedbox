@@ -15,10 +15,11 @@ A yield only for the run's bound (before the machine's own wake, taking no defer
 interrupt) depends on where the host ends the run, so the [worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs)
 records nothing for it and advances no reservation epoch; a stopped page publishes the
 machine's wake as its bound, and a run that delivers nothing adopts nothing.
-Two places are easy to miss. Reads before the kernel maps the page count without a
-bound, so at clock setup the guest charges them up to each published bound, yielding
-between runs. And a guest that goes idle exactly at the run's bound blocks there; a
-run ending at the horizon instead would re-enter it for an idle exit of its own.
+Reads before the kernel maps the page count without a bound, so at clock setup the
+guest charges them up to each published bound, yielding between runs. A guest that
+goes idle blocks there, also exactly at the run's bound and before its own wake: a run
+ending at the horizon would re-enter it for an idle exit of its own, and one that ran
+on to the wake would take its timer before an input the host applies at that time.
 
 Some syscalls are not application work at full price. The PV clock leaves the vDSO
 without a clock on both architectures, so time syscalls (`clock_gettime`,
@@ -102,8 +103,10 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## PV round execution
 
-The Driver starts each runnable VM on its own request ring and sweeps the reply
-rings. A ready VM can take its next lane input while another VM is executing.
+Every machine runs on the thread that steps the Driver. A TCG world runs its
+machines inline, one after another. In a PV world the Driver starts each
+runnable VM on its own request ring and sweeps the reply rings. A ready VM can
+take its next lane input while another VM is executing.
 The Driver stages each machine's outputs until the barrier, where occurrence
 time and machine identity determine their order. One producer owns each ring.
 It publishes a completed message with one commit, or streams an oversized
@@ -145,12 +148,12 @@ What follows from a machine's output or exit (a guest call's admission, a reply,
 is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
 Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
-commit count or commit time, so evidence at one time is the same under any stops or quantum.
+commit count or commit time, so evidence at one time is the same under any stops or quantum, as long as
+each machine blocks where it goes idle (the `Machine::run` contract).
 Tests end rounds at seeded times with a [stop policy](../crates/seedbox-driver/src/driver/stops.rs): scripted
-machines in `tests/driver_stop_policy.rs`, and whole runs through the worker's `SEEDBOX_STOP_POLICY` performance
-parameter, which only a `test-support` worker (the long suites' CLI build) accepts. A plain seed is mixed with
-each run's output directory, so runs stop differently; the worker writes the seed it draws from to its stderr
-(the run's `vmm.stderr` diagnostic), and `exact:` with that seed repeats that run's stops.
+machines in `tests/driver_stop_policy.rs`, and whole runs through a submission's `stopPolicy` seed, which only
+a server built with test support (the long suites' CLI build) accepts; any other refuses the submission. The
+worker writes the seed to its stderr (the run's `vmm.stderr` diagnostic); submitting it again repeats the stops.
 
 ## Machine network delivery
 
@@ -407,8 +410,9 @@ their own assets. See [xtask](../crates/xtask/src/main.rs).
 external inputs, and need the server's MATCH (witness, outcome, fault history and full
 state) when that definition reruns under slowed or paused playback with stalled
 followers, beside a concurrently controlled simulation, with checkpoints at each marker, after
-fault previews, with keyed controls whose clients disconnect, and with 2, 3 and 8 machine
-workers. Branches of one checkpoint match each other and the source's suffix, including
-from a checkpoint file in a second server session; fresh runs there repeat the first
-session's output. Edited inputs keep everything before their first changed time.
+fault previews, and with keyed controls whose clients disconnect. A lifecycle variant
+with live controls replays from its retained timeline, and fresh reruns of the baseline,
+lifecycle, controlled and branch documents reproduce every observed trace. Branches of
+one checkpoint match each other and the source's suffix, including from a checkpoint file
+in a second server session; fresh runs there repeat the first session's output. Edited inputs keep everything before their first changed time.
 Position targets are reached in real time: the server samples playback every 250 ms.

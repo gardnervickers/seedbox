@@ -25,13 +25,12 @@ impl Machine for Idle {
         Ok(())
     }
 }
-fn driver(workers: usize) -> (Driver<Idle>, Arc<AtomicUsize>) {
+fn driver() -> (Driver<Idle>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let spy = calls.clone();
     let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(()),
         fixture::definition(0),
@@ -50,8 +49,8 @@ fn at(driver: &mut Driver<Idle>) -> u64 {
 }
 #[test]
 fn external_deadline_advances_idle_driver_without_running_idle_machines() {
-    for (workers, paced) in [(1, false), (4, false), (1, true), (4, true)] {
-        let (mut driver, calls) = driver(workers);
+    for paced in [false, true] {
+        let (mut driver, calls) = driver();
         if paced {
             driver
                 .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
@@ -85,7 +84,7 @@ fn external_deadline_advances_idle_driver_without_running_idle_machines() {
 }
 #[test]
 fn external_deadline_honors_global_playback_pause_without_running_or_advancing() {
-    let (mut driver, calls) = driver(4);
+    let (mut driver, calls) = driver();
     driver
         .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
         .unwrap();
@@ -97,7 +96,7 @@ fn external_deadline_honors_global_playback_pause_without_running_or_advancing()
 }
 #[test]
 fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_authority() {
-    let (mut source, _) = driver(1);
+    let (mut source, _) = driver();
     source.step(Timestamp::from_nanos(100)).unwrap();
     source
         .step_toward_external(Timestamp::from_nanos(10))
@@ -108,7 +107,6 @@ fn external_deadline_is_not_checkpoint_state_and_restore_requires_fresh_host_aut
     let create_calls = calls.clone();
     let mut restored = Driver::from_checkpoint(
         &checkpoint,
-        4,
         || Ok(()),
         move |_| Ok(Idle(restore_calls.clone())),
         move |_| Ok(Idle(create_calls.clone())),

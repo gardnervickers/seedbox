@@ -31,11 +31,10 @@ impl Machine for Probe {
         Ok(self.first)
     }
 }
-fn driver(workers: usize) -> Driver<Probe> {
+fn driver() -> Driver<Probe> {
     Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(()),
         fixture::definition(0),
@@ -72,52 +71,50 @@ fn prepare(driver: &mut Driver<Probe>, key: &str, action: Action, alias: &str) -
 }
 #[test]
 fn bounded_clock_prepare_is_pure_and_commit_matches_the_single_projected_draw() {
-    for workers in [1, 4] {
-        for action in [
-            Action::DriftBounded {
-                target: target(),
-                max_rate_ppb: 100_000_000,
-            },
-            Action::StepRealtimeBounded {
-                target: target(),
-                max_offset_ns: 1_000_000,
-            },
-        ] {
-            let mut d = driver(workers);
-            let before = bytes(&mut d);
-            let first = prepare(&mut d, "bounded", action.clone(), "clock");
-            for _ in 0..4 {
-                assert_eq!(prepare(&mut d, "bounded", action.clone(), "clock"), first);
-                assert_eq!(bytes(&mut d), before, "proposal consumed source state");
-            }
-            let PreparedOutcome::Admitted(expected) = first.outcome().clone() else {
-                panic!("clock admission expected")
-            };
-            match expected.action {
-                FaultAction::Drift(rate) => {
-                    assert!(i64::from(rate.ppb()).unsigned_abs() <= 100_000_000)
-                }
-                FaultAction::StepRealtime(offset) => assert!(offset.unsigned_abs() <= 1_000_000),
-                other => panic!("wrong resolved clock action {other:?}"),
-            }
-            d.with_barrier(|barrier| barrier.commit_input(&first))
-                .unwrap();
-            let admitted: Vec<_> = d
-                .drain_observations()
-                .events
-                .into_iter()
-                .filter_map(|event| match event.kind {
-                    EventKind::FaultAdmitted(record) => Some(record),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(admitted, [*expected]);
+    for action in [
+        Action::DriftBounded {
+            target: target(),
+            max_rate_ppb: 100_000_000,
+        },
+        Action::StepRealtimeBounded {
+            target: target(),
+            max_offset_ns: 1_000_000,
+        },
+    ] {
+        let mut d = driver();
+        let before = bytes(&mut d);
+        let first = prepare(&mut d, "bounded", action.clone(), "clock");
+        for _ in 0..4 {
+            assert_eq!(prepare(&mut d, "bounded", action.clone(), "clock"), first);
+            assert_eq!(bytes(&mut d), before, "proposal consumed source state");
         }
+        let PreparedOutcome::Admitted(expected) = first.outcome().clone() else {
+            panic!("clock admission expected")
+        };
+        match expected.action {
+            FaultAction::Drift(rate) => {
+                assert!(i64::from(rate.ppb()).unsigned_abs() <= 100_000_000)
+            }
+            FaultAction::StepRealtime(offset) => assert!(offset.unsigned_abs() <= 1_000_000),
+            other => panic!("wrong resolved clock action {other:?}"),
+        }
+        d.with_barrier(|barrier| barrier.commit_input(&first))
+            .unwrap();
+        let admitted: Vec<_> = d
+            .drain_observations()
+            .events
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::FaultAdmitted(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admitted, [*expected]);
     }
 }
 #[test]
 fn exact_clock_and_duplicate_rejection_leave_the_seeded_clock_stream_unchanged() {
-    let mut baseline = driver(1);
+    let mut baseline = driver();
     let baseline = prepare(
         &mut baseline,
         "baseline",
@@ -127,7 +124,7 @@ fn exact_clock_and_duplicate_rejection_leave_the_seeded_clock_stream_unchanged()
         },
         "baseline",
     );
-    let mut d = driver(4);
+    let mut d = driver();
     let exact = prepare(
         &mut d,
         "exact",
@@ -199,7 +196,7 @@ fn invalid_bounds_are_refused_without_source_mutation() {
             max_offset_ns: u64::MAX,
         },
     ] {
-        let mut d = driver(1);
+        let mut d = driver();
         let before = bytes(&mut d);
         assert!(
             d.with_barrier(
@@ -212,7 +209,7 @@ fn invalid_bounds_are_refused_without_source_mutation() {
 }
 #[test]
 fn pending_bounded_actions_round_trip_and_restore_without_redrawing() {
-    let mut source = driver(1);
+    let mut source = driver();
     source
         .with_barrier(|barrier| {
             barrier.schedule_with_handle(
@@ -252,50 +249,47 @@ fn pending_bounded_actions_round_trip_and_restore_without_redrawing() {
         .unwrap()
         .try_map_snapshots(|reference| Ok::<_, std::io::Error>(reference.digest()[0] != 0))
         .unwrap();
-    for workers in [1, 4] {
-        let mut restored = Driver::<Probe>::from_checkpoint(
-            &checkpoint,
-            workers,
-            || Ok(()),
-            |first| Ok(Probe { first: *first }),
-            |_| Ok(Probe { first: true }),
-        )
+    let mut restored = Driver::<Probe>::from_checkpoint(
+        &checkpoint,
+        || Ok(()),
+        |first| Ok(Probe { first: *first }),
+        |_| Ok(Probe { first: true }),
+    )
+    .unwrap();
+    assert_eq!(bytes(&mut restored), encoded);
+    restored.step(Timestamp::from_nanos(10)).unwrap();
+    let actual: Vec<_> = restored
+        .drain_observations()
+        .events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::FaultAdmitted(record) => Some(record.action),
+            _ => None,
+        })
+        .collect();
+    let mut reference = driver();
+    reference
+        .with_barrier(|barrier| {
+            barrier.schedule_with_handle(
+                Timestamp::from_nanos(10),
+                InputKey::new("future-drift").unwrap(),
+                Action::DriftBounded {
+                    target: target(),
+                    max_rate_ppb: 100_000_000,
+                },
+                FaultHandle::named("future").unwrap(),
+            )
+        })
         .unwrap();
-        assert_eq!(bytes(&mut restored), encoded);
-        restored.step(Timestamp::from_nanos(10)).unwrap();
-        let actual: Vec<_> = restored
-            .drain_observations()
-            .events
-            .into_iter()
-            .filter_map(|event| match event.kind {
-                EventKind::FaultAdmitted(record) => Some(record.action),
-                _ => None,
-            })
-            .collect();
-        let mut reference = driver(1);
-        reference
-            .with_barrier(|barrier| {
-                barrier.schedule_with_handle(
-                    Timestamp::from_nanos(10),
-                    InputKey::new("future-drift").unwrap(),
-                    Action::DriftBounded {
-                        target: target(),
-                        max_rate_ppb: 100_000_000,
-                    },
-                    FaultHandle::named("future").unwrap(),
-                )
-            })
-            .unwrap();
-        reference.step(Timestamp::from_nanos(10)).unwrap();
-        let expected: Vec<_> = reference
-            .drain_observations()
-            .events
-            .into_iter()
-            .filter_map(|event| match event.kind {
-                EventKind::FaultAdmitted(record) => Some(record.action),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(actual, expected);
-    }
+    reference.step(Timestamp::from_nanos(10)).unwrap();
+    let expected: Vec<_> = reference
+        .drain_observations()
+        .events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::FaultAdmitted(record) => Some(record.action),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }

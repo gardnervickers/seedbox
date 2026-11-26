@@ -11,7 +11,7 @@ use crate::{
     Error, Result,
 };
 use seedbox_spec::backend::CpuBackend;
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf};
 
 /// Retained process adapter sharing the ordinary worker ownership, cancellation,
 /// observation and journal boundaries. Construction performs no guest work.
@@ -20,48 +20,22 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 pub struct DriverExecutor {
     profile: ExecutionProfile,
     backend: CpuBackend,
-    workers: usize,
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
-    /// Seed of a host stop policy for the worker's Driver (see
-    /// [`STOP_POLICY`]).
-    stop_policy: Option<String>,
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
-/// Performance parameter, and launch environment variable, naming the seed of
-/// a stop policy: the worker's Driver ends rounds at seeded times instead of
-/// its own, which must change no result (`seedbox_driver::test_support::
-/// StopPolicy`). Whole-run tests use it to check that a real run does not
-/// depend on where its rounds end. Only a worker built with `test-support`
-/// takes it; any other refuses the run, so a test never passes without it.
-///
-/// A plain number is mixed with each run's output directory, so two runs of
-/// one definition stop at different times. The worker writes the seed it
-/// draws from to its stderr; `exact:` and that seed gives a later run the
-/// same policy, for repeating one run's stops.
-pub const STOP_POLICY: &str = "SEEDBOX_STOP_POLICY";
-/// Prefix of a [`STOP_POLICY`] value that is used as given.
-const EXACT: &str = "exact:";
-/// The seed a worker's stop policy draws from: `value` is the
-/// [`STOP_POLICY`] parameter and `output` the run's own output directory.
-pub(super) fn stop_seed(value: &str, output: &std::path::Path) -> Option<u64> {
-    if let Some(seed) = value.strip_prefix(EXACT) {
-        return seed.parse().ok();
-    }
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(output.as_os_str().as_encoded_bytes());
-    let mut bytes = [0; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    Some(value.parse::<u64>().ok()? ^ u64::from_le_bytes(bytes))
-}
-/// What a worker says of the stop policy it runs with, on its stderr.
+/// Whether this build's workers take a request's stop policy
+/// ([`crate::execution::ExecutionRequest::stop_policy`]). Only a build with
+/// `test-support` does; a server built without it refuses a submission that
+/// names one, before preparation, and a worker refuses the run.
+pub const TAKES_STOP_POLICY: bool = cfg!(feature = "test-support");
+/// What a worker says of the stop policy it runs with, on its stderr: the
+/// seed, with which another run repeats its stops.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn stop_seed_notice(seed: u64) -> String {
-    format!(
-        "seedbox: Driver stop policy seed {seed}; {STOP_POLICY}={EXACT}{seed} repeats its stops"
-    )
+    format!("seedbox: Driver stop policy seed {seed}")
 }
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
@@ -77,26 +51,21 @@ impl DriverExecutor {
         self
     }
 
-    /// Use an explicit retained profile and server-owned worker count. Factory
-    /// inventory must name the same backend; no fallback or profile rewriting.
-    pub fn new(profile: ExecutionProfile, backend: CpuBackend, workers: usize) -> Result<Self> {
+    /// Use an explicit retained profile. Factory inventory must name the same
+    /// backend; no fallback or profile rewriting.
+    pub fn new(profile: ExecutionProfile, backend: CpuBackend) -> Result<Self> {
         let recorded = super::retained::validate_contract(&profile)?;
         if recorded != backend {
             return Err(Error::Integrity(
                 "Driver executor backend argument differs from validated execution profile".into(),
             ));
         }
-        if !(1..=64).contains(&workers) {
-            return Err(Error::Setup("Driver machine workers: use 1..64".into()));
-        }
         Ok(Self {
             profile,
             backend,
-            workers,
             runtime: None,
             environment: vec![],
             session_lease: None,
-            stop_policy: None,
             #[cfg(feature = "worker-failure")]
             failure_test: None,
         })
@@ -140,7 +109,6 @@ impl DriverExecutor {
                 semantic_parameters: semantic,
             },
             backend,
-            1,
         )?;
         executor.admit_execution(simulation.control.is_some())?;
         Ok(executor)
@@ -150,8 +118,7 @@ impl DriverExecutor {
     /// `None` is only for sessionless/offline callers. No path is inferred or
     /// environment discovered by this library. These are transient host inputs,
     /// never retained simulation metadata. Without this builder the environment
-    /// is empty and no session is borrowed. A [`STOP_POLICY`] seed in
-    /// `environment` selects a stop policy, as [`Self::with_stop_policy`] does.
+    /// is empty and no session is borrowed.
     // The monitor crosses a process boundary; ambient inheritance or searching
     // output ancestors would lose explicit cleanup authority.
     pub fn with_launch_context(
@@ -159,19 +126,8 @@ impl DriverExecutor {
         environment: Vec<(OsString, OsString)>,
         session_lease: Option<PathBuf>,
     ) -> Self {
-        if let Some((_, seed)) = environment.iter().find(|(key, _)| key == STOP_POLICY) {
-            // The run refuses a value that names no seed.
-            self.stop_policy = Some(seed.to_string_lossy().into_owned());
-        }
         self.environment = environment;
         self.session_lease = session_lease;
-        self
-    }
-    /// End the worker Driver's rounds at times a policy seeded from `seed`
-    /// and the run's output directory draws, so each run stops differently.
-    /// Only a worker built with `test-support` runs it.
-    pub fn with_stop_policy(mut self, seed: u64) -> Self {
-        self.stop_policy = Some(seed.to_string());
         self
     }
     /// Borrow an explicitly selected immutable runtime across worker processes.
@@ -209,14 +165,6 @@ impl DriverExecutor {
 impl ExecutionBackend for DriverExecutor {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        let mut parameters =
-            BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())]);
-        if let Some(seed) = &self.stop_policy {
-            parameters.insert(STOP_POLICY.into(), seed.clone());
-        }
-        parameters
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.

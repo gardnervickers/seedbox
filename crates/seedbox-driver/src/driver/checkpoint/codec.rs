@@ -131,7 +131,7 @@ impl Checkpoint<SnapshotReference> {
     }
     /// Decode exactly one Driver artifact through EOF under explicit logical
     /// budgets. All fields/definitions are owned and validated before return;
-    /// no worker, context, factory, backend decoder or native resource is used.
+    /// no execution context, factory, backend decoder or native resource is used.
     /// Future unsupported RAM/Launch values remain deferred factory inputs.
     /// Ref digest/length resolution and external factory/service-history authority
     /// remain the adapter's obligations; this is not a complete service export.

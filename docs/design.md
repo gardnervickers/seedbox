@@ -23,13 +23,14 @@ comparison never reconstructs them from attempt paths. Missing evidence is NOT_C
 
 ## Parallelism has a causal bound
 
-Machines execute concurrently only inside a window bounded by minimum network latency.
+PV machines execute concurrently, each VM in its own process, only inside a window bounded
+by minimum network latency; TCG machines run one after another on the Driver's thread.
 No frame emitted inside that window can arrive before the round commits.
 Inside it each machine runs to the round's end on its own lane, taking its timers and arriving
 frames at their exact times. A timer or a running receiver's frame therefore never ends a round;
 frames for a paused receiver still do. A machine held at a breakpoint takes its frames at their
 arrival without a budget, from its hit on, whichever commit carried the hit.
-Commit orders output by occurrence, not worker completion; worker count cannot change results.
+Commit orders output by occurrence, not by the order runs finish, so host scheduling cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 
 Where a round ends is the host's choice, and four rules keep it out of a run's results.

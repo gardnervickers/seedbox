@@ -10,7 +10,7 @@ pub async fn pv_fault_cancel() {
         *captured.lock().unwrap() = Some(native_process_probe::OwnedProcesses::capture(session.session.path()));
         eprintln!("requesting ordinary public cancellation after guest START and applied fault: id={id} fault={fault}");
         session.client.stop(&id).await.unwrap();
-        assert!(session.complete(&id, true, 1, SEED).await.is_none());
+        assert!(session.complete(&id, true, SEED).await.is_none());
         let resource = session.client.describe(&id).await.unwrap();
         assert_eq!(resource.status.oracle_exit_code, None);
         assert_eq!(resource.status.verdict(), TestVerdict::Incomplete);

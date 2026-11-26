@@ -143,11 +143,9 @@ pub struct Request {
     pub program: Vec<TimedInput>,
     pub simulated_time_ns: u64,
     pub output: PathBuf,
-    pub machine_workers: usize,
-    /// Seed of a host stop policy, derived from the `SEEDBOX_STOP_POLICY`
-    /// performance parameter and used as given: a worker built with test
-    /// support ends its Driver's rounds at times drawn from it, which must
-    /// change no result. Others refuse it.
+    /// Seed of a host stop policy, from the execution request: a worker
+    /// built with test support ends its Driver's rounds at times drawn from
+    /// it, which must change no result. Others refuse it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_policy: Option<u64>,
     pub start_paused: bool,

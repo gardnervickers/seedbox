@@ -76,17 +76,7 @@ impl Cli {
             .invoke(
                 guard,
                 "replay",
-                // A serial replay of the parallel baseline checks that the
-                // worker count cannot change results.
-                &words(&[
-                    "replay",
-                    baseline,
-                    "--json",
-                    "--wall-time",
-                    "20m",
-                    "--machine-workers",
-                    "1",
-                ]),
+                &words(&["replay", baseline, "--json", "--wall-time", "20m"]),
             )
             .await;
         if let Err(error) = &result {
@@ -902,7 +892,6 @@ mod tests {
             run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
             identity,
             attempt: "one".into(),
-            performance_parameters: BTreeMap::new(),
             log_policy: Default::default(),
             omitted_logs: BTreeMap::new(),
             outcome: Outcome::Pass,

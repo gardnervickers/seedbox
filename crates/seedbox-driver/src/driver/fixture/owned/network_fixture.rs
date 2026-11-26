@@ -14,11 +14,7 @@ pub(in crate::driver) fn setup(capacity: usize) -> NetworkSetup {
     NetworkSetup::from(NetworkConfig::new(Duration::from_nanos(10), Duration::ZERO, 0).unwrap())
         .with_frame_capacity(capacity)
 }
-pub(in crate::driver) fn net(
-    specs: Vec<State>,
-    setup: NetworkSetup,
-    workers: usize,
-) -> Driver<Mock> {
+pub(in crate::driver) fn net(specs: Vec<State>, setup: NetworkSetup) -> Driver<Mock> {
     let mut defs: Vec<_> = (0..specs.len())
         .map(|i| {
             let mut d = fixture::definition(i);
@@ -39,7 +35,6 @@ pub(in crate::driver) fn net(
     Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(Context(None)),
         oracle,

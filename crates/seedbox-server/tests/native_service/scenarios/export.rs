@@ -53,7 +53,7 @@ pub async fn pv_large_export_under_load() {
         let session = owner.session(CpuBackend::Pv);
         let mut request = submission_with_machines(CpuBackend::Pv, session.root.path(), &session.store, 2_000_000, 123, vec!["export-one", "export-two"]);
         request.options.start_paused = true;
-        let source = session.submit(request, 1).await;
+        let source = session.submit(request).await;
         session.worker(&source).await;
         session.control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let launch = session.launch_request(&source);
@@ -115,7 +115,7 @@ pub async fn pv_large_export_under_load() {
         assert!(bytes >= 500_000_000, "native closure only {bytes} bytes");
         eprintln!("large public-client PV export: machines=3 native_snapshot_bytes={machine_bytes} unique_closure_bytes={bytes} cpu_load_threads=2 cpu_iterations={cpu_work} concurrent_api_probes={probes}");
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, 123).await;
+        session.complete(&source, true, 123).await;
         session.client.delete(&source).await.unwrap();
     })).await;
 }

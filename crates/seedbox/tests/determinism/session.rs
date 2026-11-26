@@ -7,7 +7,6 @@ use seedbox_api::{
     ControlState, EventDelivery, EventKind, ExecutionTermination, InputSource, LogDelivery,
     LogEntry, Phase, PlaybackRate, Simulation, SimulationId, TestVerdict,
 };
-use seedbox_artifacts::record::RunRecord;
 use seedbox_client::Client;
 use seedbox_engine_protocol::host_control::ControlError;
 use seedbox_test::process::Guarded;
@@ -48,9 +47,6 @@ pub struct Session {
     pub cli: PathBuf,
     pub state: PathBuf,
     pub client: Client,
-    /// Machine workers this session's submissions request; None leaves the
-    /// count to the server's default.
-    pub workers: Option<u32>,
     /// The shared resolved definition, as a saved simulation document.
     pub document: Value,
     /// Simulations this session created and has not yet deleted.
@@ -58,12 +54,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(cli: &Path, state: &Path, workers: Option<u32>) -> Self {
+    pub fn new(cli: &Path, state: &Path) -> Self {
         Self {
             cli: cli.to_owned(),
             state: state.to_owned(),
             client: Client::connect_to(&state.join("server.sock")).unwrap(),
-            workers,
             document: Value::Null,
             created: Default::default(),
         }
@@ -121,31 +116,11 @@ impl Session {
         Ok(baseline)
     }
 
-    /// Submit a saved document with this session's machine worker count.
+    /// Submit a saved document.
     pub async fn submit(&self, document: &Value, paused: bool) -> Result<SimulationId, String> {
-        self.submit_with(document, paused, self.workers).await
-    }
-
-    pub async fn submit_with(
-        &self,
-        document: &Value,
-        paused: bool,
-        workers: Option<u32>,
-    ) -> Result<SimulationId, String> {
-        let mut document = document.clone();
-        if let Some(options) = document
-            .as_object_mut()
-            .and_then(|d| d.get_mut("options"))
-            .and_then(Value::as_object_mut)
-        {
-            options.remove("machineWorkers");
-        }
-        if let Some(workers) = workers {
-            document["options"]["machineWorkers"] = workers.into();
-        }
         let id = self
             .client
-            .submit_definition(&document, paused)
+            .submit_definition(document, paused)
             .await
             .map_err(err)?
             .metadata
@@ -179,17 +154,6 @@ impl Session {
             }
         }
         Ok(())
-    }
-
-    /// Machine threads the server ran this simulation with.
-    pub async fn machine_workers(&self, id: &SimulationId) -> Result<u32, String> {
-        self.client
-            .describe(id)
-            .await
-            .map_err(err)?
-            .options
-            .machine_workers
-            .ok_or_else(|| format!("{id}: no effective machine worker count"))
     }
 
     /// Wait until the simulation's playback endpoint exists (it is executing).
@@ -401,35 +365,6 @@ impl Session {
         Ok(())
     }
 
-    /// The retained attempt of a completed run of this session's server.
-    pub fn attempt(&self, id: &SimulationId) -> Result<PathBuf, String> {
-        let mut found = None;
-        for session in std::fs::read_dir(self.state.join("sessions")).map_err(err)? {
-            let attempts = session
-                .map_err(err)?
-                .path()
-                .join(format!("runs/{id}/attempts"));
-            if !attempts.is_dir() {
-                continue;
-            }
-            for attempt in std::fs::read_dir(attempts).map_err(err)? {
-                let attempt = attempt.map_err(err)?.path();
-                if attempt.join("manifest.json").is_file() && found.replace(attempt).is_some() {
-                    return Err(format!("{id}: several retained attempts"));
-                }
-            }
-        }
-        found.ok_or_else(|| format!("{id}: no retained attempt"))
-    }
-
-    /// A completed run's retained record: its outcome and result evidence
-    /// (witness, full state, fault history), checked against its checksum.
-    /// It outlives the server that ran it, which the server's own comparison
-    /// does not.
-    pub fn record(&self, id: &SimulationId) -> Result<RunRecord, String> {
-        seedbox_artifacts::record::inspect(&self.attempt(id)?).map_err(|e| format!("{id}: {e}"))
-    }
-
     /// Retained application output in delivery order.
     pub async fn logs(&self, id: &SimulationId) -> Result<Vec<Record>, String> {
         let mut stream = self.client.all_logs_with(id, false).await.map_err(err)?;
@@ -491,8 +426,7 @@ impl Session {
         Ok(events)
     }
 
-    /// Resolve and run a project afresh with an explicit seed, at the CLI's
-    /// default machine worker count.
+    /// Resolve and run a project afresh with an explicit seed.
     pub async fn run_project(&self, project: &Path) -> Result<SimulationId, String> {
         let stdout = self.cli(&[
             "run",
@@ -564,14 +498,8 @@ impl Session {
 /// The fixture owns its server; `--full-state` makes comparisons include full state.
 pub struct Server(Child);
 impl Server {
-    /// A server whose runs see `environment` as well as this process's.
-    pub fn start_with(
-        cli: &Path,
-        state: &Path,
-        environment: &[(&str, &str)],
-    ) -> Result<Self, String> {
+    pub fn start(cli: &Path, state: &Path) -> Result<Self, String> {
         let mut command = Command::new(cli);
-        command.envs(environment.iter().copied());
         command.args([
             "server",
             "start",

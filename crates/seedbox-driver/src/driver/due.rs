@@ -77,9 +77,7 @@ pub(super) enum Hold {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     pub(super) fn apply_due(&mut self, host_now: Instant) -> Result<Option<Hold>, Error<M::Error>> {
         self.apply_due_mode(host_now, false)

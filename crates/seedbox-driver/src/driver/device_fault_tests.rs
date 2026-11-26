@@ -191,11 +191,9 @@ fn an_active_device_fault_continues_from_a_checkpoint() {
         settled(&expected).as_slice(),
         [(_, FaultAction::Heal, SettlementStatus::Applied, Some(_))]
     ));
-    for workers in [1, 3] {
-        let mut branch = restore(&checkpoint, workers);
-        assert_eq!(advance(&mut branch, 40), expected);
-        assert_eq!(states(&branch), expected_states);
-    }
+    let mut branch = restore(&checkpoint);
+    assert_eq!(advance(&mut branch, 40), expected);
+    assert_eq!(states(&branch), expected_states);
 }
 
 /// The oracle (machine 0) applying device faults to machine 1 through its

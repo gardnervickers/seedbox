@@ -85,9 +85,7 @@ impl PreparedInput {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Drain all work already due now, bypassing host pacing only for dispatch.
     ///
@@ -315,9 +313,7 @@ type Projected = (Vec<Entry<()>>, Option<network::Network>);
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Copies of the machines' bookkeeping with the output and exits held at
     /// this barrier applied to them and to `control`, as committing them
@@ -452,9 +448,7 @@ where
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     #[cfg(test)]
     pub(super) fn input_admission(
