@@ -22,9 +22,9 @@ Use `seedbox logs <sim-id>` for application output or `seedbox tui <sim-id>`
 for the interactive console. Run more seeds with `seedbox run . --count 100`.
 Without KVM, use the slower software backend: `seedbox run . --backend tcg`.
 
-In `seedbox.yaml`, `simulator.quantum` sets the maximum timeslice (default `1ms`);
-network latency, timers and events can shorten it. Replay and checkpoints retain
-the quantum; changing it does not change results.
+In `seedbox.yaml`, `simulator.quantum` sets the step of paced playback and of
+single stepping (default `1ms`). Replay and checkpoints retain the quantum;
+changing it does not change results.
 
 Save an application-ready simulation before a bug:
 
