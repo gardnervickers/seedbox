@@ -102,9 +102,18 @@ The [projection](../crates/seedbox-driver/src/clock/projection.rs) belongs to th
 ## Wall time across reboots
 
 Fresh execution derives its epoch from image creation times, not the host clock, with an 86400-second floor.
-Every boot adds the machine counter to that epoch; kernel monotonic time alone would restart at reboot.
+Every boot adds the machine counter and its own offset to that epoch; kernel monotonic time alone would restart at reboot.
+The offset, within ±5 ms, [derives](../crates/seedbox-machine/src/clock.rs) from the boot seed and reaches the guest as `seedbox.clock_offset_ns`;
+machines sharing one wall clock would seed clock-based randomness identically.
 Realtime steps change kernel state and expire with the boot, whereas Driver-owned drift survives it.
 The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initializes realtime before announcing Ready.
+
+## Staggered initial boots
+
+Each initial machine but the oracle waits, switched off, for a seeded time below 50 ms before its first boot
+([`Driver::stagger_boots`](../crates/seedbox-driver/src/driver.rs)), so services start in a varying order.
+It drops the frames that arrive before its boot time, never later ones its first run has not reached yet;
+a request admitted for it boots it early. Spawns and reboots boot at once.
 
 ## Prepared boot inputs
 

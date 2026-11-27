@@ -59,9 +59,15 @@ fn linux_boots_owned_inputs_on_the_fixed_x86_microvm_board() {
         value(&arguments, "-rtc"),
         ["base=1970-01-01T00:00:00,clock=vm"]
     );
+    // `-seed` seeds only QEMU's own PRNG. The guest's entropy and realtime
+    // offset both derive from the boot seed (7) on its kernel command line.
+    assert_eq!(value(&arguments, "-seed"), ["7"]);
     assert_eq!(
         value(&arguments, "-append"),
-        ["console=ttyS0 seedbox.entropy=0000000000000007"]
+        [format!(
+            "console=ttyS0 seedbox.entropy=0000000000000007 seedbox.clock_offset_ns={}",
+            seedbox_machine::clock::boot_realtime_offset_ns(7)
+        )]
     );
     for (flag, name, bytes) in [
         ("-bios", "firmware", [3; 4]),
@@ -108,16 +114,23 @@ fn each_boot_seed_reaches_the_guest_kernel_command_line() {
     assert_ne!(append(7), append(8));
     assert_eq!(
         append(u64::MAX),
-        "console=ttyS0 seedbox.entropy=ffffffffffffffff"
+        format!(
+            "console=ttyS0 seedbox.entropy=ffffffffffffffff seedbox.clock_offset_ns={}",
+            seedbox_machine::clock::boot_realtime_offset_ns(u64::MAX)
+        )
     );
-    // The manifest reserves exactly the argument's width, so the longest
-    // accepted base line still fits the kernel's 2047 bytes.
+    // The manifest reserves the width of both per-boot arguments, so the
+    // longest accepted base line still fits the kernel's 2047 bytes, exactly
+    // when the offset has the widest form (a minus sign and seven digits).
     let longest = "x".repeat(super::super::COMMAND_LINE_CAPACITY - 1);
-    let (_directory, arguments) = seeded_arguments(linux(&longest), 0);
-    assert_eq!(
-        value(&arguments, "-append")[0].len(),
-        super::super::COMMAND_LINE_SIZE - 1
-    );
+    let widest = (0..)
+        .find(|&seed| seedbox_machine::clock::boot_realtime_offset_ns(seed) <= -1_000_000)
+        .unwrap();
+    let length = |seed| value(&seeded_arguments(linux(&longest), seed).1, "-append")[0].len();
+    assert_eq!(length(widest), super::super::COMMAND_LINE_SIZE - 1);
+    for seed in 0..64 {
+        assert!(length(seed) < super::super::COMMAND_LINE_SIZE);
+    }
 }
 
 #[test]

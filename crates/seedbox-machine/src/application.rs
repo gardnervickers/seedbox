@@ -715,7 +715,8 @@ fn package(
         archive.owned(b"seedbox/mke2fs", 0o100755, bytes)?;
     }
     // Realtime epoch for every boot; the shared PID 1 sets CLOCK_REALTIME
-    // to epoch plus the machine counter from it before Ready.
+    // to epoch plus the machine counter plus the boot's offset kernel
+    // argument before Ready. The offset is per boot, so not archived here.
     let mut clock = b"SBXCLK1\0".to_vec();
     clock.extend(bootstrap.epoch_seconds.to_le_bytes());
     archive.owned(b"seedbox/clock.bin", 0o100400, &clock)?;

@@ -176,8 +176,9 @@ fn assets_for_another_architecture_or_firmware_are_rejected_at_load() {
             seedbox_machine::test_support::assets::image(EM_X86_64),
         )
         .unwrap();
-        // The longest base line: 2047 bytes less the boot's 33-byte entropy argument.
-        fs::write(root.join("command-line"), "x".repeat(2014)).unwrap();
+        // The longest base line: 2047 bytes less the boot's 33-byte entropy
+        // and 33-byte realtime offset arguments.
+        fs::write(root.join("command-line"), "x".repeat(1981)).unwrap();
         fs::write(root.join("firmware"), [0; 64 * 1024]).unwrap();
     };
     let load = || {
@@ -195,7 +196,7 @@ fn assets_for_another_architecture_or_firmware_are_rejected_at_load() {
     let invalid: [(&str, Vec<u8>); 5] = [
         ("kernel", riscv),
         ("init", seedbox_machine::test_support::assets::image(243)),
-        ("command-line", vec![b'x'; 2015]),
+        ("command-line", vec![b'x'; 1982]),
         ("firmware", vec![0; 64 * 1024 + 1]),
         // OpenSBI-style ELF firmware is not a BIOS image.
         (
@@ -221,9 +222,9 @@ fn the_network_address_counts_toward_the_kernel_command_line_limit() {
         seedbox_machine::test_support::assets::image(EM_X86_64),
     )
     .unwrap();
-    // 1990 bytes fit alone; the 25-byte address takes them past 2014, the
-    // 2047-byte kernel limit less the boot's entropy argument.
-    fs::write(root.join("command-line"), "x".repeat(1990)).unwrap();
+    // 1957 bytes fit alone; the 25-byte address takes them past 1981, the
+    // 2047-byte kernel limit less the boot's entropy and offset arguments.
+    fs::write(root.join("command-line"), "x".repeat(1957)).unwrap();
     fs::write(root.join("firmware"), [1; 64 * 1024]).unwrap();
     let mut factory = Factory::new(
         &std::env::current_exe().unwrap(),
@@ -242,5 +243,5 @@ fn the_network_address_counts_toward_the_kernel_command_line_limit() {
         .unwrap(),
     );
     let error = factory.create(&definition).err().unwrap();
-    assert!(error.to_string().contains("2014 bytes"), "{error}");
+    assert!(error.to_string().contains("1981 bytes"), "{error}");
 }

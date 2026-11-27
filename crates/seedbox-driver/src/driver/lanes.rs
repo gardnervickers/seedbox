@@ -23,7 +23,8 @@ struct Arrival {
     delivery: network::Delivery,
     /// The frame's length; its bytes move to the receiver's inbox.
     len: usize,
-    /// Whether its receiver had exited by the arrival.
+    /// Whether its receiver had exited, or was not yet switched on, at the
+    /// arrival.
     dropped: bool,
 }
 
@@ -66,7 +67,8 @@ where
     M: Machine,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
-    /// receiver drops them there, and a machine held at a breakpoint takes
+    /// receiver drops them there, as does one not switched on yet for those
+    /// arriving before its boot, and a machine held at a breakpoint takes
     /// them there without a budget (see `held`). Only a paused receiver
     /// admits them at a round boundary instead, in a zero-budget run. A
     /// pause changes only at a timeline item, which every schedule shares,
@@ -232,8 +234,13 @@ where
             // what arrives in it.
             let inside = next.is_some() && entry.timer_inside(id);
             if let Some(at) = arrival {
-                if matches!(entry.stopped, StopReason::Exited { .. }) {
+                if entry.drops_frame(at) {
+                    // Only the arrivals before a switched-off machine's boot
+                    // drop. Its boot timer then runs before later arrivals.
                     while let Some(&index) = window.lanes[id.0].front() {
+                        if !entry.drops_frame(window.arrivals[index].at) {
+                            break;
+                        }
                         window.arrivals[index].dropped = true;
                         window.lanes[id.0].pop_front();
                     }

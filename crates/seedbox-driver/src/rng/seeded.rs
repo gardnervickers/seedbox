@@ -150,6 +150,18 @@ impl SeededRng {
         hash.update(fault.to_le_bytes());
         u64::from_le_bytes(hash.finalize()[..8].try_into().expect("eight digest bytes"))
     }
+    /// The delay of this stream's machine's first boot, below `spread_ns`
+    /// (zero when it is zero): a pure function of the machine seed, so
+    /// staggering draws nothing and checkpoints need no cursor.
+    pub(crate) fn boot_delay(&self, spread_ns: u64) -> u64 {
+        if spread_ns == 0 {
+            return 0;
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"seedbox-machine boot delay v1\0");
+        hash.update(self.seed.to_le_bytes());
+        u64::from_le_bytes(hash.finalize()[..8].try_into().expect("eight digest bytes")) % spread_ns
+    }
     pub(crate) fn derived(seed: u64, domain: Domain) -> Self {
         Self {
             domain,

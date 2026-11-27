@@ -67,6 +67,60 @@ impl fmt::Display for InvalidClockRate {
 }
 impl std::error::Error for InvalidClockRate {}
 
+/// Largest magnitude of a boot's realtime offset, in nanoseconds: the few
+/// milliseconds by which NTP-disciplined hosts on one network disagree.
+pub const REALTIME_OFFSET_BOUND_NS: i64 = 5_000_000;
+
+/// The kernel argument carrying a boot's realtime offset to the guest's init.
+pub const REALTIME_OFFSET_ARGUMENT: &str = "seedbox.clock_offset_ns=";
+
+/// Most bytes [`boot_command_line`] adds: a separating space and the
+/// argument with the widest offset (`-5000000`). A backend's base command
+/// line keeps this much of the kernel's limit free.
+pub const REALTIME_OFFSET_ARGUMENT_BYTES: usize =
+    " ".len() + REALTIME_OFFSET_ARGUMENT.len() + "-5000000".len();
+
+// Software that seeds randomness from the wall clock draws the same values
+// on every machine when they share one; the offset gives each boot its own
+// wall clock. It comes from the boot seed every backend already draws from
+// the machine's stream, so it draws nothing and moves no other seeded value.
+/// The realtime offset of the boot whose seed is `boot_seed`: uniform over
+/// `-REALTIME_OFFSET_BOUND_NS..=REALTIME_OFFSET_BOUND_NS`. The guest's init
+/// starts `CLOCK_REALTIME` at the epoch plus the machine counter plus this
+/// offset; monotonic and boot clocks and the machine's time base keep it out.
+pub fn boot_realtime_offset_ns(boot_seed: u64) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(
+        [
+            b"seedbox boot realtime offset v1\0".as_slice(),
+            &boot_seed.to_le_bytes(),
+        ]
+        .concat(),
+    );
+    let value = u64::from_le_bytes(digest[..8].try_into().expect("eight digest bytes"));
+    let span = 2 * REALTIME_OFFSET_BOUND_NS as u64 + 1;
+    (value % span) as i64 - REALTIME_OFFSET_BOUND_NS
+}
+
+/// Whether a base command line already sets the realtime offset argument,
+/// which the host appends to every boot itself.
+pub fn sets_realtime_offset(command_line: &str) -> bool {
+    command_line
+        .split_whitespace()
+        .any(|word| word.starts_with(REALTIME_OFFSET_ARGUMENT))
+}
+
+/// `command_line` with the realtime offset argument of the boot whose seed
+/// is `boot_seed` appended.
+pub fn boot_command_line(command_line: &str, boot_seed: u64) -> String {
+    let offset = boot_realtime_offset_ns(boot_seed);
+    if command_line.is_empty() {
+        format!("{REALTIME_OFFSET_ARGUMENT}{offset}")
+    } else {
+        format!("{command_line} {REALTIME_OFFSET_ARGUMENT}{offset}")
+    }
+}
+
 /// Shared simulation time controlled by the driver.
 pub struct SimulationClock(AtomicU64);
 

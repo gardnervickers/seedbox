@@ -56,6 +56,7 @@ impl<S> Checkpoint<S> {
                     inbox,
                     staged,
                     last_ended_published,
+                    powered_on_at,
                 } = entry;
                 let machine = map(machine.expect("opaque stopped capture"))?;
                 Ok(Entry {
@@ -70,6 +71,7 @@ impl<S> Checkpoint<S> {
                     inbox,
                     staged,
                     last_ended_published,
+                    powered_on_at,
                 })
             })
             .collect::<std::result::Result<_, E>>()?;
@@ -640,7 +642,8 @@ impl<T: Wire> Wire for Entry<T> {
         self.stopped.put(e)?;
         self.inbox.put(e)?;
         self.staged.put(e)?;
-        self.last_ended_published.put(e)
+        self.last_ended_published.put(e)?;
+        self.powered_on_at.put(e)
     }
     fn get<R: Read>(d: &mut Decoder<R>) -> Result<Self> {
         d.nested(|d| {
@@ -656,6 +659,7 @@ impl<T: Wire> Wire for Entry<T> {
                 inbox: Wire::get(d)?,
                 staged: Wire::get(d)?,
                 last_ended_published: Wire::get(d)?,
+                powered_on_at: Wire::get(d)?,
             })
         })
     }

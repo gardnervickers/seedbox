@@ -482,7 +482,7 @@ impl PVMachine {
             self.command_line,
             u8::from(p.controller.as_deref() == Some(name))
         );
-        boot::arguments(&command).map_err(std::io::Error::other)?;
+        boot::base_arguments(&command).map_err(std::io::Error::other)?;
         self.command_line = command;
         self.aux.policy = Some(selected);
         Ok(())
@@ -626,7 +626,7 @@ impl PVMachine {
         scratch_root: Option<&Path>,
     ) -> Result<Self, String> {
         let (kernel, initrd) = (kernel.into(), initrd.into());
-        boot::arguments(&command_line)?;
+        boot::base_arguments(&command_line)?;
         let layout = boot::RamLayout::native(memory_bytes)?;
         boot::layout_for(&layout, &kernel, &initrd)?;
         Ok(Self {
@@ -727,7 +727,9 @@ impl PVMachine {
                 initrd: self.directory.path().join("initrd"),
                 seed,
                 now,
-                command_line: self.command_line.clone(),
+                // The boot's realtime offset derives from its seed, like
+                // its rng-seed; a restored image keeps the one it booted with.
+                command_line: seedbox_machine::clock::boot_command_line(&self.command_line, seed),
                 disk,
                 network: self.network,
                 policy: Box::new(selected.clone()),
