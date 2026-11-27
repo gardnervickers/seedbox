@@ -140,6 +140,12 @@ pub(super) fn arguments(command_line: &str) -> Result<(), String> {
 /// Check a machine's base arguments, which keep room for the realtime offset
 /// each boot appends (`seedbox_machine::clock::boot_command_line`).
 pub(super) fn base_arguments(command_line: &str) -> Result<(), String> {
+    if seedbox_machine::clock::sets_realtime_offset(command_line) {
+        return Err(
+            "PV base arguments set seedbox.clock_offset_ns; remove it, each boot appends its own"
+                .into(),
+        );
+    }
     limited(
         command_line,
         COMMAND_LINE_SIZE - seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES,

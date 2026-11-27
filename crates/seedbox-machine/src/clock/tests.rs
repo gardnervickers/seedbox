@@ -48,6 +48,13 @@ fn boot_command_line_appends_one_offset_argument() {
 }
 
 #[test]
+fn a_base_line_setting_the_offset_is_recognised() {
+    assert!(sets_realtime_offset("quiet seedbox.clock_offset_ns=0"));
+    assert!(!sets_realtime_offset("quiet noseedbox.clock_offset_ns=0"));
+    assert!(!sets_realtime_offset(""));
+}
+
+#[test]
 fn the_reserved_width_covers_the_widest_offset_argument() {
     assert_eq!(
         format!(" {REALTIME_OFFSET_ARGUMENT}{}", -REALTIME_OFFSET_BOUND_NS).len(),

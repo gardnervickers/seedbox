@@ -1102,7 +1102,13 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
         )
         .is_ok());
     }
-    for rejected in ["a".repeat(1982), "é".repeat(991), "a\0b".into()] {
+    for rejected in [
+        "a".repeat(1982),
+        "é".repeat(991),
+        "a\0b".into(),
+        // Each boot appends its own offset.
+        "quiet seedbox.clock_offset_ns=0".into(),
+    ] {
         bootstrap.kernel.command_line = rejected;
         assert!(super::TcgMachine::new(
             Path::new("/missing/qemu"),

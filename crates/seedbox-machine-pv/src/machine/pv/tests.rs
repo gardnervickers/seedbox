@@ -328,6 +328,7 @@ fn kernel_argument_byte_limit_prevents_silent_linux_truncation() {
     let longest = "x".repeat(2047 - room);
     assert!(super::boot::base_arguments(&longest).is_ok());
     assert!(super::boot::base_arguments(&format!("{longest}x")).is_err());
+    assert!(super::boot::base_arguments("quiet seedbox.clock_offset_ns=0").is_err());
     for seed in 0..64 {
         let line = seedbox_machine::clock::boot_command_line(&longest, seed);
         assert!(super::boot::arguments(&line).is_ok());

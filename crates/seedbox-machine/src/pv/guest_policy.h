@@ -28,7 +28,8 @@ static inline int sbx_control_mode(const char *command, int fallback, int *enabl
     return 0;
 }
 /* The boot's realtime offset in nanoseconds, seedbox.clock_offset_ns=<signed
- * decimal>, at most one second either way; absent means zero. */
+ * decimal>, at most one second either way. Every host boot appends exactly
+ * one, so an absent or repeated argument is a host/init mismatch (EINVAL). */
 static inline int sbx_clock_offset(const char *command, int64_t *offset) {
     static const char key[] = "seedbox.clock_offset_ns=";
     int found = 0;
@@ -53,6 +54,7 @@ static inline int sbx_clock_offset(const char *command, int64_t *offset) {
         }
         command = end;
     }
+    if (!found) { errno = EINVAL; return -1; }
     *offset = value;
     return 0;
 }

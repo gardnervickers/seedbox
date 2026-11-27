@@ -57,20 +57,18 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
     }
 }
 #[test]
-fn clock_offset_is_one_signed_decimal_within_a_second_or_absent() {
+fn clock_offset_is_exactly_one_signed_decimal_within_a_second() {
     let dir = tempfile::tempdir().unwrap();
     let binary = parser(dir.path());
     for (command, expected) in [
-        ("", "0\n"),
-        ("quiet seedbox.control=1", "0\n"),
         ("seedbox.clock_offset_ns=0", "0\n"),
         ("quiet seedbox.clock_offset_ns=4999999 x=1", "4999999\n"),
         ("seedbox.clock_offset_ns=-5000000", "-5000000\n"),
         ("seedbox.clock_offset_ns=1000000000", "1000000000\n"),
         ("seedbox.clock_offset_ns=-1000000000", "-1000000000\n"),
         (
-            "noseedbox.clock_offset_ns=7 seedbox.clock_offset_nsx=7",
-            "0\n",
+            "noseedbox.clock_offset_ns=7 seedbox.clock_offset_ns=8",
+            "8\n",
         ),
         ("\tseedbox.clock_offset_ns=-3\n", "-3\n"),
     ] {
@@ -82,6 +80,9 @@ fn clock_offset_is_one_signed_decimal_within_a_second_or_absent() {
         assert_eq!(o.stdout, expected.as_bytes(), "{command:?}");
     }
     for command in [
+        "",
+        "quiet seedbox.control=1",
+        "noseedbox.clock_offset_ns=7 seedbox.clock_offset_nsx=7",
         "seedbox.clock_offset_ns=",
         "seedbox.clock_offset_ns=-",
         "seedbox.clock_offset_ns=+5",

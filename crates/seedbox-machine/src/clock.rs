@@ -102,6 +102,14 @@ pub fn boot_realtime_offset_ns(boot_seed: u64) -> i64 {
     (value % span) as i64 - REALTIME_OFFSET_BOUND_NS
 }
 
+/// Whether a base command line already sets the realtime offset argument,
+/// which the host appends to every boot itself.
+pub fn sets_realtime_offset(command_line: &str) -> bool {
+    command_line
+        .split_whitespace()
+        .any(|word| word.starts_with(REALTIME_OFFSET_ARGUMENT))
+}
+
 /// `command_line` with the realtime offset argument of the boot whose seed
 /// is `boot_seed` appended.
 pub fn boot_command_line(command_line: &str, boot_seed: u64) -> String {

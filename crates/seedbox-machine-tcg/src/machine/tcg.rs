@@ -462,6 +462,9 @@ impl TcgMachine {
                 COMMAND_LINE_CAPACITY - 1
             )));
         }
+        if seedbox_machine::clock::sets_realtime_offset(&command_line) {
+            return Err(Error("TCG kernel command line sets seedbox.clock_offset_ns; remove it, each boot appends its own".into()));
+        }
         // TCG needs no application instrumentation. Packaging borrows the
         // immutable prepared input; PV may derive its own private preparation.
         let initramfs = package(&definition.application, bootstrap)
