@@ -1,5 +1,6 @@
 //! One private observation socket per execution. The reader outlives the worker
-//! and drains its final datagrams before the simulation's public streams close.
+//! and drains its final datagrams before execution finalizes, so committed
+//! facts precede the run's finalizing lifecycle event.
 use crate::manager::Manager;
 use seedbox_api::{EventKind, LogEntry, LogStream, SimulationId};
 use seedbox_engine_protocol::{
@@ -27,24 +28,28 @@ impl Receiver {
     pub fn start(manager: Arc<Manager>, id: SimulationId) -> io::Result<Self> {
         let events = manager.clone();
         let frames = manager.clone();
+        let ready = manager.clone();
         let event_id = id.clone();
         let frame_id = id.clone();
+        let ready_id = id.clone();
         Self::with_sinks(
             move |entry| manager.publish_log(&id, entry),
             move |time, event| events.publish_engine_event(&event_id, time, event),
             move |time, batch| frames.publish_frames(&frame_id, time, batch),
+            move |time| ready.application_ready(&ready_id, time),
         )
     }
 
     #[cfg(test)]
     fn with_sink(emit: impl Fn(LogEntry) + Send + 'static) -> io::Result<Self> {
-        Self::with_sinks(emit, |_, _| {}, |_, _| {})
+        Self::with_sinks(emit, |_, _| {}, |_, _| {}, |_| {})
     }
 
     fn with_sinks(
         emit: impl Fn(LogEntry) + Send + 'static,
         event: impl Fn(u64, EventKind) + Send + 'static,
         frames: impl Fn(u64, Vec<seedbox_api::Frame>) + Send + 'static,
+        ready: impl Fn(u64) + Send + 'static,
     ) -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("seedbox-observe-")
@@ -148,6 +153,7 @@ impl Receiver {
                                         incarnation: observation.incarnation,
                                     },
                                 ),
+                                Kind::ApplicationReady => ready(last_time),
                                 Kind::OutOfMemoryKill { kill } => event(
                                     last_time,
                                     EventKind::OutOfMemoryKill {
@@ -220,14 +226,20 @@ impl Receiver {
     pub fn path(&self) -> std::path::PathBuf {
         self.directory.path().join("socket")
     }
-}
 
-impl Drop for Receiver {
-    fn drop(&mut self) {
+    /// Publish what the finished worker sent, up to its closing watermark or
+    /// an empty socket, then stop reading.
+    pub fn drain(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(task) = self.task.take() {
             let _ = task.join();
         }
+    }
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        self.drain();
     }
 }
 
@@ -242,6 +254,7 @@ mod tests {
         let captured = received.clone();
         let batches = Arc::new(Mutex::new(Vec::new()));
         let captured_frames = batches.clone();
+        let ready = received.clone();
         let receiver = Receiver::with_sinks(
             |_| {},
             move |time, event| {
@@ -249,6 +262,16 @@ mod tests {
             },
             move |time, frames| {
                 captured_frames.lock().unwrap().push((time, frames));
+            },
+            // Stands for the stage change the manager makes, in stream order.
+            move |time| {
+                ready.lock().unwrap().push((
+                    time,
+                    EventKind::LifecycleChanged {
+                        phase: seedbox_api::Phase::Running,
+                        stage: Some(seedbox_api::Stage::Executing),
+                    },
+                ));
             },
         )
         .unwrap();
@@ -267,15 +290,16 @@ mod tests {
         sender.connect(receiver.path()).unwrap();
         for (sequence, simulated_time_ns, kind) in [
             (1, 10, Kind::MachineReady),
+            (2, 10, Kind::ApplicationReady),
             (
-                2,
+                3,
                 15,
                 Kind::MachineLifecycle {
                     transition: seedbox_engine_protocol::observation::MachineTransition::Paused,
                 },
             ),
             (
-                4,
+                5,
                 20,
                 Kind::OutOfMemoryKill {
                     kill: seedbox_engine_protocol::out_of_memory::Kill {
@@ -286,9 +310,9 @@ mod tests {
                     },
                 },
             ),
-            (5, 21, Kind::MachineExited { code: 137 }),
+            (6, 21, Kind::MachineExited { code: 137 }),
             (
-                6,
+                7,
                 30,
                 Kind::FaultChanged {
                     id: 1,
@@ -302,7 +326,7 @@ mod tests {
                 },
             ),
             (
-                7,
+                8,
                 30,
                 Kind::Frames {
                     frames: vec![frame.clone()],
@@ -334,6 +358,13 @@ mod tests {
                     }
                 ),
                 (
+                    10,
+                    EventKind::LifecycleChanged {
+                        phase: seedbox_api::Phase::Running,
+                        stage: Some(seedbox_api::Stage::Executing),
+                    }
+                ),
+                (
                     15,
                     EventKind::MachineLifecycle {
                         machine: "oracle".into(),
@@ -341,7 +372,7 @@ mod tests {
                         transition: seedbox_api::MachineTransition::Paused
                     }
                 ),
-                (20, EventKind::SourceGap { first: 3, last: 3 }),
+                (20, EventKind::SourceGap { first: 4, last: 4 }),
                 (
                     20,
                     EventKind::OutOfMemoryKill {
