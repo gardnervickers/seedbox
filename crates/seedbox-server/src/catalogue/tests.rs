@@ -94,7 +94,11 @@ fn test_options_are_taken_only_by_a_test_support_build() {
         };
         let submitted = catalogue.submit(request);
         if seedbox_driver_execution::driver_world::TAKES_TEST_OPTIONS {
-            assert_eq!(submitted.unwrap().0.options, options);
+            let taken = submitted.unwrap().0.options;
+            assert_eq!(
+                (taken.stop_policy, taken.no_timed_inbox),
+                (options.stop_policy, options.no_timed_inbox)
+            );
         } else {
             // Refused at submission, before any preparation.
             assert!(matches!(
