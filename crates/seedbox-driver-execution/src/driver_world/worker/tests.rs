@@ -770,3 +770,69 @@ fn oom_publication_keeps_the_emitting_boot_and_kernel_victim() {
     assert_eq!(record.simulated_time_ns, 10);
     assert_eq!(record.kind, Kind::OutOfMemoryKill { kill });
 }
+
+#[test]
+fn application_readiness_is_published_after_the_ready_that_completes_it() {
+    use seedbox_engine_protocol::observation::{Kind, Observation};
+    use std::os::unix::net::UnixDatagram;
+    let (root, mut worker, _) = worker();
+    assert!(!worker.state.world.readiness.latched);
+    let path = root.path().join("ready-observation.sock");
+    let receiver = UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    worker.publisher = Publisher::connect(Some(&path)).unwrap();
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    assert!(worker.state.world.readiness.latched);
+    // Every send happened on this thread before these receives.
+    let receive = |receiver: &UnixDatagram| {
+        let mut records = vec![];
+        let mut bytes = [0; 65_536];
+        loop {
+            match receiver.recv(&mut bytes) {
+                Ok(size) => {
+                    records.push(serde_json::from_slice::<Observation>(&bytes[..size]).unwrap())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return records,
+                Err(e) => panic!("observation receive: {e}"),
+            }
+        }
+    };
+    let records = receive(&receiver);
+    let readiness: Vec<_> = records
+        .iter()
+        .filter(|record| matches!(record.kind, Kind::MachineReady | Kind::ApplicationReady))
+        .map(|record| {
+            (
+                record.machine.as_str(),
+                record.simulated_time_ns,
+                &record.kind,
+            )
+        })
+        .collect();
+    assert_eq!(readiness.len(), 3, "{readiness:?}");
+    assert!(readiness[..2]
+        .iter()
+        .all(|(_, _, kind)| **kind == Kind::MachineReady));
+    let mut machines: Vec<_> = readiness[..2].iter().map(|(name, ..)| *name).collect();
+    machines.sort();
+    assert_eq!(machines, ["n1", "oracle"]);
+    assert_eq!(readiness[2], ("", readiness[1].1, &Kind::ApplicationReady));
+    // A worker that continues an already ready world says so first, at the
+    // position it continues from.
+    let mut state = worker.state.clone();
+    state.world.position.simulated_time_ns = 25;
+    let mut publisher = Publisher::connect(Some(&path)).unwrap();
+    publisher.restored_ready(&mut state).unwrap();
+    state.world.readiness.latched = false;
+    publisher.restored_ready(&mut state).unwrap();
+    let records = receive(&receiver);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        (
+            records[0].sequence,
+            records[0].simulated_time_ns,
+            &records[0].kind
+        ),
+        (1, 25, &Kind::ApplicationReady)
+    );
+}

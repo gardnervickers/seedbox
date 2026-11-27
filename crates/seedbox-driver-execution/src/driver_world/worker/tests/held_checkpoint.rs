@@ -285,7 +285,15 @@ fn held_crash_partition_and_same_time_order_survive_binary_capture() {
         let expected_states = states(&mut source);
         for step in [false, true] {
             let mut branch = restore(&envelope, root.path());
-            assert_eq!(branch.state.world.publication.session, Default::default());
+            // A fresh session whose only record says the restored
+            // world's application is ready.
+            assert_eq!(
+                branch.state.world.publication.session,
+                seedbox_engine_protocol::driver_world::PublicationSession {
+                    observation_records: 1,
+                    ..Default::default()
+                }
+            );
             let mut observed = Observed::attach(
                 &mut branch,
                 &root.path().join(format!("branch-{step}.sock")),

@@ -75,6 +75,9 @@ timers run between blocks, and an I/O instruction that raises an interrupt ends 
 where the last stopped, with nothing to deliver, adopts no time. A run too short to complete one instruction,
 which a throttled machine can get, is charged to the next instruction only after its CPU has taken what was
 pending at its start, and a CPU that stays halted is charged nothing. So where runs end leaves no trace.
+The microvm board has no RNG-seed provider and QEMU's `-seed` never reaches the guest, so each boot appends
+`seedbox.entropy=<boot seed>` to the kernel command line; Linux mixes the command line into its pool before
+its first draw. PV instead passes the seed as a device-tree `rng-seed` (ARM) or `SETUP_RNG_SEED` (x86).
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.
 

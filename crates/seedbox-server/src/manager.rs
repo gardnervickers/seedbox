@@ -168,7 +168,10 @@ impl Live {
         }
     }
 
-    fn publish(&self, resource: &Simulation) {
+    /// Publish the lifecycle events of a status change. `fact_time` is the
+    /// simulated time of the committed fact that caused it, which the events
+    /// carry instead of the status's latest sampled position.
+    fn publish(&self, resource: &Simulation, fact_time: Option<u64>) {
         let previous = self.status.borrow().clone();
         let mut kinds = Vec::with_capacity(3);
         if previous.metadata.deletion_requested_at_unix_ms.is_none()
@@ -211,7 +214,7 @@ impl Live {
                     resource.status.phase,
                     Phase::Running | Phase::Finalizing
                 ))
-                .then_some(resource.status.simulated_time_ns),
+                .then_some(fact_time.unwrap_or(resource.status.simulated_time_ns)),
                 position: None,
                 event,
             });
@@ -249,7 +252,16 @@ pub(crate) struct ResultEvidence {
 }
 
 impl State {
-    fn persist(&mut self, mut resource: Simulation) -> Result<Simulation, Error> {
+    fn persist(&mut self, resource: Simulation) -> Result<Simulation, Error> {
+        self.persist_fact(resource, None)
+    }
+
+    /// Persist a change made by a committed fact at `fact_time`, if any.
+    fn persist_fact(
+        &mut self,
+        mut resource: Simulation,
+        fact_time: Option<u64>,
+    ) -> Result<Simulation, Error> {
         // An operational control failure survives execution cancellation and
         // cleanup; only the execution owner decides when the resource completes.
         if let Some(termination @ ExecutionTermination::Error { .. }) = &self
@@ -291,7 +303,7 @@ impl State {
             if let Some(timing) = timing {
                 live.timing = timing;
             }
-            live.publish(&resource);
+            live.publish(&resource, fact_time);
         }
         if resource.status.phase == Phase::Completed {
             if let Some(live) = self.live.remove(&id) {
@@ -378,7 +390,6 @@ impl Manager {
         status: seedbox_api::PlaybackStatus,
     ) -> Result<(), Error> {
         let mut state = self.0.lock().map_err(|_| Error::StorageFailed)?;
-        let mut became_ready = false;
         if let Some(live) = state.live.get_mut(id) {
             if live.playback.as_ref().is_none_or(|(previous, _)| {
                 status.position.completed_rounds >= previous.position.completed_rounds
@@ -387,20 +398,39 @@ impl Manager {
                             && status.position.simulated_time_ns
                                 >= previous.position.simulated_time_ns))
             }) {
-                became_ready = status.application_ready;
                 live.playback = Some((status, Instant::now()));
             }
         }
-        if became_ready {
-            let mut resource = state.catalogue.get(id)?.clone();
-            if resource.status.phase == Phase::Running
-                && resource.status.stage == Some(seedbox_api::Stage::Booting)
-            {
-                resource.status.stage = Some(seedbox_api::Stage::Executing);
-                state.persist(resource)?;
+        Ok(())
+    }
+
+    /// The worker committed application readiness at `time`: booting ends.
+    /// Host status samples also report readiness, but where they land
+    /// depends on host timing, so they never change the stage.
+    pub(crate) fn application_ready(&self, id: &SimulationId, time: u64) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if !state.live.contains_key(id) {
+            return;
+        }
+        let Ok(resource) = state.catalogue.get(id) else {
+            return;
+        };
+        if resource.status.phase != Phase::Running
+            || resource.status.stage != Some(seedbox_api::Stage::Booting)
+        {
+            return;
+        }
+        let mut resource = resource.clone();
+        resource.status.stage = Some(seedbox_api::Stage::Executing);
+        resource.status.simulated_time_ns = resource.status.simulated_time_ns.max(time);
+        if state.persist_fact(resource, Some(time)).is_err() {
+            if let Some(live) = state.live.get(id) {
+                live.cancellation.cancel();
+                let _ = live.events.close();
             }
         }
-        Ok(())
     }
 
     pub(crate) fn captured_checkpoint(
@@ -647,7 +677,7 @@ impl Manager {
             state.catalogue.begin_delete(id)?;
             match state.live.get(id) {
                 Some(live) => {
-                    live.publish(state.catalogue.get(id)?);
+                    live.publish(state.catalogue.get(id)?, None);
                     live.worker.clone()
                 }
                 None => None,
@@ -898,7 +928,7 @@ impl Manager {
                 let mut resource = resource.clone();
                 resource.status.oracle_exit_code = Some(*code);
                 resource.status.simulated_time_ns = resource.status.simulated_time_ns.max(time);
-                if state.persist(resource).is_err() {
+                if state.persist_fact(resource, Some(time)).is_err() {
                     if let Some(live) = state.live.get(id) {
                         live.cancellation.cancel();
                         let _ = live.events.close();
@@ -1432,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_readiness_closes_boot_stage_once_and_ignores_stale_samples() {
+    fn committed_readiness_closes_boot_stage_once_and_samples_never_do() {
         let manager = Manager::new(Catalogue::in_memory());
         let configuration = seedbox_application::config::parse(
             "name: test\nmachines: {}\noracle:\n  image: example/oracle\n",
@@ -1476,15 +1506,20 @@ mod tests {
             application_ready: ready,
         };
         manager.observe_playback(id, sample(2, false)).unwrap();
-        manager.observe_playback(id, sample(1, true)).unwrap();
+        manager.observe_playback(id, sample(3, true)).unwrap();
         assert_eq!(
             manager.describe(id).unwrap().status.stage,
             Some(Stage::Booting)
         );
-        manager.observe_playback(id, sample(3, true)).unwrap();
+        manager.application_ready(id, 25);
         let executing = manager.describe(id).unwrap();
         assert_eq!(executing.status.stage, Some(Stage::Executing));
         assert!(executing.status.stage_timings[&Stage::Booting].complete);
+        manager.application_ready(id, 26);
+        assert_eq!(
+            manager.describe(id).unwrap().metadata.revision,
+            executing.metadata.revision
+        );
         let mut transition = sample(4, true);
         transition.position.completed_rounds = 3;
         transition.position.simulated_time_ns = 29;
@@ -1503,5 +1538,124 @@ mod tests {
             manager.describe(id).unwrap().metadata.revision,
             executing.metadata.revision
         );
+    }
+
+    /// Two executions of one seed commit the same facts, and the host samples
+    /// their status at different points. The event streams are identical, and
+    /// an event a fact causes carries that fact's simulated time.
+    #[tokio::test]
+    async fn host_status_samples_never_move_or_reorder_committed_events() {
+        use crate::stream::Delivery;
+        type Sample = Option<(u64, bool)>;
+        async fn stream(samples: [Sample; 3]) -> Vec<(u64, Option<u64>, EventKind)> {
+            let manager = Manager::new(Catalogue::in_memory());
+            let configuration = seedbox_application::config::parse(
+                "name: test\nmachines:\n  db:\n    image: example/db\noracle:\n  image: example/oracle\n",
+                std::path::Path::new("/project/seedbox.yaml"),
+                &Default::default(),
+            )
+            .unwrap();
+            let id = manager
+                .submit(SubmitRequest {
+                    metadata: Default::default(),
+                    options: Default::default(),
+                    request_id: "host-samples".into(),
+                    spec: SimulationSpec {
+                        program: Vec::new(),
+                        seed: Some(1),
+                        inputs: InputSource::Project,
+                        configuration,
+                    },
+                })
+                .unwrap()
+                .0
+                .metadata
+                .id;
+            manager.begin(&id).unwrap().unwrap();
+            manager
+                .update(&id, |resource| {
+                    resource.status.phase = Phase::Running;
+                    resource.status.stage = Some(Stage::Booting);
+                })
+                .unwrap();
+            let [first, second, third] = samples;
+            let host = |sample: Sample| {
+                if let Some((time, ready)) = sample {
+                    let status = PlaybackStatus {
+                        position: BoundaryPosition {
+                            boundary_index: time,
+                            completed_rounds: time,
+                            simulated_time_ns: time,
+                        },
+                        rate: PlaybackRate::Unlimited,
+                        achieved_rate: None,
+                        stepping: false,
+                        before_next_fault: false,
+                        terminal: false,
+                        application_ready: ready,
+                    };
+                    manager.observe_playback(&id, status).unwrap();
+                }
+            };
+            let ready = |machine: &str| EventKind::MachineReady {
+                machine: machine.into(),
+                incarnation: 0,
+            };
+            manager.publish_engine_event(&id, 316_042, ready("db"));
+            host(first);
+            manager.publish_engine_event(&id, 329_042, ready("oracle"));
+            manager.application_ready(&id, 329_042);
+            host(second);
+            manager.publish_engine_event(
+                &id,
+                3_003_930_266,
+                EventKind::MachineExited {
+                    machine: "oracle".into(),
+                    incarnation: 0,
+                    code: 0,
+                },
+            );
+            host(third);
+            manager
+                .update(&id, |resource| {
+                    resource.status.phase = Phase::Finalizing;
+                    resource.status.stage = Some(Stage::Finalizing);
+                    resource.status.simulated_time_ns = 3_004_930_266;
+                })
+                .unwrap();
+            let mut history = manager.events(&id, false).unwrap();
+            let mut events = Vec::new();
+            while let Delivery::Record(record) = history.recv().await {
+                let event = &record.payload;
+                events.push((event.revision, event.simulated_time_ns, event.event.clone()));
+            }
+            events
+        }
+        // Where the observed runs differed: a sample already ahead of the
+        // oracle's exit, or one reporting readiness before the server had
+        // received the last machine's ready.
+        let late = stream([None, Some((2_000_000, true)), None]).await;
+        let ahead = stream([None, Some((3_004_000_000, true)), None]).await;
+        let early = stream([Some((1_000_000, true)), None, Some((3_004_000_000, true))]).await;
+        assert_eq!(late, ahead);
+        assert_eq!(late, early);
+        let time = |wanted: &EventKind| {
+            late.iter()
+                .position(|(_, _, event)| event == wanted)
+                .map(|index| (index, late[index].1))
+                .unwrap()
+        };
+        let (oracle_ready, _) = time(&EventKind::MachineReady {
+            machine: "oracle".into(),
+            incarnation: 0,
+        });
+        let (executing, executing_time) = time(&EventKind::LifecycleChanged {
+            phase: Phase::Running,
+            stage: Some(Stage::Executing),
+        });
+        assert_eq!(executing, oracle_ready + 1);
+        assert_eq!(executing_time, Some(329_042));
+        let (_, exit_time) = time(&EventKind::OracleExited { code: 0 });
+        assert_eq!(exit_time, Some(3_003_930_266));
     }
 }

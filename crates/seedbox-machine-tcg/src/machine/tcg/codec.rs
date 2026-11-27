@@ -13,7 +13,9 @@
 //! u64-length UTF-8; booleans/options use only 0/1; states use 0=Ready,
 //! 1=Blocked(optional deadline), 2=Shutdown, 3=Crashed. Unknown tags, reserved
 //! bits and trailing bytes reject. No host paths or executable identity occur.
-use super::{Boot, ExitReason, Initramfs, Manifest, Snapshot, State, Timestamp, COMMAND_LINE_SIZE};
+use super::{
+    Boot, ExitReason, Initramfs, Manifest, Snapshot, State, Timestamp, COMMAND_LINE_CAPACITY,
+};
 use seedbox_machine::definition::{DiskImage, MacAddress};
 use seedbox_machine::snapshot::{reserve, CodecError, DecodeLimits, Reader, Result, Writer};
 use std::io::{Read, Write};
@@ -135,7 +137,7 @@ fn boot(boot: &Boot) -> Result<BootParts<'_>> {
     }
 }
 fn validate_command(command: &str) -> Result<()> {
-    if command.contains('\0') || command.len() >= COMMAND_LINE_SIZE {
+    if command.contains('\0') || command.len() >= COMMAND_LINE_CAPACITY {
         return Err(invalid("kernel command line"));
     }
     Ok(())
