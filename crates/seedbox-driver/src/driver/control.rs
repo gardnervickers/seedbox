@@ -253,6 +253,8 @@ impl Control {
         used.insert(command, (action, origin, false));
         Ok(())
     }
+    /// Record that the guest took `command`, which was offered as an input
+    /// at `at`; the record takes that time, not the run's bound.
     pub(super) fn accepted(
         &mut self,
         id: MachineId,
@@ -260,7 +262,6 @@ impl Control {
         boot: u64,
         command: NonZeroU32,
         at: Timestamp,
-        commit: Timestamp,
     ) -> Result<(), String> {
         let (action, origin, accepted) = self.entries[id.0]
             .commands
@@ -275,7 +276,7 @@ impl Control {
                     *action,
                     *origin,
                     at.as_nanos(),
-                    commit.as_nanos(),
+                    at.as_nanos(),
                 )
                 .map_err(|e| format!("command admission: {e:?}"))?;
             *accepted = true;
@@ -691,49 +692,36 @@ impl Control {
         }
         Ok(plans)
     }
+    /// Fold a committed output into the service and the machine's lifecycle
+    /// record. The record takes the output's own time; the service acts at
+    /// `act`, one floor after it (C1), whichever commit carried it.
     pub(super) fn observe<M>(
         &mut self,
         machines: &mut [Entry<M>],
         output: &super::MachineResponse,
-        commit: Timestamp,
+        act: Timestamp,
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
         use crate::pv::Response;
         let mut plans = vec![];
         let name = self.name(output.machine);
+        let at = output.at.as_nanos();
+        let act = act.as_nanos();
         match &output.payload {
             Response::CommandAcknowledged { id, result } => {
                 plans.extend(self.invoke_plans(machines, |service, view| {
-                    service.acknowledged(
-                        view,
-                        &name,
-                        output.boot,
-                        *id,
-                        *result,
-                        output.at.as_nanos(),
-                        commit.as_nanos(),
-                    )
+                    service.acknowledged(view, &name, output.boot, *id, *result, at, act)
                 })?)
             }
             Response::ApplicationOutcome { .. } => {
                 plans.extend(self.invoke_plans(machines, |service, _| {
-                    service.application_ended(
-                        &name,
-                        output.boot,
-                        output.at.as_nanos(),
-                        commit.as_nanos(),
-                    )
+                    service.application_ended(&name, output.boot, at, act)
                 })?)
             }
             _ => {}
         }
         machines[output.machine.0]
             .lifecycle
-            .response(
-                output.boot,
-                output.at.as_nanos(),
-                commit.as_nanos(),
-                &output.payload,
-            )
+            .response(output.boot, at, at, &output.payload)
             .map_err(|e| format!("control observation response: {e:?}"))?;
         let ready = machines[output.machine.0]
             .lifecycle
@@ -742,29 +730,25 @@ impl Control {
         if ready && matches!(output.payload, Response::CommandAcknowledged { .. }) {
             // A heal queued behind the acknowledged step can go now.
             plans.extend(self.invoke_plans(machines, |service, view| {
-                service.dispatch_waiting(view, &name, output.boot, commit.as_nanos())
+                service.dispatch_waiting(view, &name, output.boot, act)
             })?);
         }
         if matches!(output.payload, Response::Ready) {
             plans.extend(self.invoke_plans(machines, |service, view| {
-                service.ready(
-                    view,
-                    &name,
-                    output.boot,
-                    output.at.as_nanos(),
-                    commit.as_nanos(),
-                )
+                service.ready(view, &name, output.boot, at, act)
             })?);
         }
         Ok(plans)
     }
     /// Fold an accepted physical exit into the committed record: only its first
-    /// occurrence in a boot changes it, never a later adopted boundary.
+    /// occurrence in a boot changes it, never a later adopted boundary. The
+    /// record takes the exit's own time; the service acts at `act`, one floor
+    /// after it (C1).
     pub(super) fn terminal<M>(
         &mut self,
         machines: &mut [Entry<M>],
         id: MachineId,
-        commit: Timestamp,
+        act: Timestamp,
     ) -> Result<Vec<crate::oracle::service::Plan>, String> {
         let crate::machine::StopReason::Exited { reached, reason } = machines[id.0].stopped else {
             return Ok(vec![]);
@@ -772,14 +756,14 @@ impl Control {
         let boot = machines[id.0].lifecycle.boot();
         let change = machines[id.0]
             .lifecycle
-            .terminal(boot, reached.as_nanos(), commit.as_nanos(), reason)
+            .terminal(boot, reached.as_nanos(), reached.as_nanos(), reason)
             .map_err(|e| format!("control terminal: {e:?}"))?;
         if change != crate::oracle::observation::Change::Changed {
             return Ok(vec![]);
         }
         let name = self.name(id);
         self.invoke_plans(machines, |service, _| {
-            service.ended(&name, boot, reached.as_nanos(), commit.as_nanos())
+            service.ended(&name, boot, reached.as_nanos(), act.as_nanos())
         })
     }
 }

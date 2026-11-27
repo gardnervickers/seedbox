@@ -51,6 +51,7 @@ mod network;
 mod network_test_frames;
 pub(crate) use network::Network as NetworkState;
 mod playback;
+pub(crate) mod stops;
 pub use event::{
     BreakEnd, Cause, Event, EventKind, FaultAction, FaultId, FaultOrigin, FaultRecord, FaultTarget,
     SettlementStatus, Transition,
@@ -204,6 +205,13 @@ enum Scheduled {
     },
 }
 
+/// What a commit schedules because of one output or exit, held until the
+/// whole commit has been processed and then queued in output order.
+enum Consequence {
+    Item(Timestamp, Box<Scheduled>),
+    Plans(Vec<crate::oracle::service::Plan>),
+}
+
 impl<M> Entry<M> {
     /// Machine `id` joining at `at`, with the identity time mapping from there.
     fn new(id: MachineId, machine: M, seed: u64, at: Timestamp) -> Self {
@@ -268,6 +276,92 @@ impl<M> Entry<M> {
             .map(Timestamp::from_nanos)
     }
 
+    /// The machine time a lane's run starting at simulation time `at` begins
+    /// at. A blocked machine woken by its timer starts at the timer's
+    /// deadline, which a fast clock can place before `at`'s own machine time,
+    /// inside that simulation nanosecond: a run covering `at` would have
+    /// taken the timer exactly at its deadline too (C3). A paused machine
+    /// is not woken: it has no lane run, and a zero-budget admission run
+    /// starts at `at`'s machine time (see `batch_views`).
+    fn start_time(&self, id: MachineId, at: Timestamp) -> Result<Timestamp, ClockOverflow> {
+        let start = self.machine_time(id, at)?;
+        if self.lifecycle.paused() {
+            return Ok(start);
+        }
+        Ok(match (self.stopped, self.timer) {
+            (
+                StopReason::Blocked {
+                    deadline: Some(due),
+                    ..
+                },
+                Some(timer),
+            ) if due == at => timer.max(self.position).min(start),
+            _ => start,
+        })
+    }
+
+    /// Whether the machine is blocked on a timer whose deadline lies before
+    /// the machine time of the simulation nanosecond it maps to. It runs from
+    /// the deadline to that machine time before anything else due then.
+    fn timer_inside(&self, id: MachineId) -> bool {
+        match (self.stopped, self.timer) {
+            (
+                StopReason::Blocked {
+                    deadline: Some(due),
+                    ..
+                },
+                Some(timer),
+            ) => self
+                .machine_time(id, due)
+                .is_ok_and(|start| timer.max(self.position) < start),
+            _ => false,
+        }
+    }
+
+    /// Whether the machine's next run would only continue from a barrier:
+    /// it reached its bound there and nothing is delivered to it.
+    fn continuing(&self) -> bool {
+        matches!(self.stopped, StopReason::BoundaryReached)
+            && self.timer.is_none()
+            && self.inbox.is_empty()
+    }
+
+    /// The simulation time a run starting at `now` maps machine times from.
+    /// A run that starts at a cut every schedule shares (a needed barrier, a
+    /// wake, an input) maps from `now`. One that only continues from a
+    /// barrier nothing needs maps from the nanosecond before, which a slow
+    /// clock can map to the same machine nanosecond: never before the last
+    /// rate change, nor before `limit`, the earliest time whose consequences,
+    /// one floor later, the run can still commit in time.
+    fn lower_for(&self, now: Timestamp, limit: Timestamp, needed: bool) -> Timestamp {
+        if self.continuing() && !needed {
+            let anchor = Timestamp::from_nanos(self.time.anchor());
+            Timestamp::from_nanos(now.as_nanos().saturating_sub(1))
+                .max(anchor)
+                .max(limit)
+                .min(now)
+        } else {
+            now
+        }
+    }
+
+    /// The earliest simulation time the machine's next run can stamp: its
+    /// next start, or the earliest time at or after its lower limit (see
+    /// `lower_for`) that reaches that start's machine time.
+    fn earliest(&self, id: MachineId, limit: Timestamp, needed: bool) -> Option<Timestamp> {
+        let start = self.next()?;
+        if !self.continuing() {
+            return Some(start);
+        }
+        let lower = self.lower_for(start, limit, needed);
+        Some(
+            self.machine_time(id, start)
+                .ok()
+                .and_then(|machine| self.simulation_time(lower, machine))
+                .map_or(start, |earliest| earliest.min(start)),
+        )
+    }
+
     fn next(&self) -> Option<Timestamp> {
         if self.lifecycle.paused() {
             return None;
@@ -327,16 +421,25 @@ type MachineFactory<M> =
 struct ExecutionState<M> {
     clock: Arc<SimulationClock>,
     rng: SimulationRng,
+    /// The quantum and the start its boundaries are anchored at. Host
+    /// choices that cap rounds and pace playback, not simulation state: they
+    /// are outside policy evidence.
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     machines: Vec<Entry<M>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
+    /// Commits so far: where rounds ended, a host matter outside evidence.
     boundary_index: u64,
-    completed_quanta: u64,
-    quantum_committed: bool,
     failed: bool,
     stopped: bool,
     oracle: MachineId,
+    /// The current barrier, once it is a needed one: every machine is cut
+    /// there in every schedule. Cleared when time moves on.
+    needed: Option<Timestamp>,
+    /// The end of the run, one floor after the oracle's terminal output
+    /// (C4), until `apply_due` takes it at that time.
+    finishing: Option<(Timestamp, ExitReason)>,
+    /// The end of the run once taken: nothing more is admitted or executed.
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
@@ -349,6 +452,23 @@ struct ExecutionState<M> {
     /// The engine running the machines, which decides what oracle calls
     /// may ask of them. Not checkpoint state: its owner declares it again.
     engine: Option<faults::Engine>,
+}
+
+impl<M> ExecutionState<M> {
+    /// Quanta completed by `now`: a function of time and the quantum, for
+    /// playback and positions only.
+    fn completed_quanta(&self, now: Timestamp) -> u64 {
+        (now.as_nanos() - self.origin.as_nanos()) / self.quantum_ns
+    }
+
+    /// The first quantum boundary after `now`, which caps a round that starts
+    /// there; `None` past the end of time.
+    fn quantum_end(&self, now: Timestamp) -> Option<Timestamp> {
+        let next = self.completed_quanta(now).checked_add(1)?;
+        next.checked_mul(self.quantum_ns)
+            .and_then(|elapsed| self.origin.as_nanos().checked_add(elapsed))
+            .map(Timestamp::from_nanos)
+    }
 }
 
 /// Already-committed descriptions owned by one observer session. These are
@@ -373,12 +493,17 @@ struct ObservationState {
 /// `g(t) = floor(G(t))`. The driver translates at the machine boundary:
 /// - Into the machine: its clock reads `g(now)`, it runs to `g(upto)`, and
 ///   due inputs are offered at `g(at)` (or `g` of the last rate change, if
-///   the input became due before it).
-/// - Out of the machine: an output, `Blocked`/`Exited` position or timer
-///   deadline at machine time `m` maps to the earliest simulation time at or
-///   after the run's start whose `G` reaches `m`. Results are never early;
-///   rounding is to whole nanoseconds. A timer no representable simulation
-///   time reaches never fires. Pending timers are re-converted at a rate change.
+///   the input became due before it). A run woken by its timer starts at the
+///   timer's machine deadline, which a fast clock can place below `g(now)`.
+/// - Out of the machine: a timer deadline at machine time `m` maps to the
+///   earliest simulation time at or after the run's start whose `G` reaches
+///   `m`; an output or `Blocked`/`Exited` position maps likewise, but a run
+///   that only continues from a barrier nothing needs maps from the
+///   nanosecond before its start, so a slow clock's shared machine nanosecond
+///   maps to its first simulation nanosecond whatever barrier fell on the
+///   second. Results are never early; rounding is to whole nanoseconds. A
+///   timer no representable simulation time reaches never fires. Pending
+///   timers are re-converted at a rate change.
 ///
 /// A machine has reached simulation barrier `T` exactly when its machine
 /// position reaches `g(T)`: a machine time `m` maps to at most `T` if and only
@@ -422,19 +547,24 @@ struct ObservationState {
 /// time and make due timers eligible without executing program instructions.
 /// Pausing never freezes the clock or shifts timer deadlines. Retained input
 /// stays queued while paused; crashes still terminate paused machines.
-/// Guest simulation-control calls are interpreted after their full round commits.
-/// Their effects and replies join the same ordered timeline at that barrier;
-/// draining events (`Driver::drain_observations`) only observes them. Accepted control work survives caller
-/// loss. Calls generated together are queued before their generated effects;
+/// A guest simulation-control call is admitted one network latency after the
+/// output that carried it, or one control latency after it with a controller
+/// configured, whichever round committed that output. Its effects and replies
+/// join the same ordered timeline from there; draining events
+/// (`Driver::drain_observations`) only observes them. Accepted control work
+/// survives caller loss. Calls generated together are queued before their generated effects;
 /// dependent operations must await acknowledgment rather than assume that a
-/// concurrent Pause/Resume sequence succeeds. Oracle completion publishes the full response batch before stopping
-/// further admission.
+/// concurrent Pause/Resume sequence succeeds. The run ends one network latency
+/// after the oracle's terminal output or exit: what is due before then still
+/// happens, every machine runs to that time and its output up to then is
+/// published, and nothing due then or later is admitted.
 pub struct Driver<M: Machine> {
     host: Host<M::Context>,
     execution: ExecutionState<M>,
     playback: Playback,
     observations: ObservationState,
     factory: MachineFactory<M>,
+    stops: stops::Stops,
 }
 
 impl<M> Driver<M>
@@ -490,7 +620,10 @@ where
     /// publishes it happens, in output publication order, against the network
     /// state at that point of the timeline: a round's commit precedes the
     /// timeline items due at its boundary, and an admission run's commit
-    /// follows the item that caused it. All-ones broadcast reaches every other
+    /// follows the item that caused it. Outputs of one instant commit in
+    /// (machine, emission) order: a barrier nothing needs holds the output at
+    /// or after the earliest time a machine can still emit. All-ones
+    /// broadcast reaches every other
     /// attached machine in identity order, unicast reaches its address's owner,
     /// and any other destination reaches nobody. Each candidate is lost or
     /// delayed by latency plus jitter using streams derived from the sender's
@@ -507,10 +640,10 @@ where
     /// A frame arriving at `T` is offered exactly at `T`, after every timeline
     /// item due at `T` and before timer wakeups, as [`Request::ReceiveFrame`]
     /// to the receiver's current boot, including while paused. A running
-    /// receiver takes it in its next run, which starts at `T`; a paused or
-    /// suspended one, or one with a later item due at `T`, takes it in a
-    /// zero-budget run first. It is dropped if that boot has exited. Delivery
-    /// means offered to the NIC, not consumed.
+    /// receiver takes it in its next run, which starts at `T`; a paused one,
+    /// one held at a breakpoint, or one with a later item due at `T`, takes
+    /// it in a zero-budget run. It is dropped if that boot has exited.
+    /// Delivery means offered to the NIC, not consumed.
     /// While an attached machine can execute, rounds end no later than its
     /// earliest execution time plus latency, so no frame arrives before the
     /// round that sent it commits. Blocked or paused machines impose no limit;
@@ -518,9 +651,7 @@ where
     /// does not wake it, which also tightens the controller latency bound.
     /// Inside a round, each machine runs to the round's end on its own lane and
     /// takes its timers and frames at their exact times; lanes run side by side.
-    /// Only frames for a paused or suspended receiver end a round at their
-    /// arrival. Effects decided at commit, such as control replies and the
-    /// finish time, therefore take the round's end.
+    /// Only frames for a paused receiver end a round at their arrival.
     // Blocked machines impose no bound, so idle simulations still jump to their
     // next event.
     #[allow(clippy::too_many_arguments)]
@@ -564,12 +695,10 @@ where
             .ok()
             .filter(|&n| n > 0)
             .ok_or(Error::InvalidQuantum)?;
-        let quantum_end = Timestamp::from_nanos(
-            start
-                .as_nanos()
-                .checked_add(quantum_ns)
-                .ok_or(Error::TimeOverflow)?,
-        );
+        start
+            .as_nanos()
+            .checked_add(quantum_ns)
+            .ok_or(Error::TimeOverflow)?;
         let all = || {
             std::iter::once(&oracle)
                 .chain(&machines)
@@ -649,16 +778,16 @@ where
             execution: ExecutionState {
                 clock,
                 quantum_ns,
-                quantum_end,
+                origin: start,
                 machines,
                 rng,
                 events: BTreeMap::new(),
                 boundary_index: 0,
-                completed_quanta: 0,
-                quantum_committed: false,
                 failed: false,
                 stopped: false,
                 oracle: MachineId(0),
+                needed: None,
+                finishing: None,
                 finished: None,
                 oracle_stops: BTreeSet::new(),
                 control,
@@ -674,6 +803,7 @@ where
             },
             playback: Playback::default(),
             factory: Box::new(factory),
+            stops: Default::default(),
         };
         for index in 0..driver.execution.machines.len() {
             driver.stage(
@@ -989,9 +1119,11 @@ where
     /// - [`StepOutcome::Blocked`]: unfinished machines remain, but no runnable
     ///   work, timer, or queued event can advance them. Wait for external input
     ///   or a lifecycle change; do not busy-poll or infer that the test passed.
-    /// - [`StepOutcome::Finished`]: the oracle application or machine terminated. Its reason is retained
-    ///   permanently after publishing the full round's responses. Other machines
-    ///   and scheduled work receive no further execution or admission.
+    /// - [`StepOutcome::Finished`]: the oracle application or machine terminated,
+    ///   and the run ended one network latency later. Its time and reason are
+    ///   retained permanently after publishing every output up to then. Other
+    ///   machines and scheduled work receive no further execution or admission;
+    ///   [`Driver::admit_waiting_work`] admits the frames and timers due then.
     ///
     /// With `upto` equal to the current time, the driver may apply events due
     /// now but must not advance execution or time. It may return the same
@@ -1010,6 +1142,12 @@ where
     /// Machine exits are simulation outcomes, not driver errors.
     pub fn step(&mut self, upto: Timestamp) -> Result<StepOutcome, Error<M::Error>> {
         self.step_at(upto, Instant::now())
+    }
+
+    /// The quantum: the step of paced playback and the longest round. A host
+    /// setting; where rounds end does not change results.
+    pub fn quantum(&self) -> Duration {
+        Duration::from_nanos(self.execution.quantum_ns)
     }
 
     /// Step toward a caller-owned future input boundary, even if all machines
@@ -1034,9 +1172,10 @@ where
 
     /// Admit, without executing, the zero-time work that still waits at the
     /// current barrier for a machine's next run: frames that arrived for it
-    /// and a timer that came due. Call it once where execution ends, before
-    /// reading final evidence, so that the evidence covers every frame and
-    /// timer due by then, also after completion or a permanent stop.
+    /// and a timer that came due. Output held at the barrier commits first.
+    /// Call it once where execution ends, before reading final evidence, so
+    /// that the evidence covers every output, frame and timer due by then,
+    /// also after completion or a permanent stop.
     pub fn admit_waiting_work(&mut self) -> Result<(), Error<M::Error>> {
         self.check_valid()?;
         let waiting = self
@@ -1047,6 +1186,8 @@ where
             .filter(|(_, entry)| entry.waiting())
             .map(|(index, _)| MachineId(index))
             .collect::<Vec<_>>();
+        let held = self.need_barrier();
+        self.finish_execution(held)?;
         if waiting.is_empty() {
             return Ok(());
         }
@@ -1137,168 +1278,305 @@ where
     fn position(&self) -> Position {
         Position {
             boundary_index: self.execution.boundary_index,
-            completed_quanta: self.execution.completed_quanta,
+            completed_quanta: self.execution.completed_quanta(self.now()),
             at: self.now(),
         }
     }
 
+    /// Commit everything staged: the barrier is a needed one, or nothing can
+    /// emit at the time of any staged output any more.
     fn commit_boundary(&mut self) -> Result<(), Error<M::Error>> {
+        self.commit_before(None)
+    }
+
+    /// Commit the outputs, and the exits, stamped before `watermark`; all of
+    /// them when it is `None`. Later ones stay staged for a later commit: a
+    /// machine that has not passed their time could still emit at it, and
+    /// outputs of one instant are taken in (machine, emission) order (C2).
+    fn commit_before(&mut self, watermark: Option<Timestamp>) -> Result<(), Error<M::Error>> {
+        let before = |at: Timestamp| watermark.is_none_or(|watermark| at < watermark);
         self.execution.boundary_index = self
             .execution
             .boundary_index
             .checked_add(1)
             .ok_or(Error::PositionOverflow)?;
-        if self.now() == self.execution.quantum_end && !self.execution.quantum_committed {
-            self.execution.completed_quanta = self
-                .execution
-                .completed_quanta
-                .checked_add(1)
-                .ok_or(Error::PositionOverflow)?;
-            self.execution.quantum_committed = true;
-        }
         let mut outputs = Vec::new();
         for (index, entry) in self.execution.machines.iter_mut().enumerate() {
-            outputs.extend(entry.staged.drain(..).inspect(|output| {
-                debug_assert_eq!(output.machine, MachineId(index));
-            }));
+            let (committed, held): (Vec<_>, Vec<_>) =
+                entry.staged.drain(..).partition(|output| before(output.at));
+            debug_assert!(committed
+                .iter()
+                .all(|output| output.machine == MachineId(index)));
+            outputs.extend(committed);
+            entry.staged = held;
         }
         // Stable sorting preserves each machine's emission order at one time.
         outputs.sort_by_key(|output| (output.at, output.machine));
         self.route_frames(&outputs)?;
+        // The run ends one floor after the oracle's terminal output, or its
+        // exit (C4). Until then every machine keeps running and what is due
+        // before the end still happens.
         let terminal = self.oracle_terminal(&outputs);
-        for output in &outputs {
-            self.stage(output.at, EventKind::Output(output.clone()));
+        if self.execution.finished.is_none() && self.execution.finishing.is_none() {
+            let terminal = terminal.or_else(|| {
+                match self.execution.machines[self.execution.oracle.0].stopped {
+                    StopReason::Exited { reached, reason } if before(reached) => {
+                        Some((reached, reason))
+                    }
+                    _ => None,
+                }
+            });
+            if let Some((at, reason)) = terminal {
+                self.execution.finishing = Some((self.consequence_of(at)?, reason));
+            }
         }
-        let replies = self.reduce_properties(&outputs);
-        let mut plans = vec![];
-        let mut calls = vec![];
-        let now = self.now();
-        let mut hits = vec![];
-        for output in &outputs {
-            let source = match &output.payload {
-                Response::Break { name } => Some(
-                    crate::oracle::service::breaks::HitSource::Program(name.clone()),
-                ),
-                &Response::BlockRequestHeld { op, nth } => {
-                    Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
+        // Outputs, and each machine's exit after its own outputs, take effect
+        // in (time, machine) order, so their facts publish and their
+        // consequences queue in that order however outputs were split
+        // between commits. What follows from each is due one floor after it
+        // (C1); the causal bound commits every output by then.
+        let mut exits: Vec<(Timestamp, MachineId)> = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry.stopped {
+                StopReason::Exited { reached, .. } if before(reached) => {
+                    Some((reached, MachineId(index)))
                 }
                 _ => None,
-            };
-            if let Some(source) = source {
-                hits.push((output.machine, output.boot, source, output.at));
+            })
+            .collect();
+        exits.sort();
+        let mut exits = exits.into_iter().peekable();
+        let mut consequences = Vec::new();
+        for output in &outputs {
+            while let Some((reached, id)) =
+                exits.next_if(|&exit| exit < (output.at, output.machine))
+            {
+                self.commit_exit(id, reached, &mut consequences)?;
             }
-            plans.extend(
-                self.execution
-                    .control
-                    .observe(&mut self.execution.machines, output, now)
-                    .map_err(Error::Control)?,
-            );
-            if let Response::SimulationControl { id, payload } = &output.payload {
-                if self
-                    .execution
-                    .control
-                    .controller
-                    .is_some_and(|setup| setup.controller != Some(output.machine))
-                {
-                    return Err(Error::Control(
-                        "control request from unauthorized machine".into(),
-                    ));
+            self.commit_output(output, &mut consequences)?;
+        }
+        for (reached, id) in exits {
+            self.commit_exit(id, reached, &mut consequences)?;
+        }
+        if self.execution.finished.is_some() {
+            // Once the run has finished nothing more is scheduled: only the
+            // admission of work waiting at the end commits after it.
+            let now = self.now().as_nanos();
+            self.execution.control.service.cut_off_breaks(now);
+        } else {
+            // Only once the whole commit has been processed, in output order.
+            for consequence in consequences {
+                match consequence {
+                    Consequence::Item(at, item) => self.enqueue(at, *item)?,
+                    Consequence::Plans(plans) => self.control_plans(plans)?,
                 }
-                calls.push(control::Event::Call {
+            }
+        }
+        self.flush_events()
+    }
+
+    /// Publish one committed output and act on it one floor after its time:
+    /// property evidence and its flush reply, the lifecycle record and the
+    /// service, a breakpoint hit (numbered in committed order) and a guest
+    /// call. What it schedules is added to `consequences`.
+    fn commit_output(
+        &mut self,
+        output: &MachineResponse,
+        consequences: &mut Vec<Consequence>,
+    ) -> Result<(), Error<M::Error>> {
+        self.stage(output.at, EventKind::Output(output.clone()));
+        let act = self.consequence_of(output.at)?;
+        if let Some(reply) = self.reduce_property(output) {
+            consequences.push(Consequence::Item(act, Box::new(reply)));
+        }
+        let plans = Self::observe_output(
+            &mut self.execution.control,
+            &mut self.execution.machines,
+            output,
+            act,
+        )?;
+        consequences.extend(plans.into_iter().map(Consequence::Plans));
+        Self::check_authorized(&self.execution.control, output)?;
+        if let Response::SimulationControl { id, payload } = &output.payload {
+            // With a controller a call is admitted one control latency after
+            // it, which is never below the floor.
+            let at = match self.execution.control.controller {
+                Some(_) => output
+                    .at
+                    .as_nanos()
+                    .checked_add(self.execution.control.service.reply_latency_ns)
+                    .map(Timestamp::from_nanos)
+                    .ok_or(Error::TimeOverflow)?,
+                None => act,
+            };
+            consequences.push(Consequence::Item(
+                at,
+                Box::new(Scheduled::Control(control::Event::Call {
                     source: output.machine,
                     boot: output.boot,
                     id: *id,
                     observed: output.at.as_nanos(),
                     payload: payload.clone(),
-                });
+                })),
+            ));
+        }
+        Ok(())
+    }
+
+    /// With a controller configured, only it may make a simulation-control
+    /// call: one from any other machine fails the run when it commits.
+    fn check_authorized(
+        control: &control::Control,
+        output: &MachineResponse,
+    ) -> Result<(), Error<M::Error>> {
+        if matches!(output.payload, Response::SimulationControl { .. })
+            && control
+                .controller
+                .is_some_and(|setup| setup.controller != Some(output.machine))
+        {
+            return Err(Error::Control(
+                "control request from unauthorized machine".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// What control makes of one committed output, acted on at `act`: the
+    /// service's and the lifecycle's observation of it, then a breakpoint
+    /// hit (numbered in committed order). Returns their plans in that order.
+    /// Generic over the machine so that `prepare_input` can project it.
+    fn observe_output<T>(
+        control: &mut control::Control,
+        machines: &mut [Entry<T>],
+        output: &MachineResponse,
+        act: Timestamp,
+    ) -> Result<Vec<Vec<crate::oracle::service::Plan>>, Error<M::Error>> {
+        let mut plans = vec![control
+            .observe(machines, output, act)
+            .map_err(Error::Control)?];
+        let source = match &output.payload {
+            Response::Break { name } => Some(crate::oracle::service::breaks::HitSource::Program(
+                name.clone(),
+            )),
+            &Response::BlockRequestHeld { op, nth } => {
+                Some(crate::oracle::service::breaks::HitSource::BlockRequest { op, nth })
             }
-        }
-        for index in 0..self.execution.machines.len() {
-            plans.extend(
-                self.execution
-                    .control
-                    .terminal(&mut self.execution.machines, MachineId(index), now)
-                    .map_err(Error::Control)?,
-            );
-        }
-        if self.execution.finished.is_none() {
-            let reason = terminal.or_else(|| {
-                match self.execution.machines[self.execution.oracle.0].stopped {
-                    StopReason::Exited { reason, .. } => Some(reason),
-                    _ => None,
-                }
-            });
-            if let Some(reason) = reason {
-                self.execution.finished = Some((self.now(), reason));
-            }
-        }
-        // Hits are numbered in committed (at, machine) order.
-        for (machine, boot, source, at) in hits {
-            let display = self.execution.control.display_name(machine);
-            plans.extend(
-                self.execution
-                    .control
+            _ => None,
+        };
+        if let Some(source) = source {
+            let display = control.display_name(output.machine);
+            plans.push(
+                control
                     .service
                     .break_hit(
-                        control::Control::source(machine),
+                        control::Control::source(output.machine),
                         display,
-                        boot,
+                        output.boot,
                         source,
-                        at.as_nanos(),
-                        now.as_nanos(),
+                        output.at.as_nanos(),
+                        act.as_nanos(),
                     )
                     .map_err(|failure| Error::Control(failure.message))?,
             );
         }
-        if self.execution.finished.is_some() {
-            let now = self.now().as_nanos();
-            self.execution.control.service.cut_off_breaks(now);
-        } else {
-            // Replies follow the commit that reduced their requests, behind
-            // every item already due now.
-            if !replies.is_empty() {
-                self.execution
-                    .events
-                    .entry(self.now())
-                    .or_default()
-                    .extend(replies);
-            }
-            self.schedule_calls(calls)?;
-            self.control_plans(plans)?;
-        }
-        self.flush_events()
+        Ok(plans)
     }
 
-    /// Reduce committed property evidence in publication order. Returns the
-    /// replies its flush records ask for.
-    fn reduce_properties(&mut self, outputs: &[MachineResponse]) -> Vec<Scheduled> {
-        let mut replies = Vec::new();
-        for output in outputs {
-            let at = output.at.as_nanos();
-            // Boots are counted from zero and fit an incarnation in practice.
-            let incarnation = u32::try_from(output.boot).unwrap_or(u32::MAX);
-            let ledger = &mut self.execution.properties;
-            let name = || self.execution.control.display_name(output.machine);
-            match &output.payload {
-                Response::Property { frame } => {
-                    let reply = ledger.record(&name(), incarnation, at, frame);
-                    if let (Some(reply), Some(session)) = (reply, NonZeroU32::new(frame.session)) {
-                        replies.push(Scheduled::PropertyReply {
-                            machine: output.machine,
-                            boot: output.boot,
-                            session,
-                            payload: serde_json::to_vec(&reply).expect("replies serialize"),
-                        });
-                    }
-                }
-                Response::Crash { report } => ledger.crash(&name(), incarnation, at, report),
-                Response::OutOfMemoryKill { kill } => {
-                    ledger.out_of_memory(&name(), incarnation, at, kill)
-                }
-                _ => {}
-            }
+    /// Fold a machine's exit at `reached` into its lifecycle record, and act
+    /// on its first observation one floor later. What it schedules is added
+    /// to `consequences`.
+    fn commit_exit(
+        &mut self,
+        id: MachineId,
+        reached: Timestamp,
+        consequences: &mut Vec<Consequence>,
+    ) -> Result<(), Error<M::Error>> {
+        let act = self.consequence_of(reached)?;
+        let plans = self
+            .execution
+            .control
+            .terminal(&mut self.execution.machines, id, act)
+            .map_err(Error::Control)?;
+        consequences.push(Consequence::Plans(plans));
+        Ok(())
+    }
+
+    /// When the Driver acts on an output stamped `at`: one network latency
+    /// floor later (C1), never at the commit that happened to carry it.
+    fn consequence_of(&self, at: Timestamp) -> Result<Timestamp, Error<M::Error>> {
+        at.as_nanos()
+            .checked_add(self.execution.network.latency_ns())
+            .map(Timestamp::from_nanos)
+            .ok_or(Error::TimeOverflow)
+    }
+
+    /// Queue `item` on the timeline at `at`, behind items already there. An
+    /// item before now, or before a time some machine has already reached, is
+    /// a scheduler bug: the run fails instead of silently diverging.
+    fn enqueue(&mut self, at: Timestamp, item: Scheduled) -> Result<(), Error<M::Error>> {
+        self.check_causal(at)?;
+        self.execution.events.entry(at).or_default().push_back(item);
+        Ok(())
+    }
+
+    /// Fail with [`Error::Causality`] when something new would be due at
+    /// `at`, before now or before a time some machine has already reached.
+    fn check_causal(&self, at: Timestamp) -> Result<(), Error<M::Error>> {
+        if at < self.now() {
+            return Err(Error::Causality {
+                machine: None,
+                at,
+                reached: self.now(),
+            });
         }
-        replies
+        if let Some((index, entry)) = self
+            .execution
+            .machines
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.reached > at)
+        {
+            return Err(Error::Causality {
+                machine: Some(MachineId(index)),
+                at,
+                reached: entry.reached,
+            });
+        }
+        Ok(())
+    }
+
+    /// Reduce one committed output's property evidence, in publication order.
+    /// Returns the reply its flush record asks for.
+    fn reduce_property(&mut self, output: &MachineResponse) -> Option<Scheduled> {
+        let at = output.at.as_nanos();
+        // Boots are counted from zero and fit an incarnation in practice.
+        let incarnation = u32::try_from(output.boot).unwrap_or(u32::MAX);
+        let ledger = &mut self.execution.properties;
+        let name = || self.execution.control.display_name(output.machine);
+        match &output.payload {
+            Response::Property { frame } => {
+                let reply = ledger.record(&name(), incarnation, at, frame)?;
+                let session = NonZeroU32::new(frame.session)?;
+                Some(Scheduled::PropertyReply {
+                    machine: output.machine,
+                    boot: output.boot,
+                    session,
+                    payload: serde_json::to_vec(&reply).expect("replies serialize"),
+                })
+            }
+            Response::Crash { report } => {
+                ledger.crash(&name(), incarnation, at, report);
+                None
+            }
+            Response::OutOfMemoryKill { kill } => {
+                ledger.out_of_memory(&name(), incarnation, at, kill);
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Route committed frames in publication order; they were validated when
@@ -1307,29 +1585,63 @@ where
     fn route_frames(&mut self, outputs: &[MachineResponse]) -> Result<(), Error<M::Error>> {
         let position = self.position();
         let observation_mark = self.observations.frames.mark();
+        let routed = Self::route_into(
+            &mut self.execution.network,
+            &self.execution.machines,
+            position,
+            outputs,
+            &mut self.observations.frames,
+        );
+        if routed.is_err() {
+            self.observations.frames.discard(observation_mark);
+        }
+        routed
+    }
+
+    /// Route the frames among `outputs` through `network`, in order.
+    /// `prepare_input` routes held frames through a copy of the network with
+    /// this, exactly as their commit will route them through the real one.
+    fn route_into<T>(
+        network: &mut network::Network,
+        machines: &[Entry<T>],
+        position: Position,
+        outputs: &[MachineResponse],
+        observations: &mut observation::FrameObservations,
+    ) -> Result<(), Error<M::Error>> {
+        // An exited receiver drops its frames whenever they arrive.
+        let reached = |to: MachineId| match machines[to.0].stopped {
+            StopReason::Exited { .. } => 0,
+            _ => machines[to.0].reached.as_nanos(),
+        };
         for output in outputs {
             if let Response::TransmitFrame { bytes } = &output.payload {
-                if let Err(error) = self.execution.network.route_at(
-                    position,
-                    output.machine,
-                    output.at.as_nanos(),
-                    bytes,
-                    &mut self.observations.frames,
-                ) {
-                    self.observations.frames.discard(observation_mark);
-                    return Err(match error {
+                network
+                    .route_at(
+                        position,
+                        output.machine,
+                        output.at.as_nanos(),
+                        bytes,
+                        &reached,
+                        observations,
+                    )
+                    .map_err(|error| match error {
                         network::RouteError::ArrivalOverflow => Error::TimeOverflow,
                         network::RouteError::SequenceOverflow => Error::PositionOverflow,
-                    });
-                }
+                        network::RouteError::BeforeReceiver { to, at } => Error::Causality {
+                            machine: Some(to),
+                            at: Timestamp::from_nanos(at),
+                            reached: machines[to.0].reached,
+                        },
+                    })?;
             }
         }
         Ok(())
     }
 
-    /// The oracle's terminal outcome among committed outputs: its application
-    /// outcome, or the completion of an offered Stop, which this consumes.
-    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<ExitReason> {
+    /// The oracle's first terminal outcome among committed outputs, with its
+    /// time: its application outcome, or the completion of an offered Stop,
+    /// which this consumes.
+    fn oracle_terminal(&mut self, outputs: &[MachineResponse]) -> Option<(Timestamp, ExitReason)> {
         let mut terminal = None;
         for output in outputs {
             if output.machine != self.execution.oracle {
@@ -1337,50 +1649,23 @@ where
             }
             match output.payload {
                 Response::ApplicationOutcome { code } => {
-                    terminal.get_or_insert(ExitReason::ProgramExit {
-                        code: i32::from(code),
-                    });
+                    terminal.get_or_insert((
+                        output.at,
+                        ExitReason::ProgramExit {
+                            code: i32::from(code),
+                        },
+                    ));
                 }
                 Response::CommandAcknowledged { id, result }
                     if self.execution.oracle_stops.remove(&(output.boot, id))
                         && result == crate::pv::CommandResult::Completed =>
                 {
-                    terminal.get_or_insert(ExitReason::Shutdown);
+                    terminal.get_or_insert((output.at, ExitReason::Shutdown));
                 }
                 _ => {}
             }
         }
         terminal
-    }
-
-    /// Queue committed guest calls on the timeline: at the commit, or after
-    /// the reply latency from their observation with a controller configured.
-    fn schedule_calls(&mut self, calls: Vec<control::Event>) -> Result<(), Error<M::Error>> {
-        for call in calls {
-            let at = match &call {
-                control::Event::Call { observed, .. }
-                    if self.execution.control.controller.is_some() =>
-                {
-                    Timestamp::from_nanos(
-                        observed
-                            .checked_add(self.execution.control.service.reply_latency_ns)
-                            .ok_or(Error::TimeOverflow)?,
-                    )
-                }
-                _ => self.now(),
-            };
-            if at < self.now() {
-                return Err(Error::Control(
-                    "control admission precedes committed boundary".into(),
-                ));
-            }
-            self.execution
-                .events
-                .entry(at)
-                .or_default()
-                .push_back(Scheduled::Control(call));
-        }
-        Ok(())
     }
 
     fn control_plans(
@@ -1414,20 +1699,15 @@ where
                     let boot = boot.ok_or_else(|| {
                         Error::Control("service reply lacks its caller boot".into())
                     })?;
-                    let at = Timestamp::from_nanos(*at);
-                    if at < self.now() {
-                        return Err(Error::Control("control reply scheduled in the past".into()));
-                    }
-                    self.execution
-                        .events
-                        .entry(at)
-                        .or_default()
-                        .push_back(Scheduled::Control(control::Event::Reply {
+                    self.enqueue(
+                        Timestamp::from_nanos(*at),
+                        Scheduled::Control(control::Event::Reply {
                             target,
                             boot,
                             id: *id,
                             payload: payload.clone(),
-                        }));
+                        }),
+                    )?;
                     continue;
                 }
             }
@@ -1441,14 +1721,7 @@ where
                 | Plan::BreakOnBlockRequest { at, .. } => Timestamp::from_nanos(*at),
                 Plan::Settled(_) => unreachable!(),
             };
-            if at < self.now() {
-                return Err(Error::Control("control plan scheduled in the past".into()));
-            }
-            self.execution
-                .events
-                .entry(at)
-                .or_default()
-                .push_back(Scheduled::Control(control::Event::Plan(plan)));
+            self.enqueue(at, Scheduled::Control(control::Event::Plan(plan)))?;
         }
         Ok(())
     }
@@ -1469,16 +1742,10 @@ where
             return Ok(self.outcome());
         }
 
-        if self.now() == self.execution.quantum_end {
-            self.execution.quantum_committed = false;
-            self.execution.quantum_end = Timestamp::from_nanos(
-                self.execution
-                    .quantum_end
-                    .as_nanos()
-                    .checked_add(self.execution.quantum_ns)
-                    .ok_or(Error::TimeOverflow)?,
-            );
-        }
+        let quantum_end = self
+            .execution
+            .quantum_end(self.now())
+            .ok_or(Error::TimeOverflow)?;
 
         // Known events limit the whole round, and so do frames for receivers
         // that take them only at a boundary. Every other machine takes its
@@ -1497,8 +1764,10 @@ where
                     .map(Timestamp::from_nanos),
             )
             .chain(self.causal_bound(&receivers))
-            .chain(self.controller_bound(&receivers))
-            .fold(upto.min(self.execution.quantum_end), Timestamp::min);
+            .chain(self.execution.finishing.map(|(at, _)| at))
+            .fold(upto.min(quantum_end), Timestamp::min);
+        // A test's stop policy may end the round earlier, never later.
+        let boundary = self.stops.end(self.now(), boundary);
 
         let initial = self.now();
         let (ran, arrived) = self.run_lanes(boundary, &receivers)?;
@@ -1518,9 +1787,18 @@ where
         } else {
             boundary
         };
+        if at != initial {
+            self.execution.needed = None;
+        }
         self.execution.clock.set(at.as_nanos());
         if at != initial || ran {
-            self.commit_boundary()?;
+            // A barrier nothing needs commits only what no machine can still
+            // emit before (C2); a needed one commits everything first.
+            if self.barrier_needed(at) {
+                self.commit_boundary()?;
+            } else {
+                self.commit_before(self.watermark())?;
+            }
         }
         if let Some(hold) = self.apply_due(host_now)? {
             return Ok(StepOutcome::held(at, hold));
@@ -1532,10 +1810,11 @@ where
     /// (sender, sequence, receiver) order. A receiver whose boot has exited,
     /// or that is not switched on until after `now`, drops the frame. A
     /// running receiver takes its frames at the start of its next run, which
-    /// starts at `now`, so a blocked one becomes runnable here.
-    /// A paused or suspended receiver runs no guest work, so it admits them now
-    /// with one zero-budget batch and commit. Returns whether any frame was
-    /// due, so that newly generated timeline items at `now` are processed next.
+    /// starts at `now`, so a blocked one becomes runnable here; one held at a
+    /// breakpoint gets that run without a budget. A paused receiver has no
+    /// next run, so it admits them now with one zero-budget batch and commit.
+    /// Returns whether any frame was due, so that newly generated timeline
+    /// items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1578,14 +1857,8 @@ where
         // state; the next run, from `now`, does the same before executing.
         let mut admitting = Vec::new();
         for id in receivers {
-            let suspended = self
-                .execution
-                .control
-                .service
-                .breaks
-                .suspended(&control::Control::source(id));
             let entry = &mut self.execution.machines[id.0];
-            if entry.lifecycle.paused() || suspended {
+            if entry.lifecycle.paused() {
                 admitting.push(id);
             } else if let StopReason::Blocked { .. } = entry.stopped {
                 entry.stopped = StopReason::BoundaryReached;
@@ -1825,26 +2098,112 @@ where
             .min_by_key(|&(id, at)| (at, id))
     }
 
+    /// Whether nothing can advance the run: no machine can execute, nothing
+    /// is due, no frame is in flight and no finish is pending.
     fn is_quiescent(&self) -> bool {
         self.next().is_none()
             && self.execution.events.is_empty()
             && self.execution.network.is_idle()
+            && self.execution.finishing.is_none()
+    }
+
+    /// Whether every schedule cuts every machine at `at`: a timeline item or
+    /// the end of the run is due then, or a frame arrives then for a paused
+    /// receiver, which takes it only at a barrier. At such a barrier
+    /// everything staged commits before what is due (C2).
+    fn barrier_needed(&self, at: Timestamp) -> bool {
+        let receivers = self.lane_receivers();
+        self.execution
+            .events
+            .first_key_value()
+            .is_some_and(|(&due, _)| due == at)
+            || self.execution.finishing.is_some_and(|(end, _)| end == at)
+            || self
+                .execution
+                .network
+                .next_arrival_to(|to| !receivers[to.0])
+                .is_some_and(|arrival| arrival == at.as_nanos())
+    }
+
+    /// The earliest time anything can still emit output: a machine's next
+    /// start, a frame's arrival at a receiver that has not exited, or a
+    /// timeline item. Output stamped before it is final in its order; output
+    /// at or after it may yet be preceded by another machine's. `None` when
+    /// nothing can emit again.
+    fn watermark(&self) -> Option<Timestamp> {
+        let machines = &self.execution.machines;
+        let (limit, needed) = (self.stamp_limit(), self.execution.needed.is_some());
+        let started = machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.earliest(MachineId(index), limit, needed))
+            .min();
+        let arrival = self
+            .execution
+            .network
+            .next_arrival_to(|to| !matches!(machines[to.0].stopped, StopReason::Exited { .. }))
+            .map(Timestamp::from_nanos);
+        let due = self.execution.events.first_key_value().map(|(&at, _)| at);
+        started.into_iter().chain(arrival).chain(due).min()
+    }
+
+    /// Whether output or an exit waits to be committed.
+    fn holds_output(&self) -> bool {
+        self.execution.machines.iter().any(|entry| {
+            !entry.staged.is_empty()
+                || matches!(entry.stopped, StopReason::Exited { .. })
+                    && entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended)
+        })
+    }
+
+    /// The committed-output frontier: the earliest of the watermark and of
+    /// every output and exit still held. Everything stamped before it is
+    /// committed, and without a new input nothing can still be stamped
+    /// before it. `None` when nothing is held and nothing can emit again. It
+    /// is read from the machines' positions and staged output, which a
+    /// checkpoint carries, so a restored Driver gives the same answer.
+    fn committed_before(&self) -> Option<Timestamp> {
+        let held = self.execution.machines.iter().flat_map(|entry| {
+            let exit = match entry.stopped {
+                StopReason::Exited { reached, .. }
+                    if entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended) =>
+                {
+                    Some(reached)
+                }
+                _ => None,
+            };
+            entry.staged.iter().map(|output| output.at).chain(exit)
+        });
+        self.watermark().into_iter().chain(held).min()
+    }
+
+    /// Make the current barrier a needed one: every machine is cut here in
+    /// every schedule, and what is held commits before anything due or
+    /// admitted here (C2).
+    fn need_barrier(&mut self) -> Result<(), Error<M::Error>> {
+        self.execution.needed = Some(self.now());
+        if self.holds_output() {
+            self.commit_boundary()?;
+        }
+        Ok(())
     }
 
     /// The earliest time a machine can execute in the round: its own next
     /// start, or the arrival of a frame that wakes it inside its lane.
-    fn earliest_producer(
-        &self,
-        receivers: &[bool],
-        include: impl Fn(MachineId) -> bool,
-    ) -> Option<Timestamp> {
+    fn earliest_producer(&self, receivers: &[bool]) -> Option<Timestamp> {
+        let (limit, needed) = (self.stamp_limit(), self.execution.needed.is_some());
         let started = self
             .execution
             .machines
             .iter()
             .enumerate()
-            .filter(|&(index, _)| include(MachineId(index)))
-            .filter_map(|(_, entry)| entry.next())
+            .filter_map(|(index, entry)| entry.earliest(MachineId(index), limit, needed))
             .min();
         let woken = self
             .execution
@@ -1855,36 +2214,49 @@ where
                         self.execution.machines[to.0].stopped,
                         StopReason::Exited { .. }
                     )
-                    && include(to)
             })
             .map(Timestamp::from_nanos);
         let earliest = started.into_iter().chain(woken).min()?;
-        debug_assert!(earliest >= self.now(), "eligible producer behind now");
+        debug_assert!(
+            earliest >= self.stamp_limit(),
+            "eligible producer behind now"
+        );
         Some(earliest)
     }
 
-    /// The latest round boundary at which no frame sent in the round can be
-    /// due: the earliest time an attached machine can execute, plus latency.
-    /// Positive-budget runs start only at `Entry::next` or at an arrival in
-    /// the receiver's lane, so every send in the round is at or after the
-    /// earliest of them. Blocked machines that no frame wakes, paused and
-    /// exited machines impose none, even with frames arriving for them. An unrepresentable bound imposes none:
-    /// no such arrival exists.
-    fn causal_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
-        self.earliest_producer(receivers, |id| self.execution.network.attached(id))?
-            .as_nanos()
-            .checked_add(self.execution.network.latency_ns())
-            .map(Timestamp::from_nanos)
+    /// The earliest time a run starting now may stamp: what it stamps then
+    /// has consequences one floor later, after now. Only a slow clock maps a
+    /// continuing run's machine time before now (see `Entry::lower_for`).
+    fn stamp_limit(&self) -> Timestamp {
+        let back = self.execution.network.latency_ns().saturating_sub(1);
+        Timestamp::from_nanos(self.now().as_nanos().saturating_sub(back))
     }
 
-    fn controller_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
-        let setup = self.execution.control.controller?;
-        setup.controller?;
-        // Target acknowledgements carry an observed effect time too. Bound all
-        // runnable producers so their effect+latency cannot precede commit.
-        self.earliest_producer(receivers, |_| true)?
+    /// The latest round boundary at which nothing that follows from an
+    /// output of the round can be due yet: the earliest time any machine can
+    /// execute, or the earliest output staged and not yet committed, plus the
+    /// floor. A frame arrives, and every other consequence is scheduled, at
+    /// least one floor after its output (C1), so a commit is never late for
+    /// either. Positive-budget runs start only at `Entry::next` or at an
+    /// arrival in the receiver's lane, so every output in the round is at or
+    /// after the earliest of them. Blocked machines that no frame wakes,
+    /// paused and exited machines impose none, even with frames arriving for
+    /// them. An unrepresentable bound imposes none: no such consequence exists.
+    ///
+    /// A controller's latency is never below the floor, so this also covers
+    /// the guest calls and replies it times.
+    fn causal_bound(&self, receivers: &[bool]) -> Option<Timestamp> {
+        let staged = self
+            .execution
+            .machines
+            .iter()
+            .flat_map(|entry| entry.staged.iter().map(|output| output.at));
+        self.earliest_producer(receivers)
+            .into_iter()
+            .chain(staged)
+            .min()?
             .as_nanos()
-            .checked_add(setup.latency_ns)
+            .checked_add(self.execution.network.latency_ns())
             .map(Timestamp::from_nanos)
     }
 
@@ -2201,6 +2573,30 @@ where
             .map_err(Error::Control)
     }
 
+    /// How far committed output reaches at this barrier, exclusively: every
+    /// output and exit stamped before the returned time has been committed
+    /// and published ([`Driver::drain_observations`] returns it), and no
+    /// machine can still stamp anything before it unless the host gives the
+    /// Driver an input due earlier. Output stamped at it or later may be
+    /// held, uncommitted, until a later barrier, also when it is stamped
+    /// before the barrier's own time. `None` when nothing is held and,
+    /// without another input, nothing can emit again.
+    ///
+    /// At a barrier every schedule shares (a timeline item or the end of the
+    /// run due there, a frame for a paused receiver, an input or
+    /// [`Barrier::host_break`] the host gave it) everything emitted so far is
+    /// committed, and the frontier is the barrier's time or later. At any
+    /// other barrier it is the barrier's time, or the nanosecond before when
+    /// a machine with a slow clock has reached the barrier inside a machine
+    /// nanosecond that the previous simulation nanosecond shares: what it
+    /// emits next may still be stamped there, so every machine's output
+    /// stamped there waits. It never trails the barrier by more.
+    // A host comparing what two runs published by a time must know how far
+    // each run's published output is complete; the barrier's time is not it.
+    pub fn committed_before(&self) -> Option<Timestamp> {
+        self.driver.committed_before()
+    }
+
     /// Hit the breakpoint `name` from the host. The oracle receives the hit
     /// from `wait_break` like any other, with source `host` and no machine:
     /// a parked `wait_break` returns it at this barrier, otherwise the next
@@ -2218,6 +2614,10 @@ where
         self.check_mutation()?;
         let driver = &mut *self.driver;
         driver.check_valid()?;
+        // The hit is an input admitted here: output held at this barrier
+        // precedes it.
+        let held = driver.need_barrier();
+        driver.finish_execution(held)?;
         let now = driver.now().as_nanos();
         let plans = driver
             .execution
@@ -2613,6 +3013,14 @@ pub enum Error<E> {
         id: MachineId,
         detail: &'static str,
     },
+    /// A scheduler bug: something new would be due at `at`, before now or
+    /// before the time `machine` has already reached (`reached`). The run
+    /// fails instead of silently diverging.
+    Causality {
+        machine: Option<MachineId>,
+        at: Timestamp,
+        reached: Timestamp,
+    },
     /// A previous step failed; further execution is prohibited.
     Failed,
 }
@@ -2703,6 +3111,17 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             }
             Self::InvalidBootEnd { id, detail } => {
                 write!(f, "machine {}: invalid boot-end evidence: {detail}", id.0)
+            }
+            Self::Causality {
+                machine,
+                at,
+                reached,
+            } => {
+                write!(f, "scheduler bug: work due at {}", at.as_nanos())?;
+                match machine {
+                    Some(id) => write!(f, " after machine {} reached {}", id.0, reached.as_nanos()),
+                    None => write!(f, " before current time {}", reached.as_nanos()),
+                }
             }
             Self::Failed => f.write_str("driver cannot execute after a failed step"),
         }

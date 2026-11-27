@@ -70,7 +70,9 @@ fn acknowledgement_effect_time_not_commit_time_sets_reply_deadline() {
     let effect = r[0].1["effect_at_ns"].as_u64().unwrap();
     assert_eq!(effect, 11);
     assert_eq!(r[0].0, effect + 5);
-    assert!(events.iter().any(|event| matches!(event.kind, EventKind::FaultSettled { outcome_at: Some(time), .. } if time == at(effect)) && event.at > at(effect)));
+    // The settlement is stamped with the acknowledgement's own time too, not
+    // with the commit that carried it.
+    assert!(events.iter().any(|event| matches!(event.kind, EventKind::FaultSettled { outcome_at: Some(time), .. } if time == at(effect)) && event.at == at(effect)));
     assert_eq!(r[0].1["replied_at_ns"], effect + 5);
 }
 #[test]

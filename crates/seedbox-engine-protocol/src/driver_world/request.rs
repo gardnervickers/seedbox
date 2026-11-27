@@ -143,6 +143,16 @@ pub struct Request {
     pub program: Vec<TimedInput>,
     pub simulated_time_ns: u64,
     pub output: PathBuf,
+    /// Seed of a host stop policy, from the execution request: a worker
+    /// built with test support ends its Driver's rounds at times drawn from
+    /// it, which must change no result. Others refuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_policy: Option<u64>,
+    /// Give no machine a timed inbox, from the execution request: a worker
+    /// built with test support then runs each machine once per frame
+    /// arrival, which must change no result. Others refuse it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_timed_inbox: bool,
     pub start_paused: bool,
     pub full_state: bool,
     pub host_control: PathBuf,

@@ -1885,9 +1885,11 @@ fn network_world_submission(
     request
 }
 /// `request` with one input at `at_ns` that no application observes: a one
-/// second realtime step of the oracle, whose relative nanosleep is measured on
-/// the monotonic clock. It gives the public pre-fault pause a deterministic
-/// boundary at that time; runs that compare carry it alike.
+/// second realtime step of the server, whose probe reads no clock. It gives
+/// the public pre-fault pause a deterministic boundary at that time; runs that
+/// compare carry it alike. It is not the oracle's: the run ends one latency
+/// after the oracle's exit, and the guest work of a step moves that exit (on
+/// TCG, 27 to 28 us sooner, whether the step comes at 1.9 s, 6 s or 14 s).
 fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest {
     let seedbox_api::InputSource::Resolved { definition } = &request.spec.inputs else {
         panic!("resolved submission required")
@@ -1897,7 +1899,7 @@ fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest 
         id: "capture-marker".into(),
         at_ns,
         action: serde_json::json!({
-            "action": "clock_skew", "handle": "capture-marker", "machine": "oracle", "offset_ns": 1_000_000_000u64
+            "action": "clock_skew", "handle": "capture-marker", "machine": "server", "offset_ns": 1_000_000_000u64
         }),
         timeout_ns: seedbox_spec::definition::default_timeout_ns(),
     });
@@ -1985,7 +1987,8 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
             session.stdout(&baseline, "server", false).await,
             session.stdout(&baseline, "client", false).await,
         ];
-        // No application observes the marker: output and end are unchanged.
+        // No application observes the marker, and the oracle, whose exit
+        // ends the run, does not run for it: output and end are unchanged.
         assert_eq!(expected[2], client_timed.0);
         assert_eq!(final_ns, plain_final_ns);
 

@@ -16,7 +16,10 @@ where
     /// pending scheduled work, unstarted definitions and reduced guest property
     /// evidence. It excludes native
     /// machine bytes, callbacks, execution contexts, wall-clock playback pacing,
-    /// already-published host-drain queues and frame-observation buffers.
+    /// already-published host-drain queues and frame-observation buffers, and
+    /// whatever records where rounds ended: the quantum and the commit count.
+    /// Evidence taken at one time is the same under every stop schedule,
+    /// provided every machine keeps the [`Machine::run`] contract.
     /// No machine callback, native capture, allocation of a checkpoint or RNG
     /// draw occurs. An externally supplied RNG has no cursor evidence and fails.
     /// This is one component of a run witness, not CPU or RAM evidence; callers
@@ -41,16 +44,13 @@ impl<M> ExecutionState<M> {
         let ExecutionState {
             clock,
             rng,
-            quantum_ns,
-            quantum_end,
             machines,
             events,
-            boundary_index,
-            completed_quanta,
-            quantum_committed,
             failed,
             stopped,
             oracle,
+            needed,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -60,6 +60,11 @@ impl<M> ExecutionState<M> {
             properties,
             // Declared by the owner, not simulation state.
             engine: _,
+            // Where rounds end is a host choice (C3): the quantum, its anchor
+            // and the commit count change no result, so no evidence holds them.
+            quantum_ns: _,
+            origin: _,
+            boundary_index: _,
         } = self;
         let SimulationRng::Seeded(rng) = rng else {
             return Err(CodecError::Invalid(
@@ -68,11 +73,9 @@ impl<M> ExecutionState<M> {
         };
         output.write_all(b"SBXPOLE\0")?;
         let mut e = Encoder { output };
-        1u32.put(&mut e)?;
+        2u32.put(&mut e)?;
         Timestamp::from_nanos(clock.now()).put(&mut e)?;
         rng.put(&mut e)?;
-        quantum_ns.put(&mut e)?;
-        quantum_end.put(&mut e)?;
         (machines.len() as u64).put(&mut e)?;
         for entry in machines {
             let Entry {
@@ -102,14 +105,13 @@ impl<M> ExecutionState<M> {
             powered_on_at.put(&mut e)?;
         }
         events.put(&mut e)?;
-        boundary_index.put(&mut e)?;
-        completed_quanta.put(&mut e)?;
-        quantum_committed.put(&mut e)?;
         // Temporary host pause/speed/step controls do not change simulated
         // execution identity. Permanent stop is continuing logical authority.
         stopped.put(&mut e)?;
         failed.put(&mut e)?;
         oracle.put(&mut e)?;
+        needed.put(&mut e)?;
+        finishing.put(&mut e)?;
         finished.put(&mut e)?;
         oracle_stops.put(&mut e)?;
         control.put(&mut e)?;

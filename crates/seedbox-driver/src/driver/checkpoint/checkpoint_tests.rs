@@ -119,6 +119,65 @@ fn unsupported_poisoned_and_structurally_invalid_capture_never_calls_machine() {
     assert!(matches!(d.checkpoint(), Err(Error::InvalidCheckpoint(_))));
 }
 
+/// A breakpoint hit held at a barrier nothing needs has not reached the
+/// service yet, but its machine is already suspended. Capture refuses it as
+/// it refuses a committed hit, before any machine is snapshotted, and so
+/// does the codec for a checkpoint that holds one.
+#[test]
+fn a_staged_breakpoint_hit_refuses_capture_before_any_machine_snapshot() {
+    for held in [
+        Response::Break {
+            name: "leader".into(),
+        },
+        Response::BlockRequestHeld {
+            op: crate::pv::DiskOp::Write,
+            nth: 1,
+        },
+    ] {
+        let mut d = build(
+            vec![spec(0, true, vec![]), spec(1, true, vec![])],
+            vec![],
+            true,
+        );
+        advance(&mut d, 3);
+        let (bytes, _) = artifact(d.checkpoint().unwrap());
+        let captures = |d: &Driver<Mock>| -> Vec<usize> {
+            d.execution
+                .machines
+                .iter()
+                .map(|entry| {
+                    let machine = entry.machine.as_ref().unwrap();
+                    machine.captures.load(Ordering::SeqCst)
+                })
+                .collect()
+        };
+        let before = captures(&d);
+        let hit = MachineResponse {
+            machine: MachineId(1),
+            boot: 0,
+            at: d.now(),
+            payload: held,
+        };
+        d.execution.machines[1].staged.push(hit.clone());
+        assert!(matches!(
+            d.checkpoint(),
+            Err(Error::InvalidCheckpoint(
+                "machine suspended at a breakpoint"
+            ))
+        ));
+        assert_eq!(captures(&d), before, "refused before any snapshot");
+        let mut c = Checkpoint::read_from(&mut &bytes[..], limits()).unwrap();
+        c.machines[1].staged.push(hit);
+        let mut destination = Vec::new();
+        assert!(matches!(
+            c.write_to(&mut destination),
+            Err(crate::persistence::CodecError::Invalid(reason))
+                if reason == "machine suspended at a breakpoint"
+        ));
+        assert!(destination.is_empty());
+    }
+}
+
 #[test]
 fn nth_capture_failure_leaves_source_and_rng_unchanged() {
     let initial = vec![spec(0, true, vec![]), spec(1, true, vec![])];
@@ -640,7 +699,12 @@ fn finished_oracle_and_permanent_stop_are_capturable_but_not_resumed() {
             })
             .unwrap();
         } else {
-            advance(&mut d, 5);
+            // The outcome at 3 ends the run one floor later.
+            advance(&mut d, 20);
+            assert_eq!(
+                d.execution.finished,
+                Some((at(13), ExitReason::ProgramExit { code: 17 }))
+            );
         }
         d.execution.oracle_stops.insert((7, nz(31)));
         let before = d.position();
@@ -666,8 +730,9 @@ fn seeded_clock_fault_cursor_and_pending_input_rejections_continue() {
                 true,
                 vec![
                     (0, Response::Ready),
+                    // Admitted one floor later, at 10, ahead of the pause.
                     (
-                        2,
+                        0,
                         call(
                             1,
                             r#""op":"clock_skew","target":{"machine":"fixture-1"},"max_offset_ns":100"#,
@@ -762,7 +827,6 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
             1,
             command,
             at(0),
-            at(0),
         )
         .unwrap();
     d.execution.oracle_stops.insert((1, command));
@@ -781,11 +845,11 @@ fn staged_prior_boot_ack_does_not_consume_restored_oracle_stop() {
     drop(d);
     let mut b = restore(&c);
     b.commit_boundary().unwrap();
-    assert!(b.execution.finished.is_none());
+    assert!(b.execution.finishing.is_none());
     assert!(b.execution.oracle_stops.contains(&(1, command)));
     b.execution.machines[0].staged.push(ack(1));
     b.commit_boundary().unwrap();
-    assert_eq!(b.execution.finished, Some((at(0), ExitReason::Shutdown)));
+    assert_eq!(b.execution.finishing, Some((at(10), ExitReason::Shutdown)));
     assert!(!b.execution.oracle_stops.contains(&(1, command)));
 }
 
@@ -1199,10 +1263,10 @@ fn unfinished_quantum_and_pending_step_target_survive_restore() {
     .unwrap();
     let c = d.checkpoint().unwrap();
     reference_observer_session(&mut d);
-    assert_eq!(c.quantum_end, at(10));
+    assert_eq!(c.origin, at(0));
     assert!(status(&mut d).stepping);
     let expected = advance(&mut d, 10);
-    assert_eq!(d.execution.completed_quanta, 1);
+    assert_eq!(d.execution.completed_quanta(d.now()), 1);
     assert!(!status(&mut d).stepping);
     let mut b = restore(&c);
     assert!(status(&mut b).stepping);

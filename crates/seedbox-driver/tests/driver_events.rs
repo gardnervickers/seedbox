@@ -141,7 +141,7 @@ fn world(
             .map(|&n| seedbox_driver::test_support::definition(n))
             .collect(),
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(quantum)),
         move |definition| Ok(script(&definition.name)),
     )
     .unwrap();
@@ -372,35 +372,36 @@ fn fault_admission_settlement_and_transitions_are_incremental_pairs() {
     assert_dense(&events, 0);
     let (caller, target) = (ids[1], ids[2]);
     let fault = |n: usize| Cause::Fault(fault_ids(&events)[n - 1]);
+    // Each call takes effect one floor (1 ns) after it is made.
     assert_eq!(
         transitions(&events),
         [
-            (target, 0, Transition::Paused, fault(1), at(2)),
-            (target, 0, Transition::Resumed, fault(2), at(3)),
+            (target, 0, Transition::Paused, fault(1), at(3)),
+            (target, 0, Transition::Resumed, fault(2), at(4)),
             (
                 target,
                 0,
                 Transition::ExecutionSet(ExecutionConfig::new(2000).unwrap()),
                 fault(3),
-                at(4)
+                at(5)
             ),
             (
                 target,
                 0,
                 Transition::ExecutionSet(ExecutionConfig::default()),
                 fault(4),
-                at(5)
+                at(6)
             ),
-            (target, 0, Transition::Crashed, fault(5), at(6)),
+            (target, 0, Transition::Crashed, fault(5), at(7)),
             (
                 target,
                 0,
                 Transition::Rebooted { new_boot: 1 },
                 fault(7),
-                at(8)
+                at(9)
             ),
-            (target, 1, Transition::Paused, fault(8), at(10)),
-            (target, 1, Transition::Resumed, fault(10), at(11)),
+            (target, 1, Transition::Paused, fault(8), at(11)),
+            (target, 1, Transition::Resumed, fault(10), at(12)),
         ]
     );
     let expected = [
@@ -520,11 +521,12 @@ fn reply_admission_excludes_discarded_and_retired_replies() {
             _ => None,
         })
         .collect();
+    // Each answered call is admitted one floor (1 ns) after it is made.
     assert_eq!(
         replies,
         [
-            (caller, 0, call_id(1), at(2)),
-            (caller, 1, call_id(3), at(9))
+            (caller, 0, call_id(1), at(3)),
+            (caller, 1, call_id(3), at(10))
         ]
     );
 }

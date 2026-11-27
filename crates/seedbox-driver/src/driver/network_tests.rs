@@ -491,43 +491,32 @@ fn blocked_networked_machines_jump_to_their_next_event() {
         .all(|&(_, start, _)| start == 0 || start >= 10_000 * MS));
 }
 
+/// Every runnable machine bounds a round by one floor after its start, with
+/// or without a network interface: whatever follows from its output, a frame
+/// or a control consequence, is due one floor after it (C1).
 #[test]
-fn runnable_attached_machines_bound_rounds_by_latency_but_unattached_do_not() {
-    let (mut driver, log) = simple(
-        10 * MS,
-        NetworkConfig::default(),
-        vec![spec(Some(1)).busy(), spec(Some(2))],
-    );
-    barriers(&mut driver, 5 * MS);
-    let runs: Vec<_> = log
-        .lock()
-        .unwrap()
-        .runs
-        .iter()
-        .filter(|run| run.0 == 0)
-        .map(|run| (run.1, run.2))
-        .collect();
-    assert_eq!(
-        runs,
-        (0..5).map(|n| (n * MS, (n + 1) * MS)).collect::<Vec<_>>()
-    );
-
-    let (mut driver, log) = simple(
-        10 * MS,
-        NetworkConfig::default(),
-        vec![spec(None).busy(), spec(Some(2))],
-    );
-    barriers(&mut driver, 5 * MS);
-    // Only the attached machine's initial runnable round is bounded.
-    let runs: Vec<_> = log
-        .lock()
-        .unwrap()
-        .runs
-        .iter()
-        .filter(|r| r.0 == 0)
-        .copied()
-        .collect();
-    assert_eq!(runs, [(0, 0, MS), (0, MS, 5 * MS)]);
+fn runnable_machines_bound_rounds_by_latency_attached_or_not() {
+    for attached in [Some(1), None] {
+        let (mut driver, log) = simple(
+            10 * MS,
+            NetworkConfig::default(),
+            vec![spec(attached).busy(), spec(Some(2))],
+        );
+        barriers(&mut driver, 5 * MS);
+        let runs: Vec<_> = log
+            .lock()
+            .unwrap()
+            .runs
+            .iter()
+            .filter(|run| run.0 == 0)
+            .map(|run| (run.1, run.2))
+            .collect();
+        assert_eq!(
+            runs,
+            (0..5).map(|n| (n * MS, (n + 1) * MS)).collect::<Vec<_>>(),
+            "attached {attached:?}"
+        );
+    }
 }
 
 #[test]

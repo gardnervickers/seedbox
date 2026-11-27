@@ -167,6 +167,9 @@ pub(crate) enum RouteError {
     ArrivalOverflow,
     /// The sender's frame sequence cannot order another candidate.
     SequenceOverflow,
+    /// The frame would arrive at `at`, before the time its receiver has
+    /// already reached: a scheduler bug, never a fate of the frame.
+    BeforeReceiver { to: MachineId, at: u64 },
 }
 
 /// One frame in flight, keyed by (arrival, sender, sender sequence, receiver).
@@ -384,6 +387,7 @@ impl Network {
             from,
             sent,
             bytes,
+            &|_| 0,
             &mut FrameObservations::default(),
         )
     }

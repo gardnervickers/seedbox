@@ -24,7 +24,7 @@ Without KVM, use the slower software backend: `seedbox run . --backend tcg`.
 
 In `seedbox.yaml`, `simulator.quantum` sets the maximum timeslice (default `1ms`);
 network latency, timers and events can shorten it. Replay and checkpoints retain
-the quantum.
+the quantum; changing it does not change results.
 
 Save an application-ready simulation before a bug:
 

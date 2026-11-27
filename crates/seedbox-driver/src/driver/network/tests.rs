@@ -205,6 +205,32 @@ fn unrepresentable_arrivals_fail_without_scheduling() {
     );
 }
 
+/// An arrival before the time its receiver has already reached is a
+/// scheduler bug, never a fate: routing fails.
+#[test]
+fn an_arrival_before_its_receiver_reached_fails_routing() {
+    let mut net = network(NetworkConfig::default(), &[true, true]);
+    let reached = |to: MachineId| if to == MachineId(1) { 1_000_001 } else { 0 };
+    assert_eq!(
+        net.route_at(
+            Position {
+                at: Timestamp::from_nanos(0),
+                boundary_index: 0,
+                completed_quanta: 0,
+            },
+            MachineId(0),
+            0,
+            &frame(mac(2).octets(), 0),
+            &reached,
+            &mut FrameObservations::default(),
+        ),
+        Err(RouteError::BeforeReceiver {
+            to: MachineId(1),
+            at: 1_000_000
+        })
+    );
+}
+
 #[test]
 fn an_exhausted_sender_sequence_fails_without_scheduling() {
     let mut net = network(NetworkConfig::default(), &[true, true, true]);

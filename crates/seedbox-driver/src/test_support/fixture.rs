@@ -324,7 +324,7 @@ pub fn configured(machines: Vec<TestMachine>) -> Driver<TestMachine> {
         definitions[0].clone(),
         definitions[1..].to_vec(),
         Vec::new(),
-        crate::driver::NetworkConfig::default(),
+        super::floor(Duration::from_nanos(10)),
         move |definition| Ok(machines[definition.name.parse::<usize>().unwrap()].clone()),
     )
     .unwrap()
@@ -384,6 +384,16 @@ pub fn held(outcome: &StepOutcome) -> Option<(Timestamp, FaultAction, MachineId)
             _ => None,
         },
         _ => None,
+    }
+}
+/// Step toward `upto` until the run finishes, blocks or stops, or `upto` is
+/// reached; returns the last outcome.
+pub fn run_to(driver: &mut Driver<TestMachine>, upto: u64) -> StepOutcome {
+    loop {
+        match driver.step(at(upto)).unwrap() {
+            StepOutcome::BarrierReached { at: reached } if reached < at(upto) => {}
+            outcome => return outcome,
+        }
     }
 }
 pub fn status(driver: &mut Driver<TestMachine>) -> PlaybackStatus {

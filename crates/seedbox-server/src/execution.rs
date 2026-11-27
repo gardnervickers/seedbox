@@ -689,6 +689,8 @@ impl ExecutionService {
         }
         let run = orchestrator
             .with_start_paused(options.start_paused)
+            .with_stop_policy(options.stop_policy)
+            .with_no_timed_inbox(options.no_timed_inbox)
             .with_observations(observations.path())
             .with_program(program)
             .run_prepared_observed(

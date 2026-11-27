@@ -781,7 +781,9 @@ fn process_settlement_preserves_correlation_and_only_applied_proves_mutation() {
     );
     assert_eq!(outcome.status, SettlementStatus::Applied);
     assert_eq!(outcome.outcome_at, Some(12));
-    assert_eq!(outcome.committed_at, 20);
+    // The record takes the acknowledgement's own time, not when the service
+    // acted on it.
+    assert_eq!(outcome.committed_at, 12);
     assert_eq!(outcome.admitted_at, 10);
     assert_eq!(reply(&p)["effect_at_ns"], 12);
 }

@@ -73,6 +73,9 @@ pub(crate) struct Scenario {
     pub(crate) server_disk: bool,
     /// Simulated time at which the run stops if the client has not exited.
     pub(crate) limit: u64,
+    /// Machines that honour timed inboxes take frames inside their runs
+    /// (the Driver's default).
+    pub(crate) timed: bool,
 }
 
 impl Default for Scenario {
@@ -83,6 +86,7 @@ impl Default for Scenario {
             rules: Vec::new(),
             server_disk: false,
             limit: LIMIT,
+            timed: true,
         }
     }
 }
@@ -104,6 +108,8 @@ pub(crate) struct Run {
     pub(crate) scheduled: Vec<(&'static str, u64)>,
     /// The last step outcome.
     pub(crate) outcome: StepOutcome,
+    /// Frames machines took inside their runs (timed inboxes).
+    timed_taken: u64,
 }
 
 /// A rule's key as an input key; keys are fixed test literals.
@@ -154,6 +160,7 @@ where
     )
     .expect("driver construction");
     driver.set_frame_capacity(usize::MAX);
+    driver.set_timed_inbox(scenario.timed);
     let ids: Vec<MachineId> = driver
         .with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))
         .unwrap();
@@ -168,6 +175,7 @@ where
         outcome: StepOutcome::BarrierReached {
             at: Timestamp::from_nanos(0),
         },
+        timed_taken: 0,
     };
     let mut pending: Vec<Rule> = scenario.rules.clone();
     // Whether each machine has published TCP data, for `When::TcpData`.
@@ -246,6 +254,7 @@ where
             )
         });
     }
+    run.timed_taken = driver.timed_frames_taken();
     run
 }
 
@@ -332,6 +341,22 @@ pub(crate) fn check(run: &Run) -> Transcript {
     let transcript = run.transcript();
     check_client(&transcript);
     transcript
+}
+
+/// Two runs of one scenario are identical: every event in order, all
+/// application output, the barriers at which rules were scheduled and the
+/// final outcome.
+pub(crate) fn check_same_runs(one: &Run, other: &Run) {
+    assert_eq!(one.ids, other.ids);
+    assert_eq!(one.outcome, other.outcome);
+    assert_eq!(one.scheduled, other.scheduled);
+    assert_eq!(one.routes, other.routes);
+    assert_eq!(one.stdout, other.stdout);
+    assert_eq!(one.stderr, other.stderr);
+    assert_eq!(one.events.len(), other.events.len());
+    for (a, b) in one.events.iter().zip(&other.events) {
+        assert_eq!(a, b);
+    }
 }
 
 /// A TCP data segment's identity: sender, source address and port,
@@ -691,9 +716,9 @@ pub(crate) fn check_disk_crash(run: &Run) {
     );
 }
 
-// Shared scenarios. Each runs `runner` and applies the backend-neutral
-// assertions; backend entries supply only the runner that builds their
-// machines.
+// Shared scenarios. Each runs `runner` with and without timed inboxes,
+// requires identical runs and applies the backend-neutral assertions; backend
+// entries supply only the runner that builds their machines.
 const MS: u64 = 1_000_000;
 
 fn after_client(key: &'static str, text: &'static str, after: u64, action: Action) -> Rule {
@@ -716,9 +741,25 @@ fn after_client_data(key: &'static str, after: u64, action: Action) -> Rule {
     }
 }
 
+/// Run `scenario`, and again without timed inboxes when its machines took
+/// frames inside their runs; the runs must be identical.
+fn both(runner: &impl Fn(&Scenario) -> Run, scenario: Scenario) -> Run {
+    let run = runner(&scenario);
+    // A backend without timed inboxes (TCG) would run the same schedule.
+    if run.timed_taken > 0 {
+        let untimed = runner(&Scenario {
+            timed: false,
+            ..scenario
+        });
+        assert_eq!(untimed.timed_taken, 0);
+        check_same_runs(&run, &untimed);
+    }
+    run
+}
+
 /// The clean link schedules each peer-addressed frame once, FIFO in each direction.
 pub(crate) fn clean_exchange(runner: impl Fn(&Scenario) -> Run) {
-    let run = runner(&Scenario::default());
+    let run = both(&runner, Scenario::default());
     let transcript = check(&run);
     // On ARM64 Linux the server probes the tail of a flight while the client's
     // covering ACK is already on the return link. Both sends must be routed,
@@ -752,10 +793,13 @@ pub(crate) fn clean_exchange(runner: impl Fn(&Scenario) -> Run) {
 pub(crate) fn seeded_loss(runner: impl Fn(&Scenario) -> Run) {
     let network =
         NetworkConfig::new(Duration::from_millis(1), Duration::from_micros(300), 20_000).unwrap();
-    let run = runner(&Scenario {
-        network,
-        ..Scenario::default()
-    });
+    let run = both(
+        &runner,
+        Scenario {
+            network,
+            ..Scenario::default()
+        },
+    );
     check(&run);
     // Some resends replace dropped data, which the receiver never had.
     assert!(run.tcp_unexplained_retransmissions() > 0);
@@ -772,13 +816,16 @@ pub(crate) fn partition_and_heal(runner: impl Fn(&Scenario) -> Run) {
         right: vec![named(2)],
     };
     let heal = Action::Heal(crate::driver::HealTarget::Input(key("cut")));
-    let run = runner(&Scenario {
-        rules: vec![
-            after_client_data("cut", 2 * MS, cut),
-            after_client_data("heal", 1_002 * MS, heal),
-        ],
-        ..Scenario::default()
-    });
+    let run = both(
+        &runner,
+        Scenario {
+            rules: vec![
+                after_client_data("cut", 2 * MS, cut),
+                after_client_data("heal", 1_002 * MS, heal),
+            ],
+            ..Scenario::default()
+        },
+    );
     check_partition(&run, "cut", "heal");
 }
 
@@ -792,13 +839,16 @@ pub(crate) fn opposite_drift(runner: impl Fn(&Scenario) -> Run) {
             rate: crate::clock::ClockRate::new(ppb).unwrap(),
         },
     };
-    let run = runner(&Scenario {
-        rules: vec![
-            drift("fast-client", 2, 100_000_000),
-            drift("slow-server", 1, -100_000_000),
-        ],
-        ..Scenario::default()
-    });
+    let run = both(
+        &runner,
+        Scenario {
+            rules: vec![
+                drift("fast-client", 2, 100_000_000),
+                drift("slow-server", 1, -100_000_000),
+            ],
+            ..Scenario::default()
+        },
+    );
     check(&run);
     assert!(run.applied("fast-client").is_some() && run.applied("slow-server").is_some());
     assert_eq!(run.clock_rates(2), [100_000_000]);
@@ -816,13 +866,16 @@ pub(crate) fn opposite_drift(runner: impl Fn(&Scenario) -> Run) {
 /// the client's frames, and Resume lets it answer, so the client finishes
 /// only after the resume.
 pub(crate) fn paused_server(runner: impl Fn(&Scenario) -> Run) {
-    let run = runner(&Scenario {
-        rules: vec![
-            after_client("pause", "udp ok", 0, Action::Pause(named(1))),
-            after_client("resume", "udp ok", 500 * MS, Action::Resume(named(1))),
-        ],
-        ..Scenario::default()
-    });
+    let run = both(
+        &runner,
+        Scenario {
+            rules: vec![
+                after_client("pause", "udp ok", 0, Action::Pause(named(1))),
+                after_client("resume", "udp ok", 500 * MS, Action::Resume(named(1))),
+            ],
+            ..Scenario::default()
+        },
+    );
     check(&run);
     let (pause_at, resume_at) = (
         run.applied("pause").unwrap(),
@@ -847,14 +900,17 @@ pub(crate) fn paused_server(runner: impl Fn(&Scenario) -> Run) {
 }
 
 fn crash_and_reboot_server(runner: &impl Fn(&Scenario) -> Run, server_disk: bool) -> Run {
-    runner(&Scenario {
-        server_disk,
-        rules: vec![
-            after_client("crash", "udp ok", 0, Action::Crash(named(1))),
-            after_client("reboot", "udp ok", 200 * MS, Action::Reboot(named(1))),
-        ],
-        ..Scenario::default()
-    })
+    both(
+        runner,
+        Scenario {
+            server_disk,
+            rules: vec![
+                after_client("crash", "udp ok", 0, Action::Crash(named(1))),
+                after_client("reboot", "udp ok", 200 * MS, Action::Reboot(named(1))),
+            ],
+            ..Scenario::default()
+        },
+    )
 }
 
 /// The server crashed at the client's UDP marker and rebooted 200 ms later.

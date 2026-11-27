@@ -1,6 +1,6 @@
 #![cfg(seedbox_pv)]
 use native_fixture::auto_key;
-use seedbox_driver::driver::{Action, StepOutcome, Target};
+use seedbox_driver::driver::{Action, Driver, StepOutcome, Target};
 use seedbox_driver::test_support::native as native_fixture;
 use seedbox_machine::test_support::{SeededRng, SimulationClock};
 use seedbox_machine::{
@@ -114,6 +114,17 @@ fn concrete_pv_drivers_create_only_the_callers_context() {
     .unwrap();
 }
 
+/// Step toward `upto` until the run finishes, blocks or stops, or `upto` is
+/// reached; returns the last outcome.
+fn run_to(driver: &mut Driver<PVMachine>, upto: Timestamp) -> StepOutcome {
+    loop {
+        match driver.step(upto).unwrap() {
+            StepOutcome::BarrierReached { at } if at < upto => {}
+            outcome => return outcome,
+        }
+    }
+}
+
 mod machine {
     mod pv {
         mod tests {
@@ -183,10 +194,11 @@ mod machine {
                     driver.step(at(5)).unwrap(),
                     StepOutcome::BarrierReached { at: at(5) }
                 );
+                // Powered off at 5, the run ends one floor (1 ms) later.
                 assert_eq!(
-                    driver.step(at(10)).unwrap(),
+                    run_to(&mut driver, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: at(5),
+                        at: at(1_000_005),
                         reason: ExitReason::Shutdown
                     }
                 );
@@ -213,10 +225,11 @@ mod machine {
                     restored.step(at(5)).unwrap(),
                     StepOutcome::BarrierReached { at: at(5) }
                 );
+                // Powered off at 5, the run ends one floor (1 ms) later.
                 assert_eq!(
-                    restored.step(at(10)).unwrap(),
+                    run_to(&mut restored, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: at(5),
+                        at: at(1_000_005),
                         reason: ExitReason::Shutdown
                     }
                 );
@@ -241,10 +254,11 @@ mod machine {
                     second.step(at(5)).unwrap(),
                     StepOutcome::BarrierReached { at: at(5) }
                 );
+                // Powered off at 5, the run ends one floor (1 ms) later.
                 assert_eq!(
-                    second.step(at(10)).unwrap(),
+                    run_to(&mut second, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: at(5),
+                        at: at(1_000_005),
                         reason: ExitReason::Shutdown
                     }
                 );
@@ -329,10 +343,11 @@ mod machine {
                         barrier.snapshot(id)
                     })
                     .unwrap();
+                // Powered off at 40, the run ends one floor (1 ms) later.
                 assert_eq!(
-                    driver.step(at(50)).unwrap(),
+                    run_to(&mut driver, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: at(40),
+                        at: at(1_000_040),
                         reason: ExitReason::Shutdown
                     }
                 );
@@ -350,10 +365,11 @@ mod machine {
                     },
                 )
                 .unwrap();
+                // Powered off at 40, the run ends one floor (1 ms) later.
                 assert_eq!(
-                    branch.step(at(50)).unwrap(),
+                    run_to(&mut branch, at(2_000_000)),
                     StepOutcome::Finished {
-                        at: at(40),
+                        at: at(1_000_040),
                         reason: ExitReason::Shutdown
                     }
                 );

@@ -8,6 +8,7 @@
 //! The last oracles cross a server session: in a second server with a fresh
 //! state directory, fresh resolutions must repeat the first session's output,
 //! and a checkpoint file exported from the first must branch.
+//! A separate test changes the quantum and where the Driver's rounds end.
 //!
 //! Each test prints and records (under `SEEDBOX_TEST_REPORT_DIR/determinism`)
 //! every oracle's verdict and wall time, and on a failure the observations of
@@ -21,6 +22,7 @@ mod cross_session;
 mod lifecycle;
 mod oracles;
 mod session;
+mod stops;
 mod trace;
 
 use seedbox_api::SimulationId;
@@ -324,6 +326,67 @@ fn lifecycle_controls_replay_branch_and_rerun() {
         };
         run.oracle("FreshReruns", session.fresh_reruns(&references))
             .await;
+    });
+    drop(server);
+    run.finish();
+}
+
+/// The quantum and where the Driver's rounds end are host settings. Runs of
+/// the baseline's definition with quanta of 250 µs and 4 ms (the baseline's is
+/// 1 ms) must match it. A run stepped through its first quanta must match it
+/// too. Then two runs whose submissions name stop policy seeds (`stopPolicy`,
+/// which only the long suites' test-support CLI build accepts) end their
+/// rounds at their own seeded times. Each must match the baseline, write its
+/// output and match the other, and both commit more barriers while stepping
+/// than the run without a policy, at different counts, which shows that the
+/// policy acted. Two more runs do the same with timed inboxes, which are on
+/// by default, turned off (`noTimedInbox`, which only that build accepts):
+/// each machine then runs once per frame arrival.
+#[test]
+fn stops_and_quantum_never_change_results() {
+    let mut run = Run::new("stops");
+    let state = run.state("state");
+    let server = run.server(&state).unwrap();
+    runtime().block_on(async {
+        let mut session = run.session(&state);
+        let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
+            return;
+        };
+        for quantum in [250_000, 4_000_000] {
+            run.oracle(
+                &format!("QuantumInvariance({quantum} ns)"),
+                session.quantum_invariance(&baseline, quantum),
+            )
+            .await;
+            run.release(session.release(&[&baseline])).await;
+        }
+        // A run stepped a quantum at a time must match too; the barriers its
+        // Driver commits on the way are its own.
+        let Some((output, reference)) = run
+            .oracle("StepInvariance", async {
+                let (stepped, counts) = session.stepped(None, true).await?;
+                session.same_results(&baseline, &stepped).await?;
+                Ok((session.logs(&baseline).await?, counts))
+            })
+            .await
+        else {
+            return;
+        };
+        run.release(session.release(&[&baseline])).await;
+        run.oracle(
+            "StopPolicyInvariance",
+            session.stop_invariance(&baseline, &output, &reference, true),
+        )
+        .await;
+        run.release(session.release(&[&baseline])).await;
+        // Under the same seeded stops without timed inboxes, each machine
+        // runs once per frame arrival.
+        run.oracle(
+            "TimedInboxInvariance",
+            session.stop_invariance(&baseline, &output, &reference, false),
+        )
+        .await;
+        run.release(session.release(&[])).await;
     });
     drop(server);
     run.finish();

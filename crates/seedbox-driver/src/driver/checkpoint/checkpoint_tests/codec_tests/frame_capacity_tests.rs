@@ -34,7 +34,8 @@ fn pending_network_authority_bytes_exclude_frame_capacity_facts_and_omission_cur
             ],
             setup(capacity),
         );
-        advance(&mut source, 3);
+        // Past the last frame, so that no machine can still emit before it.
+        advance(&mut source, 4);
         let (bytes, store) = artifact(source.checkpoint().unwrap());
         if let Some(expected) = &expected {
             assert_eq!(&bytes, expected);

@@ -578,7 +578,7 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
             0 => c.quantum_ns = 0,
             1 => c.oracle = MachineId(100),
             2 => c.network = network::Network::new(NetworkConfig::default()),
-            3 => c.completed_quanta = u64::MAX,
+            3 => c.origin = at(u64::MAX),
             4 => c.machines[0].machine = None,
             5 => c.machines[0].lifecycle.uncertain_failure(),
             6 => {

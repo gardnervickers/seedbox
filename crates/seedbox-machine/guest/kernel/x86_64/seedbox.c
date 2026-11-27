@@ -295,6 +295,7 @@ static int seedbox_set_wallclock(const struct timespec64 *now)
 void __init seedbox_time_init(void)
 {
 	struct seedbox_page *p;
+	u64 last;
 
 	BUILD_BUG_ON(offsetof(struct seedbox_page, syscall_ns) != 6 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_page, pic_update) != 7 * sizeof(u64));
@@ -309,7 +310,20 @@ void __init seedbox_time_init(void)
 	event = (volatile u64 *)fix_to_virt(FIX_SEEDBOX_EVENT);
 	if (READ_ONCE(p->abi) != SEEDBOX_ABI)
 		panic("seedbox: PV ABI 3 page unavailable");
-	WRITE_ONCE(p->last, early_last);
+	/*
+	 * Reads before the page was mapped advanced early_last, which no bound
+	 * could stop. Bring LAST up to it within each run's bound: at the bound,
+	 * yield until the host publishes a later one. Interrupts are masked and
+	 * the machine has no wake yet, so these yields leave no trace.
+	 */
+	while ((last = READ_ONCE(p->last)) < early_last) {
+		u64 bound = READ_ONCE(p->bound);
+
+		if (last < bound)
+			WRITE_ONCE(p->last, min(bound, early_last));
+		else
+			event_signal(SEEDBOX_YIELD_PORT);
+	}
 	WRITE_ONCE(page, p);
 	event_write(EVENT_READY, SEEDBOX_ABI);
 	x86_platform.get_wallclock = seedbox_get_wallclock;

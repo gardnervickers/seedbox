@@ -104,6 +104,19 @@ where
             return Ok(None);
         }
         let now = self.now();
+        // Output held at a barrier that turns out to be needed commits
+        // before anything due there (C2).
+        if self.barrier_needed(now) {
+            self.need_barrier()?;
+        }
+        // The end of the run comes before anything else due then (C4).
+        if let Some((at, reason)) = self.execution.finishing {
+            debug_assert!(at >= now, "the end of the run passed");
+            if at <= now {
+                self.finish(at, reason)?;
+                return Ok(None);
+            }
+        }
         // Keep the front event until its effect is admitted, including across
         // a pre-fault stop. Driver controls and requests share one FIFO timeline.
         // Frames due now follow every timeline item due now, then timers.
@@ -145,19 +158,26 @@ where
                     scheduled => DueItem::new(scheduled),
                 };
                 self.apply_due_item(item, now)?;
-                if self.execution.finished.is_some() {
-                    return Ok(None);
-                }
             }
             if !self.deliver_frames(now)? {
                 break;
             }
-            if self.execution.finished.is_some() {
-                return Ok(None);
-            }
         }
         self.defer_due_timers(now);
         Ok(None)
+    }
+
+    /// Take the end of the run at `at`, its current time. Nothing due then
+    /// or later happens; suspended machines' hits end. Frames and timers due
+    /// at `at` are left waiting for the machines' next runs, which
+    /// `Driver::admit_waiting_work` admits without executing.
+    fn finish(&mut self, at: Timestamp, reason: ExitReason) -> Result<(), Error<M::Error>> {
+        self.execution.finishing = None;
+        self.execution.finished = Some((at, reason));
+        self.execution.control.service.cut_off_breaks(at.as_nanos());
+        self.deliver_frames(at)?;
+        self.defer_due_timers(at);
+        Ok(())
     }
 
     /// The front timeline item due at `now`, left in place.

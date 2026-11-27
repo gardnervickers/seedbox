@@ -42,6 +42,48 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
         fresh(request)
     }
 }
+/// Apply the request's stop policy, which only a test-support build has,
+/// and say on stderr (the run's retained worker diagnostics) which seed it
+/// draws from, so that the run's stops can be repeated.
+fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    let Some(seed) = request.stop_policy else {
+        return Ok(());
+    };
+    #[cfg(feature = "test-support")]
+    {
+        eprintln!("{}", super::executor::stop_seed_notice(seed));
+        driver.set_stop_policy(Some(seedbox_driver::test_support::StopPolicy::seeded(seed)));
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = (driver, seed);
+        Err(bad(
+            "a Driver stop policy needs a worker built with test support",
+        ))
+    }
+}
+/// Turn timed inboxes off when the request asks, which only a test-support
+/// build can.
+fn timed_inbox(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    if !request.no_timed_inbox {
+        return Ok(());
+    }
+    #[cfg(feature = "test-support")]
+    {
+        // The whole-run oracle reads this to see that the switch took.
+        eprintln!("seedbox: Driver timed inboxes off");
+        driver.set_timed_inbox(false);
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = driver;
+        Err(bad(
+            "turning timed inboxes off needs a worker built with test support",
+        ))
+    }
+}
 fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let program = program(request)?;
     let assets = materialize_factory(
@@ -130,6 +172,8 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
         .map_err(|e| bad(e.to_string()))?;
     // The engine decides the oracle's device faults and breakpoints.
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -330,6 +374,8 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     )
     .map_err(|e| bad(e.to_string()))?;
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }

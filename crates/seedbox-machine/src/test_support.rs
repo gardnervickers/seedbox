@@ -20,4 +20,5 @@ pub mod prepared_application;
 pub mod prepared_fixture;
 pub mod prepared_image;
 pub mod simulation_control;
+pub mod stop_scenario;
 pub mod test_environment;

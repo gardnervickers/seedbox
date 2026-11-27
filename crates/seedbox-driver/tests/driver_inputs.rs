@@ -142,7 +142,7 @@ fn world(
                 )
             })
             .collect(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(1)),
         move |definition| Ok(script(&definition.name)),
     )
     .unwrap();
@@ -546,9 +546,10 @@ fn heal_by_key_or_handle_restores_nominal_and_rejects_inactive_targets() {
 
 fn hold_script(name: &str) -> Scripted {
     let script = match name {
+        // Admitted one floor (1 ns) later, at 5 and 7.
         "caller" => vec![
-            call(5, 1, on("stop", "target")),
-            call(7, 2, on("pause", "target")),
+            call(4, 1, on("stop", "target")),
+            call(6, 2, on("pause", "target")),
         ],
         _ => vec![],
     };
@@ -751,8 +752,9 @@ fn mixed(by_name: bool) -> Vec<Event> {
             },
         ),
         (3, "resume", Action::Resume(target(o, "other"))),
+        // After the caller's restart, admitted at 6, is acknowledged.
         (
-            6,
+            7,
             "freeze",
             Action::PauseProcess {
                 target: target(t, "target"),
@@ -760,7 +762,7 @@ fn mixed(by_name: bool) -> Vec<Event> {
             },
         ),
         (
-            7,
+            8,
             "thaw",
             Action::ResumeProcess {
                 target: target(t, "target"),
@@ -840,9 +842,10 @@ fn oracle_completion_cuts_off_pending_inputs_without_per_key_events() {
         Action::Pause(Target::Machine(ids[1])),
     );
     let events = run_to(&mut driver, 10);
+    // The outcome at 3 ends the run one floor later.
     assert!(matches!(
         driver.step(at(10)).unwrap(),
-        StepOutcome::Finished { at: t, .. } if t == at(3)
+        StepOutcome::Finished { at: t, .. } if t == at(4)
     ));
     assert_eq!(
         settlement(&events, "before"),
