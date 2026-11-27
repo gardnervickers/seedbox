@@ -50,7 +50,6 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
         simulated_time_ns: 0,
         host_control: output.join("control"),
         output,
-        machine_workers: 1,
         stop_policy: None,
         no_timed_inbox: false,
         start_paused: false,
@@ -191,7 +190,6 @@ fn saved_checkpoint(
     let mut source = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(1_000_000),
-        1,
         0,
         || Ok(()),
         mock_definition("oracle"),
@@ -272,7 +270,6 @@ fn published_checkpoint(root: &Path, allowed: &[&str]) -> (Inventory, PathBuf) {
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(1_000_000),
-        1,
         0,
         || Ok(()),
         mock_definition("oracle"),

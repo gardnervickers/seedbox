@@ -127,14 +127,12 @@ impl RngStream for Rng {
 /// Machines are named `oracle` followed by `names`; returns their identities.
 fn world(
     quantum: u64,
-    workers: usize,
     names: &[&str],
     script: impl Fn(&str) -> Scripted + Send + 'static,
 ) -> (Driver<Scripted>, Vec<MachineId>) {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(quantum),
-        workers,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
@@ -193,7 +191,7 @@ fn assert_dense(events: &[Event], first: u64) {
 
 #[test]
 fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
-    let (mut driver, ids) = world(10, 2, &["a", "b"], |name| Scripted {
+    let (mut driver, ids) = world(10, &["a", "b"], |name| Scripted {
         script: match name {
             "a" => [console(3, b"a3"), console(7, b"a7"), console(13, b"a13")].into(),
             "b" => [console(3, b"b3"), console(5, b"b5")].into(),
@@ -276,7 +274,7 @@ fn outputs_sort_within_a_commit_and_separate_commits_keep_publication_order() {
 
 #[test]
 fn host_inputs_publish_effective_changes_with_their_fault_cause() {
-    let (mut driver, ids) = world(10, 2, &["m"], |_| Scripted::default());
+    let (mut driver, ids) = world(10, &["m"], |_| Scripted::default());
     let m = ids[1];
     let slow = ExecutionConfig::new(2000).unwrap();
     driver.drain_observations();
@@ -361,8 +359,8 @@ fn fault_script(name: &str) -> Scripted {
     }
 }
 
-fn fault_world(workers: usize) -> (Vec<Event>, Vec<MachineId>) {
-    let (mut driver, ids) = world(1, workers, &["caller", "target"], fault_script);
+fn fault_world() -> (Vec<Event>, Vec<MachineId>) {
+    let (mut driver, ids) = world(1, &["caller", "target"], fault_script);
     let mut events = driver.drain_observations().events;
     events.extend(run_to(&mut driver, 14));
     (events, ids)
@@ -370,7 +368,7 @@ fn fault_world(workers: usize) -> (Vec<Event>, Vec<MachineId>) {
 
 #[test]
 fn fault_admission_settlement_and_transitions_are_incremental_pairs() {
-    let (events, ids) = fault_world(2);
+    let (events, ids) = fault_world();
     assert_dense(&events, 0);
     let (caller, target) = (ids[1], ids[2]);
     let fault = |n: usize| Cause::Fault(fault_ids(&events)[n - 1]);
@@ -490,7 +488,7 @@ fn fault_ids(events: &[Event]) -> Vec<FaultId> {
 
 #[test]
 fn reply_admission_excludes_discarded_and_retired_replies() {
-    let (mut driver, ids) = world(1, 2, &["caller", "other"], |name| Scripted {
+    let (mut driver, ids) = world(1, &["caller", "other"], |name| Scripted {
         script: match name {
             "caller" => vec![
                 call(2, 1, serde_json::json!({"op":"now"})),
@@ -535,7 +533,7 @@ fn reply_admission_excludes_discarded_and_retired_replies() {
 
 #[test]
 fn failed_step_keeps_confirmed_prefix_and_failure_path_settlement() {
-    let (mut driver, ids) = world(1, 2, &["caller", "target"], |name| match name {
+    let (mut driver, ids) = world(1, &["caller", "target"], |name| match name {
         "caller" => Scripted {
             script: [call(2, 1, on("crash", "target"))].into(),
             ..Scripted::default()
@@ -592,7 +590,7 @@ fn failed_step_keeps_confirmed_prefix_and_failure_path_settlement() {
 
 #[test]
 fn successful_addition_survives_its_callback_error() {
-    let (mut driver, _) = world(10, 1, &[], |_| Scripted::default());
+    let (mut driver, _) = world(10, &[], |_| Scripted::default());
     driver.drain_observations();
     let mut added = None;
     let result = driver.with_barrier(|b| {
@@ -606,12 +604,4 @@ fn successful_addition_survives_its_callback_error() {
     assert_eq!(events[0].sequence, 1);
     assert!(matches!(events[0].kind,
         EventKind::MachineAdded { machine, cause: Cause::Host, .. } if Some(machine) == added));
-}
-
-#[test]
-fn full_streams_do_not_depend_on_worker_count() {
-    let faults = fault_world(1).0;
-    for workers in [2, 4] {
-        assert_eq!(fault_world(workers).0, faults);
-    }
 }

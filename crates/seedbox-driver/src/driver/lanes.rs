@@ -4,10 +4,10 @@
 //! machine can affect another before the round commits, so lanes run side by
 //! side and only each machine's own runs are ordered.
 //!
-//! A machine that executes elsewhere ([`Machine::split_run`], a PV worker
-//! process) is not lent to a worker thread: the Driver's thread starts its
-//! run, keeps it in flight beside the others, and finishes whichever stops
-//! first, so a round crosses no thread inside the Driver.
+//! Every lane runs on the Driver's thread. A machine that executes elsewhere
+//! ([`Machine::split_run`], a PV worker process) keeps its run in flight
+//! beside the others while this thread runs blocking machines inline and
+//! finishes whichever split run stops first.
 //!
 //! A machine with a timed inbox ([`Machine::timed_inbox`]) takes the frames
 //! that arrive inside its lane in one run, each at its own time, instead of
@@ -27,7 +27,7 @@ struct Arrival {
     dropped: bool,
 }
 
-/// A lane's run on a worker, with what its acceptance needs.
+/// A lane's run, with what its acceptance needs.
 struct LaneRun {
     start: Timestamp,
     upto: Timestamp,
@@ -63,9 +63,7 @@ struct Window {
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
     /// receiver drops them there, and a machine held at a breakpoint takes

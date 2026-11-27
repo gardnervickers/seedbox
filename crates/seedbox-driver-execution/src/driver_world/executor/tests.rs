@@ -17,9 +17,9 @@ fn backend_authority_rejects_conflicting_constructor_backend_before_worker_launc
         let mut matching = profile();
         matching.backend = tag.into();
         matching.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
-        DriverExecutor::new(matching.clone(), backend, 1).unwrap();
+        DriverExecutor::new(matching.clone(), backend).unwrap();
         matching.backend = other.into();
-        let error = DriverExecutor::new(matching, backend, 1)
+        let error = DriverExecutor::new(matching, backend)
             .err()
             .unwrap()
             .to_string();
@@ -39,10 +39,10 @@ fn backend_authority_requires_contract_and_matching_constructor_argument() {
         let mut matching = profile();
         matching.backend = tag.into();
         matching.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
-        DriverExecutor::new(matching.clone(), backend, 1).unwrap();
+        DriverExecutor::new(matching.clone(), backend).unwrap();
         let mut legacy = matching.clone();
         legacy.semantic_parameters.engine = None;
-        let error = DriverExecutor::new(legacy, opposite, 1)
+        let error = DriverExecutor::new(legacy, opposite)
             .err()
             .unwrap()
             .to_string();
@@ -52,7 +52,7 @@ fn backend_authority_requires_contract_and_matching_constructor_argument() {
         );
         // Change the independent argument,
         // not a profile label: it must not choose a different actual executor.
-        let error = DriverExecutor::new(matching, opposite, 1)
+        let error = DriverExecutor::new(matching, opposite)
             .err()
             .unwrap()
             .to_string();
@@ -120,7 +120,7 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
     let mut pv = profile();
     pv.backend = "driver-pv".into();
     pv.semantic_parameters.engine = Some(DriverExecutor::descriptor("x86_64"));
-    let pv = DriverExecutor::new(pv, CpuBackend::Pv, 1).unwrap();
+    let pv = DriverExecutor::new(pv, CpuBackend::Pv).unwrap();
     if crate::driver_world::platform::Host::current().runs_driver() {
         pv.preflight(None).unwrap();
         pv.admit_execution(false).unwrap();
@@ -137,7 +137,7 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
         pv.admit_execution(true).is_ok(),
         crate::driver_world::platform::Host::current().runs_driver()
     );
-    let tcg = DriverExecutor::new(profile(), CpuBackend::Tcg, 1).unwrap();
+    let tcg = DriverExecutor::new(profile(), CpuBackend::Tcg).unwrap();
     if crate::driver_world::platform::Host::current().runs_driver() {
         tcg.admit_execution(true).unwrap();
     } else {
@@ -152,27 +152,14 @@ fn controller_scope_follows_driver_host_for_pv_and_tcg() {
 }
 
 #[test]
-fn driver_constructor_validates_contract_and_worker_range_without_running_tools() {
+fn driver_constructor_validates_contract_without_running_tools() {
     let mut legacy = profile();
     legacy.semantic_parameters.engine = None;
-    assert!(DriverExecutor::new(legacy, CpuBackend::Tcg, 1)
+    assert!(DriverExecutor::new(legacy, CpuBackend::Tcg)
         .err()
         .unwrap()
         .to_string()
         .contains("recorded driver-world-v1 contract"));
-    for count in [0, 65] {
-        assert!(DriverExecutor::new(profile(), CpuBackend::Tcg, count)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("1..64"));
-    }
-    assert_eq!(
-        DriverExecutor::new(profile(), CpuBackend::Tcg, 4)
-            .unwrap()
-            .performance_parameters()["SEEDBOX_MACHINE_WORKERS"],
-        "4"
-    );
 }
 
 #[test]
@@ -200,7 +187,7 @@ fn non_oracle_legacy_controller_refuses_before_retaining_engine_or_preparing_ima
 
 #[test]
 fn retained_profile_drift_is_refused_before_reading_runtime_or_launching_workers() {
-    let executor = DriverExecutor::new(profile(), CpuBackend::Tcg, 1).unwrap();
+    let executor = DriverExecutor::new(profile(), CpuBackend::Tcg).unwrap();
     for change in [0, 1] {
         let mut recorded = profile();
         if change == 0 {
@@ -347,25 +334,4 @@ fn each_spawn_request_gets_one_answer_and_failures_are_answers() {
     let prepared = spawn::prepared(&directory).unwrap();
     assert_eq!(prepared.len(), 1);
     assert_eq!(prepared[0].0.machine.name, "replica");
-}
-
-#[test]
-fn a_stop_policy_seed_varies_by_run_unless_it_is_exact() {
-    use std::path::Path;
-    let (first, second) = (Path::new("/runs/a/machines"), Path::new("/runs/b/machines"));
-    // A plain seed is mixed with the run's own output directory.
-    let mixed = stop_seed("4242", first).unwrap();
-    assert_eq!(stop_seed("4242", first), Some(mixed));
-    assert_ne!(stop_seed("4242", second), Some(mixed));
-    assert_ne!(stop_seed("4243", first), Some(mixed));
-    // The seed a worker reports repeats its policy in any run.
-    let notice = stop_seed_notice(mixed);
-    let (_, rest) = notice.split_once(&format!("{STOP_POLICY}=")).unwrap();
-    let value = rest.split_whitespace().next().unwrap();
-    assert_eq!(value, format!("exact:{mixed}"));
-    assert_eq!(stop_seed(value, second), Some(mixed));
-    assert_eq!(stop_seed("exact:0", first), Some(0));
-    for invalid in ["", "x", "-1", "exact:", "exact:x", "exact: 7", "Exact:7"] {
-        assert_eq!(stop_seed(invalid, first), None, "{invalid:?}");
-    }
 }

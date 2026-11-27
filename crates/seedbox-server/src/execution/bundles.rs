@@ -116,3 +116,37 @@ pub(super) fn semantic_definition(
     }
     Ok(definition)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::semantic_definition;
+    use seedbox_spec::definition::Definition;
+
+    fn definition(quantum_ns: u64, blocks: u64) -> Box<Definition> {
+        let asset = format!("sha256:{}", "a".repeat(64));
+        Box::new(
+            serde_json::from_value(serde_json::json!({
+                "architecture": "aarch64", "seed": 7, "clock": {"epochSeconds": 86400},
+                "runtime": {"execution": {}},
+                "machines": {},
+                "oracle": {"bootArchive": asset, "memoryBytes": 1073741824_u64,
+                    "process": {"argv": ["/test"], "environment": {}, "workingDirectory": "/", "user": "0"},
+                    "volumes": {}},
+                "network": {"name": "default", "latency_ns": 1000000, "jitter_ns": 0},
+                "simulator": {"quantumNs": quantum_ns, "blocksPerProgressCall": blocks,
+                    "schedule": {"timer_jitter_ns": 0, "stop_tolerance_ns": 0},
+                    "disk": {"torn_writes": false}, "oracleControl": false},
+                "start": {"kind": "fresh"}
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn comparison_ignores_the_quantum_but_not_other_simulator_settings() {
+        let semantic =
+            |quantum_ns, blocks| semantic_definition(definition(quantum_ns, blocks)).unwrap();
+        assert_eq!(semantic(1_000_000, 17), semantic(250_000, 17));
+        assert_ne!(semantic(1_000_000, 17), semantic(1_000_000, 18));
+    }
+}

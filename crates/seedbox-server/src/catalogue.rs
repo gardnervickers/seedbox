@@ -279,6 +279,18 @@ impl Catalogue {
         let backend = recorded_backend
             .or(request.options.backend)
             .unwrap_or_default();
+        if !seedbox_driver_execution::driver_world::TAKES_TEST_OPTIONS {
+            if request.options.stop_policy.is_some() {
+                return Err(Error::Invalid(
+                    "a stop policy needs a server built with test support".into(),
+                ));
+            }
+            if request.options.no_timed_inbox {
+                return Err(Error::Invalid(
+                    "turning timed inboxes off needs a server built with test support".into(),
+                ));
+            }
+        }
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()

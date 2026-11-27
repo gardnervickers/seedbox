@@ -97,17 +97,12 @@ impl Machine for Probe {
         Ok(self.clone())
     }
 }
-fn build(
-    workers: usize,
-    reason: ExitReason,
-    main_only: bool,
-) -> (Driver<Probe>, Calls, Vec<MachineId>) {
+fn build(reason: ExitReason, main_only: bool) -> (Driver<Probe>, Calls, Vec<MachineId>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let observed = calls.clone();
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         FixtureRng,
         || Ok(()),
         seedbox_driver::test_support::definition("fixture-0"),
@@ -131,62 +126,60 @@ fn build(
 }
 #[test]
 fn oracle_exit_publishes_whole_round_then_sticks_before_due_effects() {
-    for workers in [1, 2] {
-        let (mut driver, calls, ids) = build(workers, ExitReason::ProgramExit { code: 23 }, false);
-        // The oracle exits at 1, so the run ends at 11, before this crash.
-        driver
-            .with_barrier(|b| {
-                b.schedule(
-                    Timestamp::from_nanos(11),
-                    auto_key(),
-                    Action::Crash(Target::Machine(ids[1])),
-                )
-            })
-            .unwrap();
-        let expected = StepOutcome::Finished {
-            at: Timestamp::from_nanos(11),
-            reason: ExitReason::ProgramExit { code: 23 },
-        };
-        assert_eq!(
-            driver.step(Timestamp::from_nanos(10)).unwrap(),
-            StepOutcome::BarrierReached {
-                at: Timestamp::from_nanos(10)
-            }
-        );
-        assert_eq!(driver.step(Timestamp::from_nanos(20)).unwrap(), expected);
-        let outputs = driver
-            .drain_observations()
-            .events
-            .into_iter()
-            .filter_map(|event| match event.kind {
-                EventKind::Output(output) => Some(output),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        driver.with_barrier(|b| {
+    let (mut driver, calls, ids) = build(ExitReason::ProgramExit { code: 23 }, false);
+    // The oracle exits at 1, so the run ends at 11, before this crash.
+    driver
+        .with_barrier(|b| {
+            b.schedule(
+                Timestamp::from_nanos(11),
+                auto_key(),
+                Action::Crash(Target::Machine(ids[1])),
+            )
+        })
+        .unwrap();
+    let expected = StepOutcome::Finished {
+        at: Timestamp::from_nanos(11),
+        reason: ExitReason::ProgramExit { code: 23 },
+    };
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(10)
+        }
+    );
+    assert_eq!(driver.step(Timestamp::from_nanos(20)).unwrap(), expected);
+    let outputs = driver
+        .drain_observations()
+        .events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Output(output) => Some(output),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    driver.with_barrier(|b| {
             // Every output up to the end is published.
             let times: Vec<_> = outputs.iter().map(|output| output.at.as_nanos()).collect();
             assert_eq!(times, [1, 10, 11]);
-            assert!(matches!(b.stopped(ids[0])?, StopReason::Exited { reached, .. } if reached == Timestamp::from_nanos(1)));
-            assert_eq!(b.stopped(ids[1])?, StopReason::BoundaryReached);
+        assert!(matches!(b.stopped(ids[0])?, StopReason::Exited { reached, .. } if reached == Timestamp::from_nanos(1)));
+        assert_eq!(b.stopped(ids[1])?, StopReason::BoundaryReached);
             assert!(matches!(b.schedule(Timestamp::from_nanos(11), auto_key(), Action::Pause(Target::Machine(ids[1]))),Err(Error::Completed)));
+        Ok(())
+    }).unwrap();
+    let count = calls.lock().unwrap().len();
+    assert_eq!(driver.step(Timestamp::from_nanos(100)).unwrap(), expected);
+    assert_eq!(calls.lock().unwrap().len(), count);
+    driver
+        .with_barrier(|b| {
+            let _final_snapshot = b.snapshot(ids[0])?;
             Ok(())
-        }).unwrap();
-        let count = calls.lock().unwrap().len();
-        assert_eq!(driver.step(Timestamp::from_nanos(100)).unwrap(), expected);
-        assert_eq!(calls.lock().unwrap().len(), count);
-        driver
-            .with_barrier(|b| {
-                let _final_snapshot = b.snapshot(ids[0])?;
-                Ok(())
-            })
-            .unwrap();
-        assert!(driver.drain_observations().events.is_empty());
-    }
+        })
+        .unwrap();
+    assert!(driver.drain_observations().events.is_empty());
 }
 #[test]
 fn crash_terminates_one_floor_later_and_cuts_off_inputs_due_then_but_pause_does_not() {
-    let (mut driver, calls, ids) = build(2, ExitReason::ProgramExit { code: 0 }, false);
+    let (mut driver, calls, ids) = build(ExitReason::ProgramExit { code: 0 }, false);
     driver
         .with_barrier(|b| {
             b.schedule(
@@ -247,7 +240,7 @@ fn crash_terminates_one_floor_later_and_cuts_off_inputs_due_then_but_pause_does_
         })
         .unwrap();
     assert!(driver.drain_observations().events.is_empty());
-    let (mut driver, calls, ids) = build(1, ExitReason::Shutdown, false);
+    let (mut driver, calls, ids) = build(ExitReason::Shutdown, false);
     driver
         .with_barrier(|b| {
             b.schedule(
@@ -330,7 +323,6 @@ fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        1,
         FixtureRng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
@@ -387,7 +379,7 @@ fn only_a_consumed_stop_with_its_successful_acknowledgment_finishes() {
 
 #[test]
 fn oracle_application_outcome_finishes_without_claiming_machine_exit() {
-    let (mut driver, _, ids) = build(2, ExitReason::Shutdown, true);
+    let (mut driver, _, ids) = build(ExitReason::Shutdown, true);
     // The outcome at 1 ends the run one floor later.
     assert_eq!(
         driver.step(Timestamp::from_nanos(10)).unwrap(),

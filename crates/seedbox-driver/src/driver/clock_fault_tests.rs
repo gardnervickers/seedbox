@@ -137,7 +137,7 @@ impl Machine for Guest {
     }
 }
 
-fn scenario(workers: usize, seed: u64) -> (Vec<Event>, Observed) {
+fn scenario(seed: u64) -> (Vec<Event>, Observed) {
     let oracle = Arc::new(Mutex::new(Observed::default()));
     let target = Arc::new(Mutex::new(Observed::default()));
     let t = r#""target":{"machine":"fixture-1"}"#;
@@ -182,7 +182,6 @@ fn scenario(workers: usize, seed: u64) -> (Vec<Event>, Observed) {
     let mut driver = fixture::driver(
         at(0),
         Duration::from_nanos(50),
-        workers,
         crate::rng::SeededRng::new(seed),
         || Ok(()),
         || Ok(machines),
@@ -203,7 +202,7 @@ fn scenario(workers: usize, seed: u64) -> (Vec<Event>, Observed) {
 
 #[test]
 fn drift_and_steps_follow_handles_across_reboot_with_resolved_events() {
-    let (events, observed) = scenario(1, 7);
+    let (events, observed) = scenario(7);
     let admitted: Vec<_> = events
         .iter()
         .filter_map(|e| match &e.kind {
@@ -285,16 +284,13 @@ fn drift_and_steps_follow_handles_across_reboot_with_resolved_events() {
 }
 
 #[test]
-fn seeded_draws_and_translated_streams_are_independent_of_workers() {
-    let serial = scenario(1, 7);
-    assert_eq!(serial, scenario(2, 7));
-    assert_eq!(serial, scenario(4, 7));
+fn seeded_draws_follow_the_simulation_seed() {
     // Draws come from the simulation RNG: another seed draws differently.
-    assert_ne!(serial.1.steps, scenario(1, 8).1.steps);
+    assert_ne!(scenario(7).1.steps, scenario(8).1.steps);
 }
 
 /// A guest-free oracle and a stepping target driven only by host inputs.
-fn host_driver(workers: usize) -> (Driver<Guest>, Arc<Mutex<Observed>>) {
+fn host_driver() -> (Driver<Guest>, Arc<Mutex<Observed>>) {
     let target = Arc::new(Mutex::new(Observed::default()));
     let guest = |observed| Guest {
         script: VecDeque::new(),
@@ -308,7 +304,6 @@ fn host_driver(workers: usize) -> (Driver<Guest>, Arc<Mutex<Observed>>) {
     let driver = fixture::driver(
         at(0),
         Duration::from_nanos(50),
-        workers,
         crate::rng::SeededRng::new(7),
         || Ok(()),
         || Ok(machines),
@@ -344,8 +339,8 @@ fn advance(driver: &mut Driver<Guest>, end: u64, events: &mut Vec<Event>) {
     events.extend(driver.drain_events());
 }
 
-fn host_scenario(workers: usize) -> (Vec<Event>, Observed) {
-    let (mut driver, observed) = host_driver(workers);
+fn host_scenario() -> (Vec<Event>, Observed) {
+    let (mut driver, observed) = host_driver();
     let mut events = driver.drain_events();
     driver
         .with_barrier(|b| {
@@ -396,7 +391,7 @@ fn host_scenario(workers: usize) -> (Vec<Event>, Observed) {
 
 #[test]
 fn host_drift_step_and_heal_follow_keys_and_publish_resolved_payloads() {
-    let (events, observed) = host_scenario(1);
+    let (events, observed) = host_scenario();
     assert_eq!(observed.steps, [(0, -2_000), (0, 2_000), (0, 7)]);
     let admitted: Vec<_> = events
         .iter()
@@ -478,15 +473,8 @@ fn host_drift_step_and_heal_follow_keys_and_publish_resolved_payloads() {
 }
 
 #[test]
-fn host_clock_inputs_are_independent_of_workers() {
-    let serial = host_scenario(1);
-    assert_eq!(serial, host_scenario(2));
-    assert_eq!(serial, host_scenario(4));
-}
-
-#[test]
 fn host_realtime_steps_are_bounded_at_enqueue_without_mutation() {
-    let (mut driver, observed) = host_driver(1);
+    let (mut driver, observed) = host_driver();
     let bound = crate::oracle::MAX_CLOCK_OFFSET_NS as i64;
     let before = driver.drain_events();
     driver
@@ -517,7 +505,7 @@ fn host_realtime_steps_are_bounded_at_enqueue_without_mutation() {
 
 #[test]
 fn host_clock_effects_hold_before_applying_and_bind_their_boot() {
-    let (mut driver, observed) = host_driver(1);
+    let (mut driver, observed) = host_driver();
     driver
         .with_barrier(|b| {
             b.schedule(at(100), key("drift"), drift_action(100_000_000))?;
@@ -564,7 +552,7 @@ fn host_clock_effects_hold_before_applying_and_bind_their_boot() {
 /// Seeded clock faults draw from each target's own clock-fault stream, derived
 /// from its machine seed: they never shift later machine seeds, a machine's
 /// own RNG, or another target's draws.
-fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
+fn isolation(perturb: bool) -> Vec<Observed> {
     let observed: Vec<_> = (0..4)
         .map(|_| Arc::new(Mutex::new(Observed::default())))
         .collect();
@@ -583,7 +571,6 @@ fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(50),
-        workers,
         crate::rng::SeededRng::new(11),
         || Ok(()),
         fixture::definition(0),
@@ -632,22 +619,19 @@ fn isolation(workers: usize, perturb: bool) -> Vec<Observed> {
 
 #[test]
 fn clock_fault_draws_do_not_perturb_seeds_entropy_or_other_targets() {
-    for workers in [1, 2, 4] {
-        let base = isolation(workers, false);
-        let perturbed = isolation(workers, true);
-        assert_eq!(base, isolation(1, false), "workers {workers}");
-        // Target 1 was stepped twice more; target 2's draw is unchanged.
-        assert_eq!(perturbed[1].steps.len(), 2);
-        assert_eq!(base[2].steps, perturbed[2].steps);
-        assert_eq!(base[2].steps.len(), 1);
-        // Every machine's own entropy, including the later spawn's seed, is
-        // unchanged by the extra clock-fault draws.
-        for machine in 0..4 {
-            assert_eq!(
-                base[machine].entropy, perturbed[machine].entropy,
-                "{machine}"
-            );
-            assert_eq!(base[machine].entropy.len(), 1);
-        }
+    let base = isolation(false);
+    let perturbed = isolation(true);
+    // Target 1 was stepped twice more; target 2's draw is unchanged.
+    assert_eq!(perturbed[1].steps.len(), 2);
+    assert_eq!(base[2].steps, perturbed[2].steps);
+    assert_eq!(base[2].steps.len(), 1);
+    // Every machine's own entropy, including the later spawn's seed, is
+    // unchanged by the extra clock-fault draws.
+    for machine in 0..4 {
+        assert_eq!(
+            base[machine].entropy, perturbed[machine].entropy,
+            "{machine}"
+        );
+        assert_eq!(base[machine].entropy.len(), 1);
     }
 }

@@ -58,9 +58,9 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
         // Choose a live-workload fault point from this backend's actual Driver
         // readiness/end window, never an assumed architecture boot duration.
 
-        let calibration = session.submit(request.clone(), 1).await;
+        let calibration = session.submit(request.clone()).await;
         session.worker(&calibration).await;
-        session.complete(&calibration, false, 1, 123).await;
+        session.complete(&calibration, false, 123).await;
         let finish = session.client.describe(&calibration).await.unwrap().status.simulated_time_ns;
         let mut stream = session.client.events_with(&calibration, false).await.unwrap();
         let mut ready = None;
@@ -83,16 +83,16 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
             }).unwrap(),
         });
 
-        let baseline = session.submit(request.clone(), 1).await;
+        let baseline = session.submit(request.clone()).await;
 
         session.worker(&baseline).await;
-        let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
+        let uninterrupted = session.complete(&baseline, false, 123).await.unwrap();
 
         let baseline_events = fault_events(session, &baseline).await;
         assert_eq!(baseline_events.iter().filter(|(_, status)| *status == FaultStatus::Applied).count(), 1);
         let mut source_request = request;
         source_request.options.start_paused = true;
-        let source = session.submit(source_request, 1).await;
+        let source = session.submit(source_request).await;
 
         session.worker(&source).await;
 
@@ -139,15 +139,13 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
         assert_eq!(position, held.position);
         assert_unapplied(session, &source).await;
 
-        let mut exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
+        let exported = session.client.checkpoint_definition(&source, "held").await.unwrap();
 
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, 123).await;
+        session.complete(&source, true, 123).await;
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
-        session.workers.store(4, Ordering::SeqCst);
-        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(source, restored);
@@ -171,7 +169,7 @@ pub async fn native_held_checkpoint(backend: CpuBackend) {
         assert_unapplied(session, &restored).await;
         eprintln!("native held checkpoint: backend={} fault_id={fault_id} position={position:?} restored_paused=true applied_before_release=0", label(backend));
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let continued = session.complete(&restored, false, 4, 123).await.unwrap();
+        let continued = session.complete(&restored, false, 123).await.unwrap();
 
         let events = fault_events(session, &restored).await;
         let applied: Vec<_> = events.iter().filter(|(_, status)| *status == FaultStatus::Applied).map(|(id, _)| *id).collect();

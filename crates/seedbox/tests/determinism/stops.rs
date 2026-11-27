@@ -3,11 +3,14 @@
 use crate::session::{err, within, Session};
 use crate::trace::{same_output, Record};
 use crate::Outcome;
-use seedbox_api::{ComparisonStatus, ControlCommand, SimulationId};
-use seedbox_artifacts::record::RunRecord;
+use seedbox_api::{ControlCommand, SimulationId};
 
 /// Quanta a stepped run takes, one host step each, before it plays to the end.
 const STEPS: usize = 20;
+/// The stop policy seeds of the two runs [`Session::stop_invariance`] makes.
+const STOP_SEEDS: [u64; 2] = [4242, 4243];
+/// How a worker's stderr notice that it turned timed inboxes off ends.
+const TIMED_INBOX_OFF: &str = "Driver timed inboxes off";
 
 impl Session {
     // ---- QuantumInvariance --------------------------------------------------------
@@ -31,24 +34,23 @@ impl Session {
 
     // ---- StopPolicyInvariance -----------------------------------------------------
 
-    /// In a server whose runs take a stop policy, each run ends its rounds at
-    /// times seeded by its own output directory, so two runs of the baseline's
-    /// definition stop differently from each other and from the Driver's own
-    /// rounds, whose barrier counts after each of the first steps are
-    /// `reference`. Each must have the results of the baseline, which an
-    /// earlier server ran: its retained record gives its outcome, witness,
-    /// full state and fault history, and `output` is what it wrote. Each
-    /// must also have run with the performance parameters in `also`, which
-    /// the baseline did not.
+    /// Two runs of the baseline's definition whose submissions name stop
+    /// policy seeds end their rounds at times drawn from them, so they stop
+    /// differently from each other and from the Driver's own rounds, whose
+    /// barrier counts after each of the first steps are `reference`. Each
+    /// must match the baseline and write its output. Unless `timed`, the
+    /// submissions also turn timed inboxes off (`noTimedInbox`), which are
+    /// on by default and in the baseline, so that each machine runs once
+    /// per frame arrival.
     pub async fn stop_invariance(
         &self,
-        baseline: (&SimulationId, &RunRecord),
+        baseline: &SimulationId,
         output: &[Record],
         reference: &[u64],
-        also: &[(&str, &str)],
+        timed: bool,
     ) -> Outcome {
-        let (first, first_counts) = self.stepped().await?;
-        let (second, second_counts) = self.stepped().await?;
+        let (first, first_counts) = self.stepped(Some(STOP_SEEDS[0]), timed).await?;
+        let (second, second_counts) = self.stepped(Some(STOP_SEEDS[1]), timed).await?;
         // Without a policy every run commits at the same barriers. A policy
         // only adds barriers, so one that acted shows more, and two runs
         // seeded apart show different ones.
@@ -59,63 +61,26 @@ impl Session {
                  {first_counts:?} and {second_counts:?}, and the Driver's own {reference:?}"
             ));
         }
-        let policy = seedbox_driver_execution::driver_world::STOP_POLICY;
-        if baseline.1.performance_parameters.contains_key(policy) {
-            return Err(format!(
-                "the baseline {} ran with a stop policy",
-                baseline.0
-            ));
+        for (run, seed) in [(&first, STOP_SEEDS[0]), (&second, STOP_SEEDS[1])] {
+            // The worker names the seed it drew its stops from, which shows it
+            // took the policy; submitting the seed again repeats the stops.
+            self.stop_seed(run, seed, timed)?;
+            let checked = async {
+                self.same_results(baseline, run).await?;
+                same_output(output, &self.logs(run).await?)
+                    .map_err(|e| format!("differs from the baseline's output:\n{e}"))
+            };
+            checked
+                .await
+                .map_err(|error| format!("{run}, stopped by policy seed {seed}: {error}"))?;
         }
-        if let Some((key, _)) = also
-            .iter()
-            .find(|(key, _)| baseline.1.performance_parameters.contains_key(*key))
-        {
-            return Err(format!("the baseline {} ran with {key}", baseline.0));
-        }
-        // Each worker names the seed its stops came from; a failure repeats
-        // it, so that the run's stops can be had again.
-        let seeds = format!("{}\n{}", self.stop_seed(&first)?, self.stop_seed(&second)?);
-        let checked = async {
-            for run in [&first, &second] {
-                // The policy runs' own server cannot compare them with a run
-                // of an earlier server, so the retained records are compared:
-                // the same comparison, on the same evidence. All three ran
-                // the one resolved document, so their inputs are the same.
-                let record = self.record(run)?;
-                if !record.performance_parameters.contains_key(policy) {
-                    return Err(format!("{run} ran without a stop policy"));
-                }
-                for &(key, value) in also {
-                    if record.performance_parameters.get(key).map(String::as_str) != Some(value) {
-                        return Err(format!("{run} ran without {key}={value}"));
-                    }
-                }
-                let comparison = seedbox_artifacts::record::compare(baseline, (run, &record));
-                if comparison.status != ComparisonStatus::Match
-                    || !comparison.outcome_matches
-                    || comparison.witness_matches != Some(true)
-                    || comparison.full_state_matches != Some(true)
-                    || !comparison.fault_history_matches
-                {
-                    return Err(format!(
-                        "{run}, stopped by a policy, differs from the baseline: {comparison:?}"
-                    ));
-                }
-                same_output(output, &self.logs(run).await?).map_err(|e| {
-                    format!("{run}, stopped by a policy, differs from the baseline's output:\n{e}")
-                })?;
-            }
-            // The server's own comparison of the two, which also checks that
-            // their definitions compare.
-            self.same_results(&first, &second).await
-        };
-        checked.await.map_err(|error| format!("{error}\n{seeds}"))
+        self.same_results(&first, &second).await
     }
 
-    /// What the run's worker said of its stop policy, from its retained
-    /// stderr: the seed it drew its stops from, with which another run
-    /// repeats them.
-    fn stop_seed(&self, id: &SimulationId) -> Result<String, String> {
+    /// Check that the run's worker said, on its retained stderr, that it drew
+    /// its stops from `seed`, and unless `timed`, that it turned timed
+    /// inboxes off.
+    fn stop_seed(&self, id: &SimulationId, seed: u64, timed: bool) -> Outcome {
         let said = self.cli(&[
             "show",
             &id.to_string(),
@@ -124,19 +89,41 @@ impl Session {
             "--file",
             "vmm.stderr",
         ])?;
-        String::from_utf8_lossy(&said)
-            .lines()
-            .find(|line| line.contains("stop policy seed"))
-            .map(|line| format!("{id}: {line}"))
-            .ok_or_else(|| format!("{id}: its worker named no stop policy seed"))
+        let said = String::from_utf8_lossy(&said);
+        let notice = format!("Driver stop policy seed {seed}");
+        if !said.lines().any(|line| line.ends_with(&notice)) {
+            return Err(format!(
+                "{id}: its worker did not name stop policy seed {seed}"
+            ));
+        }
+        let untimed = said.lines().any(|line| line.ends_with(TIMED_INBOX_OFF));
+        if untimed == timed {
+            return Err(format!(
+                "{id}: its worker {} timed inboxes off",
+                if timed { "turned" } else { "did not turn" }
+            ));
+        }
+        Ok(())
     }
 
-    /// Run the definition paused, step its first [`STEPS`] quanta, then play
-    /// it to the end. Returns the run and how many barriers its Driver had
-    /// committed after each step: a host count, which only a stop policy
-    /// changes.
-    pub async fn stepped(&self) -> Result<(SimulationId, Vec<u64>), String> {
-        let id = self.submit(&self.document, true).await?;
+    /// Run the definition paused, its submission naming `stop_policy` and,
+    /// unless `timed`, turning timed inboxes off, step its first [`STEPS`]
+    /// quanta, then play it to the end. Returns the run and how many barriers
+    /// its Driver had committed after each step: a host count, which only a
+    /// stop policy changes.
+    pub async fn stepped(
+        &self,
+        stop_policy: Option<u64>,
+        timed: bool,
+    ) -> Result<(SimulationId, Vec<u64>), String> {
+        let mut document = self.document.clone();
+        if let Some(seed) = stop_policy {
+            document["options"]["stopPolicy"] = seed.into();
+        }
+        if !timed {
+            document["options"]["noTimedInbox"] = true.into();
+        }
+        let id = self.submit(&document, true).await?;
         self.live(&id).await?;
         let mut counts = Vec::with_capacity(STEPS);
         for _ in 0..STEPS {

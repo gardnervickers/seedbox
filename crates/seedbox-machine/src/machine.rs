@@ -3,11 +3,11 @@
 use crate::{clock::Clock, execution::ExecutionConfig, rng::RngStream};
 
 /// Dependencies supplied for one stopped execution interval.
-/// Worker resources belong to the executing worker; clock and RNG belong to
-/// the driver. The execution rate is a copied driver-owned setting. The clock
+/// `worker` is the host execution context of the thread that steps the
+/// Driver; clock and RNG belong to the driver. The execution rate is a copied driver-owned setting. The clock
 /// reads this machine's time base, which the Driver maps to simulation time;
 /// the mapping itself is never exposed to or captured by the machine.
-/// The RNG cursor follows the machine, independently of the worker.
+/// The RNG cursor follows the machine, independently of the host context.
 pub struct RunContext<'a, C> {
     pub worker: &'a mut C,
     pub clock: &'a dyn Clock,
@@ -82,7 +82,8 @@ pub trait SplitRun<C, E> {
     fn ready(&mut self) -> bool;
 
     /// Subscribe this run to one park on the shared reply doorbell. The
-    /// returned descriptor remains live until finish and signals worker exit.
+    /// returned descriptor remains live until finish and signals the VM
+    /// process's exit.
     fn watch_reply(&mut self, _ticket: u64) -> Option<std::os::fd::RawFd> {
         None
     }
@@ -92,7 +93,7 @@ pub trait SplitRun<C, E> {
 }
 
 pub trait Machine {
-    /// Worker-local host resources required to execute this machine. They contain
+    /// Host resources of the executing thread required to run this machine. They contain
     /// no persistent simulation dependencies and need not implement Send.
     type Context;
     type Error;
@@ -105,7 +106,7 @@ pub trait Machine {
     ///
     /// This call is synchronous: it returns with execution stopped. The machine
     /// retains its execution state for a later call; `context` supplies the
-    /// compatible worker's execution resources and borrows driver-owned simulation
+    /// host execution context and borrows driver-owned simulation
     /// dependencies for this call. The machine must not retain those borrows.
     /// Initialization, including boot entropy, occurs through this context on
     /// the first run after construction or reboot. Initialization may occur with
@@ -166,6 +167,18 @@ pub trait Machine {
     /// nothing, and leaves no trace of `upto` in the stopped machine; the
     /// next call that starts there, with nothing to deliver, adopts nothing.
     ///
+    /// A machine reports [`StopReason::Blocked`] at the point where all its
+    /// work becomes blocked, even when its deadline is at or before `upto`.
+    /// It never runs its own deadline work past an idle point within one
+    /// call: work that a wakeup at `t` starts is executed only by a call that
+    /// starts at `t`, or by one during which the machine stayed runnable
+    /// through `t`. Otherwise an input or stop the caller applies at `t`
+    /// would come before that work in one schedule and after it in another.
+    /// A run given a timed inbox is the one exception: it stands for the
+    /// calls the caller would make from each frame time and each wake before
+    /// `upto`, and may go on from a block at such a wake as a call starting
+    /// there would. The caller applies nothing else inside that run.
+    ///
     /// # Handling the result
     ///
     /// - [`StopReason::BoundaryReached`]: the machine reached `upto` and is
@@ -222,17 +235,6 @@ pub trait Machine {
         }
     }
 
-    /// Every instance of this type supplies a split run. A Driver for this
-    /// concrete type needs only the coordinator's execution context, including
-    /// for evidence reads. A wrapper containing different backends can instead
-    /// select its context count when it selects the backend.
-    fn always_split() -> bool
-    where
-        Self: Sized,
-    {
-        false
-    }
-
     /// Whether the machine honours a timed inbox given through its run's
     /// context (see [`Machine::run`]). The default does not, and its runs
     /// are never given one.
@@ -265,7 +267,7 @@ pub trait Machine {
     /// disk state (both durable and volatile), pending lifecycle transitions,
     /// and all remaining execution state needed to resume from the capture point.
     ///
-    /// Worker resources and dependencies supplied through [`RunContext`] are not
+    /// Host resources and dependencies supplied through [`RunContext`] are not
     /// captured as configuration authority. Execution progress and already-charged
     /// work caches are captured; the caller supplies the matching execution
     /// configuration again at restore. RNG continuation belongs

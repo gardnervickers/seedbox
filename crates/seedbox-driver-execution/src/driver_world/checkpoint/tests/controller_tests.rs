@@ -24,7 +24,6 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
         let mut source = Driver::new_seeded(
             Timestamp::from_nanos(0),
             Duration::from_nanos(10),
-            1,
             9338,
             || Ok(()),
             definition("oracle"),
@@ -88,12 +87,10 @@ fn codec5_service_envelope_preserves_controller_and_disabled_authority() {
             .unwrap()
             .validate_saved(checkpoint.controller_setup())
             .unwrap_err();
-        for workers in [1, 4] {
-            let mut branch = restored(&checkpoint, workers);
-            authority.validate_saved(branch.controller_setup()).unwrap();
-            assert!(branch.drain_observations().events.is_empty());
-            branch.step(Timestamp::from_nanos(20)).unwrap();
-            assert_eq!(session_events(branch.drain_observations().events), expected);
-        }
+        let mut branch = restored(&checkpoint);
+        authority.validate_saved(branch.controller_setup()).unwrap();
+        assert!(branch.drain_observations().events.is_empty());
+        branch.step(Timestamp::from_nanos(20)).unwrap();
+        assert_eq!(session_events(branch.drain_observations().events), expected);
     }
 }

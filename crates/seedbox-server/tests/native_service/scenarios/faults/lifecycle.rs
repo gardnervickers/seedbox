@@ -97,14 +97,14 @@ pub async fn pv_lifecycle_replay(pair: LifecyclePair) {
         let session = owner.session(CpuBackend::Pv);
         let request = cpu_request(session);
         let baseline_delta = if pair.pauses() {
-            let baseline = session.submit(request.clone(), 1).await;
+            let baseline = session.submit(request.clone()).await;
             session.worker(&baseline).await;
-            session.complete(&baseline, false, 1, SEED).await.unwrap();
+            session.complete(&baseline, false, SEED).await.unwrap();
             Some(delta(&session.stdout(&baseline, TARGET, false).await))
         } else { None };
         let mut paused = request;
         paused.options.start_paused = true;
-        let source = session.submit(paused, 1).await;
+        let source = session.submit(paused).await;
         session.worker(&source).await;
         session.control(&source, "lifecycle-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let ready = until_output(session, &source, "START=").await;
@@ -152,13 +152,13 @@ pub async fn pv_lifecycle_replay(pair: LifecyclePair) {
         let expected_boots = if matches!(pair, LifecyclePair::CrashReboot) { vec![original_boot, original_boot.checked_add(1).unwrap()] } else { vec![original_boot] };
         assert_eq!(boots, expected_boots, "application restart is not a machine reboot");
         session.control(&source, "lifecycle-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let witness = session.complete(&source, false, 1, SEED).await.unwrap();
+        let witness = session.complete(&source, false, SEED).await.unwrap();
         applied_once(session, &source, &[interrupted, recovered]).await;
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "lifecycle-replay".into(), spec: resource.spec }, 1).await;
+        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "lifecycle-replay".into(), spec: resource.spec }).await;
         session.worker(&replay).await;
-        assert_eq!(session.complete(&replay, false, 1, SEED).await.unwrap(), witness);
+        assert_eq!(session.complete(&replay, false, SEED).await.unwrap(), witness);
         assert_eq!(target_log(session, &replay).await, (output.clone(), boots));
         applied_once(session, &replay, &[interrupted, recovered]).await;
         let compared = session.client.compare(&source, &replay).await.unwrap();

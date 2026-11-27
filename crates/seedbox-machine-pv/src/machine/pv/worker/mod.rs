@@ -37,6 +37,8 @@ use std::{
 };
 #[cfg(test)]
 mod resource_tests;
+#[cfg(test)]
+mod timed_tests;
 
 type Result<T> = std::result::Result<T, String>;
 // Seedbox PV v3 shared-page ABI. Guest advances LAST while executing; a stopped
@@ -530,10 +532,13 @@ impl<B: Backend> Machine<B> {
             let resume = match stop {
                 // It reached the next frame's time.
                 Stop::Horizon => next.filter(|&at| at == self.state.now),
+                // An expired wake goes back to the client, which refuses
+                // it as it would after any run.
+                Stop::Blocked(Some(wake)) if wake <= self.state.now => None,
                 // Idle: the client would run it again from its wake, or
                 // from the next frame, which wakes it.
                 Stop::Blocked(wake) => {
-                    let wake = wake.filter(|&wake| wake > self.state.now && wake < upto);
+                    let wake = wake.filter(|&wake| wake < upto);
                     match (wake, next) {
                         (Some(wake), Some(at)) => Some(wake.min(at)),
                         (wake, at) => wake.or(at),
@@ -798,7 +803,9 @@ impl<B: Backend> Machine<B> {
             }
             // An idle guest blocks whether or not the run ends at this time:
             // were it to stop at the horizon instead, the next run would enter
-            // it again and add an idle exit no other schedule has (C3).
+            // it again and add an idle exit no other schedule has (C3). It
+            // blocks even when its wake is before `upto`, so only a run that
+            // starts at the wake takes it (the `Machine::run` contract).
             if effect.idle && self.quiet() {
                 self.state.idle = true;
                 self.finish_stop()?;

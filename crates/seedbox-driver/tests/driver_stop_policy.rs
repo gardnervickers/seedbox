@@ -98,7 +98,10 @@ fn property(session: u32, seq: u64, record: &str) -> Response {
 type Seen = Arc<Mutex<Vec<String>>>;
 
 /// Emits its script at machine times, blocking on a timer until the next
-/// entry unless it is busy. It echoes each frame it receives one nanosecond
+/// entry unless it is busy. Like PV and TCG machines, an idle one blocks
+/// where it goes idle: a run emits only what is due at its start and
+/// returns `Blocked` with its next entry as the deadline, even when that is
+/// before `upto`, so the Driver starts the run that executes it. It echoes each frame it receives one nanosecond
 /// later, with a body drawn from its RNG stream, when it has an echo target.
 /// When it acknowledges, it acknowledges each guest command one nanosecond
 /// after taking it: a realtime step by an odd number of nanoseconds is
@@ -178,14 +181,14 @@ impl Script {
         }
     }
 
-    /// One run from `start` to `end` at most, having taken the inputs due
+    /// One run from `start` to `bound` at most, having taken the inputs due
     /// at `start`.
     fn segment(
         &mut self,
         context: &mut RunContext<'_, ()>,
         seen: &mut Vec<String>,
         start: u64,
-        end: u64,
+        bound: u64,
     ) -> StopReason {
         if self.exited {
             return StopReason::Exited {
@@ -199,7 +202,10 @@ impl Script {
                 deadline: None,
             };
         }
-        let late = self.late_exit;
+        // A busy machine runs to `bound`; an idle one goes idle at `start`,
+        // once what is due there is done.
+        let end = if self.busy { bound } else { start };
+        let late = self.late_exit && end == bound;
         let exit = self
             .exit
             .filter(|&exit| exit < end || !late && exit == end)
@@ -501,7 +507,6 @@ fn run_as(
     let mut driver = Driver::new_seeded(
         at(0),
         quantum,
-        2,
         7,
         || Ok(()),
         definitions[0].clone(),
@@ -643,9 +648,10 @@ fn differences(own: &Results, other: &Results) -> Vec<String> {
 /// with every other quantum, and with split machines under the Driver's own
 /// stops and every policy seed; then with timed inboxes, lent and split,
 /// under the Driver's own stops and every policy seed. Returns the results
-/// under the Driver's own stops, and what differed from them in each other
-/// run.
-fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
+/// under the Driver's own stops, what differed from them in each other run,
+/// and whether a timed inbox took a frame inside a run, where any frame was
+/// delivered.
+fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>, bool) {
     let (own, own_barriers) = run(scenario, None);
     let mut found = Vec::new();
     for seed in SEEDS {
@@ -695,21 +701,19 @@ fn compare(scenario: &Scenario) -> (Results, Vec<(String, Vec<String>)>) {
         .flatten()
         .any(|seen| seen.contains("ReceiveFrame"));
     // A machine held at a breakpoint takes its frames in zero-budget runs.
-    assert!(
-        taken > 0 || !frames || scenario.breaks,
-        "no frame was taken inside a run"
-    );
-    (own, found)
+    let timed = taken > 0 || !frames || scenario.breaks;
+    (own, found, timed)
 }
 
 /// Assert that no stop policy changes the scenario's results, and that its
 /// machines observed at least `at_least` things. Returns the results.
 fn holds(scenario: Scenario, at_least: usize) -> Results {
-    let (own, found) = compare(&scenario);
+    let (own, found, timed) = compare(&scenario);
     assert!(
         found.is_empty(),
         "stops or quantum changed results: {found:#?}"
     );
+    assert!(timed, "no frame was taken inside a run");
     let observed: usize = own.seen.iter().map(Vec::len).sum();
     assert!(
         observed >= at_least,
@@ -1590,5 +1594,168 @@ fn a_timer_under_a_fast_clock_does_not_depend_on_stops() {
             breaks: false,
         },
         1,
+    );
+}
+
+/// [`holds`], and the same results again when the host asks for one extra
+/// barrier at each of `barriers`, with lent and with split machines, with
+/// and without timed inboxes. Its frames may all arrive at barriers, so
+/// that no timed inbox takes one inside a run.
+fn holds_with_barriers(scenario: Scenario, at_least: usize, barriers: &[u64]) -> Results {
+    let (own, mut found, _) = compare(&scenario);
+    for &barrier in barriers {
+        for (split, timed) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (other, _, _) = run_as(&scenario, None, QUANTUM, &[barrier], split, timed);
+            let differences = differences(&own, &other);
+            if !differences.is_empty() {
+                found.push((
+                    format!("barrier {barrier}, split {split}, timed {timed}"),
+                    differences,
+                ));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "stops or quantum changed results: {found:#?}"
+    );
+    let observed: usize = own.seen.iter().map(Vec::len).sum();
+    assert!(
+        observed >= at_least,
+        "scenario exercised {observed} observations, wanted {at_least}"
+    );
+    own
+}
+
+/// An idle machine, m2, woken shortly before `t` by a frame, with its own
+/// work due at `t`, the time of the timeline items `inputs`. The items come
+/// first in every schedule, whether or not a stop falls between the frame
+/// and `t`, because the machine blocks when it goes idle and only a run that
+/// starts at `t` executes its instant `t`.
+fn timer_at_items(t: u64, inputs: Vec<(u64, &'static str, Action)>) -> Scenario {
+    Scenario {
+        machines: vec![
+            // One frame to m2, arriving at t - 30 us.
+            Spec::busy().emit(
+                t - 130 * US,
+                Response::TransmitFrame {
+                    bytes: frame(mac(2), ECHO_LIMIT, b"x"),
+                },
+            ),
+            Spec::busy().echo(mac(2)),
+            Spec::idle()
+                .emit(
+                    t,
+                    Response::TransmitFrame {
+                        bytes: frame(mac(1), 0, b"y"),
+                    },
+                )
+                .emit(t, call(7, "now"))
+                .emit(t + 5 * US, call(8, "now")),
+        ],
+        network: NetworkConfig::new(Duration::from_micros(100), Duration::ZERO, 0)
+            .unwrap()
+            .into(),
+        inputs,
+        end: 15 * MS,
+        breaks: false,
+    }
+}
+
+/// The barriers just before a timer at `t` that once let a stop move a
+/// timeline item at `t` ahead of the timer, or behind it.
+fn just_before(t: u64) -> [u64; 3] {
+    [t - 29 * US, t - 20 * US, t - 1]
+}
+
+/// The times m2 made its `now` calls, from what it emitted.
+fn calls_at(results: &Results) -> Vec<u64> {
+    results.seen[2]
+        .iter()
+        .filter(|seen| seen.starts_with("out ") && seen.contains("SimulationControl"))
+        .map(|seen| seen.split(' ').nth(1).unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_timer_at_a_crash_does_not_depend_on_stops() {
+    let t = 2 * MS - 100;
+    let crash = Action::Crash(Target::Name("m2".into()));
+    let own = holds_with_barriers(
+        timer_at_items(t, vec![(t, "crash", crash)]),
+        4,
+        &just_before(t),
+    );
+    // The crash at t comes before the machine's own instant t.
+    assert!(own.seen[2].last().unwrap().ends_with("Crash"));
+    assert_eq!(calls_at(&own), Vec::<u64>::new());
+}
+
+#[test]
+fn a_timer_at_a_pause_does_not_depend_on_stops() {
+    let t = 2 * MS - 100;
+    let m2 = || Target::Name("m2".into());
+    let resume = t + MS;
+    let own = holds_with_barriers(
+        timer_at_items(
+            t,
+            vec![
+                (t, "pause", Action::Pause(m2())),
+                (resume, "resume", Action::Resume(m2())),
+            ],
+        ),
+        6,
+        &just_before(t),
+    );
+    // The pause at t comes first: the timer's work waits for the resume.
+    assert_eq!(calls_at(&own), [resume, resume]);
+}
+
+#[test]
+fn a_timer_at_a_partition_does_not_depend_on_stops() {
+    let t = 2 * MS - 100;
+    let m = |n: usize| Target::Name(format!("m{n}"));
+    let partition = Action::Partition {
+        left: vec![m(2)],
+        right: vec![m(1)],
+    };
+    let own = holds_with_barriers(
+        timer_at_items(t, vec![(t, "cut", partition)]),
+        6,
+        &just_before(t),
+    );
+    // The partition at t comes first, so m2's frame sent at t is dropped.
+    assert_eq!(calls_at(&own), [t, t + 5 * US]);
+    assert_eq!(fates(&own, "PartitionDropped"), 1);
+}
+
+#[test]
+fn a_timer_at_the_end_of_the_run_does_not_depend_on_stops() {
+    let end = 15 * MS;
+    let outcome = 4 * MS + 123;
+    // The run ends one latency after the oracle's outcome.
+    let finish = outcome + 100 * US;
+    let own = holds_with_barriers(
+        Scenario {
+            machines: vec![
+                Spec::busy()
+                    .every(13 * US, 397 * US, end, BROADCAST, 0)
+                    .emit(outcome, Response::ApplicationOutcome { code: 3 }),
+                Spec::busy().echo(mac(0)),
+                Spec::idle()
+                    .every(97 * US + 1, 331 * US, end, mac(1), 20)
+                    .emit(finish, call(9, "now")),
+            ],
+            network: jittery(),
+            inputs: Vec::new(),
+            end,
+            breaks: false,
+        },
+        40,
+        &[finish - 50 * US, finish - 10 * US, finish - 1],
+    );
+    assert_eq!(
+        own.outcome,
+        format!("Finished {{ at: Timestamp({finish}), reason: ProgramExit {{ code: 3 }} }}")
     );
 }

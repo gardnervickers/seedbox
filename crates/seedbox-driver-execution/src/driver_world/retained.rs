@@ -422,22 +422,6 @@ pub(crate) fn request(
         resolved.validate().map_err(bad)?;
         *policy = Some(resolved);
     }
-    // Report a bad worker option only after mapping and import errors.
-    let workers = request
-        .performance_parameters
-        .get("SEEDBOX_MACHINE_WORKERS")
-        .map_or(Ok(1), |value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| bad("invalid Driver machine worker count"))
-        })
-        .and_then(|workers| {
-            if (1..=64).contains(&workers) {
-                Ok(workers)
-            } else {
-                Err(bad("Driver machine worker count must be in 1..64"))
-            }
-        });
     // Point each input at the bound runtime's file or this run's materialized
     // copy. Both were hashed before this request, so neither is hashed again.
     visit(&mut prepared, |artifact| {
@@ -475,21 +459,6 @@ pub(crate) fn request(
             machine.filesystem = super::boot::retain_view(&bytes, request.output)?;
         }
     }
-    let workers = workers?;
-    let output = request.output.join(crate::execution::MACHINE_OUTPUT_DIR);
-    let stop_policy = request
-        .performance_parameters
-        .get(super::STOP_POLICY)
-        .map(|value| {
-            super::executor::stop_seed(value, &output)
-                .ok_or_else(|| bad("invalid Driver stop policy seed"))
-        })
-        .transpose()?;
-    let no_timed_inbox = match request.performance_parameters.get(super::TIMED_INBOX) {
-        None => false,
-        Some(value) if value == "0" => true,
-        Some(_) => return Err(bad("invalid Driver timed inbox parameter")),
-    };
     super::build::check_program_engine(request.program, &prepared.inventory)?;
     Ok(wire::Request {
         prepared,
@@ -497,10 +466,9 @@ pub(crate) fn request(
         seed: request.seed,
         program: request.program.to_vec(),
         simulated_time_ns: request.limits.simulated_time_ns,
-        output,
-        machine_workers: workers,
-        stop_policy,
-        no_timed_inbox,
+        output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
+        stop_policy: request.stop_policy,
+        no_timed_inbox: request.no_timed_inbox,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode
             == crate::execution::WitnessMode::FullState,

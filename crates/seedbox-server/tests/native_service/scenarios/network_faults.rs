@@ -74,9 +74,9 @@ async fn applied(session: &NativeSession, id: &seedbox_api::SimulationId) -> Vec
 
 async fn unfaulted(session: &mut NativeSession, backend: CpuBackend) -> Transfer {
     let request = network_submission(backend, session.root.path(), &session.store, SEED);
-    let id = session.submit(request, 1).await;
+    let id = session.submit(request).await;
     session.worker(&id).await;
-    let witness = session.complete(&id, false, 1, SEED).await.unwrap();
+    let witness = session.complete(&id, false, SEED).await.unwrap();
     let timed = session.stdout_timed(&id, "client", false).await;
     let transfer = Transfer {
         begin_ns: marker_time(&timed, PROBE_CLIENT_MID),
@@ -108,9 +108,9 @@ async fn faulted_and_replayed(
         network_submission(backend, session.root.path(), &session.store, SEED),
         inputs,
     );
-    let source = session.submit(request, 1).await;
+    let source = session.submit(request).await;
     session.worker(&source).await;
-    let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
+    let source_witness = session.complete(&source, false, SEED).await.unwrap();
     let world = session.client.world(&source).await.unwrap();
     let timed = session.stdout_timed(&source, "client", false).await;
     assert_eq!(
@@ -134,18 +134,15 @@ async fn faulted_and_replayed(
     let resource = session.client.describe(&source).await.unwrap();
     assert_eq!(resource.spec.program.len(), inputs.len());
     let replay = session
-        .submit(
-            SubmitRequest {
-                metadata: Default::default(),
-                options: Default::default(),
-                request_id: "network-fault-replay".into(),
-                spec: resource.spec,
-            },
-            1,
-        )
+        .submit(SubmitRequest {
+            metadata: Default::default(),
+            options: Default::default(),
+            request_id: "network-fault-replay".into(),
+            spec: resource.spec,
+        })
         .await;
     session.worker(&replay).await;
-    let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
+    let replay_witness = session.complete(&replay, false, SEED).await.unwrap();
     assert_eq!(
         source_witness, replay_witness,
         "raw native witnesses differ"
@@ -403,7 +400,7 @@ pub async fn network_drop_connection_replay(backend: CpuBackend) {
                 true,
             );
             request.options.start_paused = true;
-            let source = session.submit(request, 1).await;
+            let source = session.submit(request).await;
             session.worker(&source).await;
             session
                 .control(&source, "drop-initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused })
@@ -437,7 +434,7 @@ pub async fn network_drop_connection_replay(backend: CpuBackend) {
             session
                 .control(&source, "drop-finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
                 .await;
-            let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
+            let source_witness = session.complete(&source, false, SEED).await.unwrap();
             let oracle = session.stdout(&source, "oracle", false).await;
             let client = session.stdout(&source, "client", false).await;
             assert!(client.ends_with("NETPROBE drop done\n"), "client did not recover: {client}");
@@ -466,11 +463,10 @@ pub async fn network_drop_connection_replay(backend: CpuBackend) {
                         request_id: "drop-connection-replay".into(),
                         spec: resource.spec,
                     },
-                    1,
-                )
+                    )
                 .await;
             session.worker(&replay).await;
-            let replay_witness = session.complete(&replay, false, 1, SEED).await.unwrap();
+            let replay_witness = session.complete(&replay, false, SEED).await.unwrap();
             assert_eq!(source_witness, replay_witness, "raw native witnesses differ");
             for machine in ["oracle", "server", "client"] {
                 assert_eq!(

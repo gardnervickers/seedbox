@@ -16,6 +16,16 @@ pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 pub struct ExecutionRequest<'a> {
     /// Initial host playback state; never part of guest experiment identity.
     pub start_paused: bool,
+    /// Test support only: a seed from which the Driver draws where its rounds
+    /// end, instead of ending them where it needs to. That must change no
+    /// result, so it is never part of the experiment identity. Only a worker
+    /// built with test support takes it
+    /// ([`crate::driver_world::TAKES_TEST_OPTIONS`]); others refuse the run.
+    pub stop_policy: Option<u64>,
+    /// Test support only: give no machine a timed inbox, so that each runs
+    /// once per frame arrival, which must change no result. Only a worker
+    /// built with test support takes it; others refuse the run.
+    pub no_timed_inbox: bool,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
     /// Optional durable semantic-input journal, read after the worker stops.
@@ -39,8 +49,6 @@ pub struct ExecutionRequest<'a> {
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,
     pub output: &'a Path,
     pub cancellation: &'a CancellationToken,
-    /// Recorded per attempt, excluded from semantic identity/profile comparison.
-    pub performance_parameters: &'a BTreeMap<String, String>,
     /// Prepares machines the oracle spawns that `prepared` does not retain.
     /// Without one, such a spawn ends the run with an error.
     pub spawner: Option<&'a dyn Spawner>,
@@ -85,10 +93,6 @@ pub trait ExecutionBackend: Send + Sync {
     }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
-    /// Only knobs whose witness invariance has been qualified belong here.
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        BTreeMap::new()
-    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport>;
     /// Add the machines this attempt's spawns prepared to `inputs`, so a
     /// replay builds them without preparing them again. Returns whether

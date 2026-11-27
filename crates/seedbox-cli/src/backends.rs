@@ -10,7 +10,6 @@ use seedbox_application::{
     Result,
 };
 use std::{
-    collections::BTreeMap,
     ops::{Deref, DerefMut},
     path::Path,
 };
@@ -24,9 +23,6 @@ impl Executor {
 impl ExecutionBackend for Executor {
     fn profile(&self) -> ExecutionProfile {
         self.backend().profile()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        self.backend().performance_parameters()
     }
     fn preflight(&self, out: Option<&Path>) -> Result<()> {
         self.backend().preflight(out)

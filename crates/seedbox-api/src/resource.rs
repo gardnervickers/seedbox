@@ -184,10 +184,18 @@ pub struct ExecutionOptions {
     pub start_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_ns: Option<u64>,
-    /// Threads that run machines within a round. Performance only; never
-    /// part of the simulation identity and never changes results.
+    /// Test support only: the Driver ends its rounds at times drawn from
+    /// this seed instead of its own, which must change no result. Whole-run
+    /// tests set it to check that. A server built without test support
+    /// refuses a submission that names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_workers: Option<u32>,
+    pub stop_policy: Option<u64>,
+    /// Test support only: give no machine a timed inbox, so that each runs
+    /// once per frame arrival instead of taking the frames that arrive
+    /// inside a run, which must change no result. Whole-run tests set it to
+    /// check that. A server built without test support refuses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_timed_inbox: bool,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its
