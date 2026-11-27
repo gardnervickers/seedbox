@@ -24,7 +24,7 @@
 //! reported like power-off. Before the handshake both are setup errors.
 mod backend;
 const ACK_PORT: u16 = 0x500;
-const YIELD_PORT: u16 = 0x501;
+pub(super) const YIELD_PORT: u16 = 0x501;
 const PIC_UNMASK_PORT: u16 = 0x502;
 // Guest-owned pending transaction, not another interrupt controller. Low byte
 // replaces IMR, next byte acknowledges ISR bits, bit 16 marks a publication.
@@ -370,8 +370,18 @@ impl<B: Backend> Machine<B> {
         .into_iter()
         .enumerate()
         {
-            self.page.set_word(VIRTIO_IRQ + slot * 8, status as u64);
+            // Keep an acknowledgement the guest published and the worker has
+            // not consumed yet: a yield at the run's bound leaves it for the
+            // next exit, as a run that went on would (C3).
+            let offset = VIRTIO_IRQ + slot * 8;
+            let ack = self.page.word(offset) & !0xffff_ffff;
+            self.page.set_word(offset, ack | status as u64);
         }
+    }
+    /// x86 delivery never waits for a PV rendezvous, so no yield takes a
+    /// deferred interrupt.
+    pub(super) fn takes_deferred(&mut self) -> Result<bool> {
+        Ok(false)
     }
     /// x86 has no software reservation epoch: rendezvous change no page word.
     pub(super) fn boundary(&mut self) -> Result<()> {

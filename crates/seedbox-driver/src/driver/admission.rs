@@ -31,11 +31,6 @@ pub enum DueOutcome {
         at: Timestamp,
         request: Box<SpawnRequest>,
     },
-    /// Zero-time work committed oracle completion; later work was not dispatched.
-    /// Unconsumed step and arm state is preserved. The host may call `step(at)`
-    /// at this returned time to perform ordinary finished-state cancellation;
-    /// that call performs no machine work.
-    Finished { at: Timestamp, reason: ExitReason },
 }
 
 /// A non-mutating admission projection, not a queued request or allocated ID.
@@ -90,9 +85,7 @@ impl PreparedInput {
 
 impl<M> Barrier<'_, M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Drain all work already due now, bypassing host pacing only for dispatch.
     ///
@@ -129,7 +122,12 @@ where
     /// the same shape rules as schedule at now. Policy rejection is a successful
     /// PreparedOutcome::Rejected, distinct from these outer errors. Only Control
     /// and live-input bookkeeping are cloned, including pending-notice projection
-    /// for Heal(Input). Machines are read-only; no native/factory call, RNG draw
+    /// for Heal(Input), and the network when frames are held at this barrier:
+    /// committing the input commits held output first, so the projection sees
+    /// the connections those frames open or close. A held output that would
+    /// fail that commit (a control call from an unauthorized machine) fails
+    /// the projection with the same error and leaves the Driver unchanged.
+    /// Machines are read-only; no native/factory call, RNG draw
     /// on the source, ID/handle reservation, notice drain or publication occurs.
     /// Dropping a proposal after a journal failure leaves the Driver unchanged.
     /// Readiness, authored cursor, user-handle and checkpoint gates belong to the
@@ -167,13 +165,17 @@ where
         Driver::<M>::check_named_action(&action, handle.as_ref())?;
         let mut control = self.driver.execution.control.clone();
         let mut inputs = self.driver.execution.inputs.clone();
+        // Committing the input first commits the output held here, so the
+        // projection applies it to its copies (C2): of control, of the
+        // machines' bookkeeping and, when frames are held, of the network.
+        let (machines, network) = self.driver.project_held(&mut control)?;
         for notice in control.service.take_notices() {
             Driver::<M>::track_input(&mut inputs, &notice);
         }
         let admitted = Driver::<M>::input_admission_with_handle(
             &mut control,
-            &self.driver.execution.machines,
-            Some(&self.driver.execution.network),
+            &machines,
+            Some(network.as_ref().unwrap_or(&self.driver.execution.network)),
             &inputs,
             &key,
             &action,
@@ -257,6 +259,9 @@ where
             return Err(Error::PreparedInputMismatch);
         }
         let result = (|| {
+            // The input makes this barrier a needed one: output held here
+            // commits first, as the projection assumed (C2).
+            self.driver.need_barrier()?;
             let start = self.driver.observations.published.len();
             self.driver
                 .execution
@@ -302,12 +307,93 @@ where
     }
 }
 
+/// What `project_held` projects: the machines' bookkeeping after the held
+/// output, and the network after the held frames when any is held.
+type Projected = (Vec<Entry<()>>, Option<network::Network>);
+
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
+    /// Copies of the machines' bookkeeping with the output and exits held at
+    /// this barrier applied to them and to `control`, as committing them
+    /// would: held frames routed, then observations, breakpoint hits and
+    /// exits, in commit order. Held frames change what a network admission
+    /// sees (a connection opens or closes when its frame is routed), so they
+    /// are routed through a copy of the network, which is returned; `None`
+    /// when no frame is held and the Driver's own network is unchanged by
+    /// the commit. A held output that would fail the commit fails the
+    /// projection the same way. What held outputs schedule is not projected;
+    /// it is due a floor later.
+    fn project_held(&self, control: &mut control::Control) -> Result<Projected, Error<M::Error>> {
+        let mut machines: Vec<Entry<()>> = self
+            .execution
+            .machines
+            .iter()
+            .map(|entry| entry.with_machine(()))
+            .collect();
+        let mut outputs: Vec<_> = machines
+            .iter_mut()
+            .flat_map(|entry| std::mem::take(&mut entry.staged))
+            .collect();
+        outputs.sort_by_key(|output| (output.at, output.machine));
+        let network = if outputs
+            .iter()
+            .any(|output| matches!(output.payload, Response::TransmitFrame { .. }))
+        {
+            let mut network = self.execution.network.clone();
+            // Frame facts belong to the commit, not to its projection.
+            let mut unobserved = observation::FrameObservations::default();
+            Self::route_into(
+                &mut network,
+                &machines,
+                self.position(),
+                &outputs,
+                &mut unobserved,
+            )?;
+            Some(network)
+        } else {
+            None
+        };
+        let mut exits: Vec<(Timestamp, MachineId)> = machines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry.stopped {
+                StopReason::Exited { reached, .. }
+                    if entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended) =>
+                {
+                    Some((reached, MachineId(index)))
+                }
+                _ => None,
+            })
+            .collect();
+        exits.sort();
+        let mut exits = exits.into_iter().peekable();
+        for output in &outputs {
+            while let Some((reached, id)) =
+                exits.next_if(|&exit| exit < (output.at, output.machine))
+            {
+                let act = self.consequence_of(reached)?;
+                control
+                    .terminal(&mut machines, id, act)
+                    .map_err(Error::Control)?;
+            }
+            let act = self.consequence_of(output.at)?;
+            Self::observe_output(control, &mut machines, output, act)?;
+            Self::check_authorized(control, output)?;
+        }
+        for (reached, id) in exits {
+            let act = self.consequence_of(reached)?;
+            control
+                .terminal(&mut machines, id, act)
+                .map_err(Error::Control)?;
+        }
+        Ok((machines, network))
+    }
+
     /// Same dispatch owners/order as apply_due: timeline, then frames.
     /// Runnable machines are not zero-time work, including those whose timer
     /// is due now or whose arrived frames wait for their next run.
@@ -342,9 +428,7 @@ where
             }
             None => {}
         }
-        if let Some((at, reason)) = self.execution.finished {
-            return Ok(DueOutcome::Finished { at, reason });
-        }
+        // The run ends at least one floor after anything admitted now (C4).
         Ok(DueOutcome::Applied { at: self.now() })
     }
 
@@ -364,9 +448,7 @@ where
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     #[cfg(test)]
     pub(super) fn input_admission(
@@ -380,9 +462,9 @@ where
         Self::input_admission_with_handle(control, machines, None, inputs, key, action, None, now)
     }
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn input_admission_with_handle(
+    pub(super) fn input_admission_with_handle<T>(
         control: &mut control::Control,
-        machines: &[Entry<M>],
+        machines: &[Entry<T>],
         network: Option<&network::Network>,
         inputs: &BTreeMap<InputKey, LiveInput>,
         key: &InputKey,

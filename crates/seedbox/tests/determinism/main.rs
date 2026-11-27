@@ -8,9 +8,7 @@
 //! The last oracles cross a server session: in a second server with a fresh
 //! state directory, fresh resolutions must repeat the first session's output,
 //! and a checkpoint file exported from the first must branch.
-//! The first session's submissions run on 3 machine workers and the second's
-//! at the server's default. A separate test runs references on one
-//! thread, then reruns and branches them with 2, 3 and 8 workers.
+//! A separate test changes the quantum and where the Driver's rounds end.
 //!
 //! Each test prints and records (under `SEEDBOX_TEST_REPORT_DIR/determinism`)
 //! every oracle's verdict and wall time, and on a failure the observations of
@@ -21,10 +19,11 @@
 ))]
 
 mod cross_session;
+mod lifecycle;
 mod oracles;
 mod session;
+mod stops;
 mod trace;
-mod workers;
 
 use seedbox_api::SimulationId;
 use seedbox_spec::definition::Override;
@@ -119,8 +118,8 @@ impl Run {
         Server::start(&self.cli, state)
     }
 
-    fn session(&self, state: &Path, workers: Option<u32>) -> Session {
-        Session::new(&self.cli, state, workers)
+    fn session(&self, state: &Path) -> Session {
+        Session::new(&self.cli, state)
     }
 
     /// Run one oracle, recording its verdict and wall time.
@@ -233,7 +232,7 @@ fn whole_run_determinism_oracles() {
     let state = run.state("state");
     let mut server = Some(run.server(&state).unwrap());
     runtime().block_on(async {
-        let mut session = run.session(&state, Some(3));
+        let mut session = run.session(&state);
         let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
             return;
         };
@@ -291,7 +290,7 @@ fn whole_run_determinism_oracles() {
                 return;
             }
         };
-        let fresh = run.session(&second, None);
+        let fresh = run.session(&second);
         run.oracle("TwinFreshRunsCrossSession", fresh.twin_fresh_runs(&carried))
             .await;
         run.release(fresh.release(&[])).await;
@@ -305,33 +304,89 @@ fn whole_run_determinism_oracles() {
     run.finish();
 }
 
-/// Machine worker count is a submission performance option. References run
-/// on one thread; reruns with 2, 3 and 8 workers (more than the three
-/// machines) must reproduce every one of them exactly.
+/// Lifecycle faults apply and change the run; a controlled, checkpointed
+/// lifecycle run replays from its retained timeline and branches exactly.
+/// Independent fresh reruns of the baseline, lifecycle, controlled and branch
+/// documents then reproduce every result and everything observed.
 #[test]
-fn machine_worker_count_never_changes_results() {
-    let mut run = Run::new("machine-workers");
+fn lifecycle_controls_replay_branch_and_rerun() {
+    let mut run = Run::new("lifecycle");
     let state = run.state("state");
     let server = run.server(&state).unwrap();
     runtime().block_on(async {
-        let mut session = run.session(&state, Some(1));
+        let mut session = run.session(&state);
         let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
             return;
         };
         let Some(references) = run
-            .oracle("references", session.worker_references(&baseline))
+            .oracle("LifecycleControls", session.lifecycle_references(&baseline))
             .await
         else {
             return;
         };
-        for workers in [2, 3, 8] {
+        run.oracle("FreshReruns", session.fresh_reruns(&references))
+            .await;
+    });
+    drop(server);
+    run.finish();
+}
+
+/// The quantum and where the Driver's rounds end are host settings. Runs of
+/// the baseline's definition with quanta of 250 µs and 4 ms (the baseline's is
+/// 1 ms) must match it. A run stepped through its first quanta must match it
+/// too. Then two runs whose submissions name stop policy seeds (`stopPolicy`,
+/// which only the long suites' test-support CLI build accepts) end their
+/// rounds at their own seeded times. Each must match the baseline, write its
+/// output and match the other, and both commit more barriers while stepping
+/// than the run without a policy, at different counts, which shows that the
+/// policy acted. Two more runs do the same with timed inboxes, which are on
+/// by default, turned off (`noTimedInbox`, which only that build accepts):
+/// each machine then runs once per frame arrival.
+#[test]
+fn stops_and_quantum_never_change_results() {
+    let mut run = Run::new("stops");
+    let state = run.state("state");
+    let server = run.server(&state).unwrap();
+    runtime().block_on(async {
+        let mut session = run.session(&state);
+        let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
+            return;
+        };
+        for quantum in [250_000, 4_000_000] {
             run.oracle(
-                &format!("MachineWorkerInvariance({workers} workers)"),
-                session.worker_invariance(workers, &references),
+                &format!("QuantumInvariance({quantum} ns)"),
+                session.quantum_invariance(&baseline, quantum),
             )
             .await;
-            run.release(session.release(&references.ids())).await;
+            run.release(session.release(&[&baseline])).await;
         }
+        // A run stepped a quantum at a time must match too; the barriers its
+        // Driver commits on the way are its own.
+        let Some((output, reference)) = run
+            .oracle("StepInvariance", async {
+                let (stepped, counts) = session.stepped(None, true).await?;
+                session.same_results(&baseline, &stepped).await?;
+                Ok((session.logs(&baseline).await?, counts))
+            })
+            .await
+        else {
+            return;
+        };
+        run.release(session.release(&[&baseline])).await;
+        run.oracle(
+            "StopPolicyInvariance",
+            session.stop_invariance(&baseline, &output, &reference, true),
+        )
+        .await;
+        run.release(session.release(&[&baseline])).await;
+        // Under the same seeded stops without timed inboxes, each machine
+        // runs once per frame arrival.
+        run.oracle(
+            "TimedInboxInvariance",
+            session.stop_invariance(&baseline, &output, &reference, false),
+        )
+        .await;
+        run.release(session.release(&[])).await;
     });
     drop(server);
     run.finish();
@@ -346,7 +401,7 @@ fn full_state_evidence_of_stopped_machines() {
     let state = run.state("state");
     let server = run.server(&state).unwrap();
     runtime().block_on(async {
-        let mut session = run.session(&state, Some(1));
+        let mut session = run.session(&state);
         let Some(baseline) = run.oracle("baseline", session.baseline()).await else {
             return;
         };
@@ -357,7 +412,7 @@ fn full_state_evidence_of_stopped_machines() {
         })
         .await;
         run.oracle("crash and reboot with full state", async {
-            let lifecycle = workers::lifecycle_document(&session.document)?;
+            let lifecycle = lifecycle::lifecycle_document(&session.document)?;
             let first = session.submit(&lifecycle, false).await?;
             session.complete(&first).await?;
             let second = session.submit(&lifecycle, false).await?;

@@ -21,7 +21,11 @@ pub enum PreparationStage {
 pub struct SimulationEvent {
     pub simulation: crate::SimulationId,
     pub revision: u64,
-    /// Absent before execution or when no guest position is known.
+    /// Absent before execution or when no guest position is known. An engine
+    /// fact, and a lifecycle change one causes (booting ends when the
+    /// application is ready; the oracle exits), carries the fact's simulated
+    /// time and keeps its place in the fact stream. Host actions (stop,
+    /// deletion) carry the position the server last sampled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulated_time_ns: Option<u64>,
     /// Exact committed boundary when provided by the observed operation.

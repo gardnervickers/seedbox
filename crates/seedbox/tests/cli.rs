@@ -358,7 +358,13 @@ fn seed_range_bounds_and_help_are_public_before_runtime_inputs_or_state() {
         &project,
     );
     assert_eq!(stderr(&overflow), "error: seed range overflows u64\n");
-    for flag in ["--workers", "--cpu", "--runtime-assets", "--watchdog-ms"] {
+    for flag in [
+        "--workers",
+        "--machine-workers",
+        "--cpu",
+        "--runtime-assets",
+        "--watchdog-ms",
+    ] {
         let output = seedbox(&["run", flag, "1"], &project);
         assert_eq!(output.status.code(), Some(2));
         assert!(stderr(&output).contains("unexpected argument"));
@@ -369,6 +375,7 @@ fn seed_range_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     assert!(text.contains("--count") && text.contains("--detach") && text.contains("--json"));
     assert!(text.contains("--paused"));
     assert!(!text.contains("--workers"));
+    assert!(!text.contains("--machine-workers"));
     assert!(!project.join(".seedbox").exists());
 }
 
@@ -802,26 +809,24 @@ fn capacity_help_explains_resident_slots_and_accepts_json() {
 }
 
 #[test]
-fn machine_workers_is_a_bounded_execution_option() {
+fn machine_workers_is_neither_an_option_nor_a_project_field() {
     let root = tempfile::tempdir().unwrap();
     for command in ["run", "replay"] {
         let help = seedbox(&[command, "--help"], root.path());
         assert!(help.status.success(), "{command}: {}", stderr(&help));
         let text = String::from_utf8_lossy(&help.stdout);
-        assert!(text.contains("--machine-workers"), "{command}: {text}");
-        for workers in ["0", "65"] {
-            let output = seedbox(
-                &[command, "k7m2p9qx", "--machine-workers", workers],
-                root.path(),
-            );
-            assert_eq!(output.status.code(), Some(2), "{command} {workers}");
-            assert!(output.stdout.is_empty());
-            assert!(
-                stderr(&output).contains("--machine-workers"),
-                "{command} {workers}: {}",
-                stderr(&output)
-            );
-        }
+        assert!(!text.contains("--machine-workers"), "{command}: {text}");
+        let output = seedbox(
+            &[command, "k7m2p9qx", "--machine-workers", "4"],
+            root.path(),
+        );
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains("unexpected argument '--machine-workers'"),
+            "{command}: {}",
+            stderr(&output)
+        );
     }
     let project = root.path().join("seedbox.yaml");
     fs::write(

@@ -4,11 +4,7 @@ use crate::pv::Request;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub(super) fn configured(
-    specs: Vec<State>,
-    setting: Option<Option<MachineId>>,
-    workers: usize,
-) -> Driver<Mock> {
+pub(super) fn configured(specs: Vec<State>, setting: Option<Option<MachineId>>) -> Driver<Mock> {
     let network = NetworkConfig::new(Duration::from_nanos(2), Duration::ZERO, 0).unwrap();
     let mut setup: NetworkSetup = network.into();
     if let Some(controller) = setting {
@@ -21,7 +17,6 @@ pub(super) fn configured(
     Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        workers,
         51,
         || Ok(Context(None)),
         driver::fixture::definition(0),
@@ -57,9 +52,16 @@ fn explicit_disabled_and_noncontroller_calls_poison_without_admission() {
     for (setting, source) in [(None, 0), (Some(MachineId(0)), 1)] {
         let mut specs = vec![spec(0, true, vec![]), spec(1, true, vec![])];
         specs[source].sends.push_back((2, call(1, r#""op":"now""#)));
-        let mut d = configured(specs, Some(setting), 4);
+        let mut d = configured(specs, Some(setting));
+        // The call at 2 is committed once no machine can emit before it.
+        let outcome = loop {
+            match d.step(at(10)) {
+                Ok(StepOutcome::BarrierReached { .. }) => {}
+                outcome => break outcome,
+            }
+        };
         assert!(
-            matches!(d.step(at(10)), Err(Error::Control(message)) if message.contains("unauthorized"))
+            matches!(outcome, Err(Error::Control(message)) if message.contains("unauthorized"))
         );
         assert!(matches!(d.step(at(20)), Err(Error::Failed)));
         assert!(!d
@@ -68,6 +70,42 @@ fn explicit_disabled_and_noncontroller_calls_poison_without_admission() {
             .iter()
             .any(|event| matches!(event.kind, EventKind::FaultAdmitted(_))));
     }
+}
+/// A call from a machine that is not the controller fails the run when it
+/// commits. Held at a barrier, it would commit ahead of an input the host
+/// admits there, so preparing that input fails the same way, without
+/// touching the Driver; it used to pass and the commit poisoned the Driver.
+#[test]
+fn prepare_refuses_an_input_behind_a_held_unauthorized_call() {
+    let mut specs = vec![spec(0, true, vec![]), spec(1, true, vec![])];
+    specs[1].sends.push_back((2, call(1, r#""op":"now""#)));
+    let mut d = configured(specs, Some(Some(MachineId(0))));
+    // The call at 2 is held at the barrier at 2: machine 0 can still emit there.
+    assert_eq!(
+        d.step(at(2)).unwrap(),
+        StepOutcome::BarrierReached { at: at(2) }
+    );
+    assert!(d.execution.machines[1]
+        .staged
+        .iter()
+        .any(|output| matches!(output.payload, Response::SimulationControl { .. })));
+    let pause = || Action::Pause(Target::Machine(MachineId(1)));
+    for _ in 0..2 {
+        assert!(matches!(
+            d.with_barrier(|b| b.prepare_input(key("live"), pause())),
+            Err(Error::Control(message)) if message.contains("unauthorized")
+        ));
+    }
+    // The Driver is not poisoned by the refusal; the run fails where the
+    // call commits, as it would have without the host's input.
+    let outcome = loop {
+        match d.step(at(10)) {
+            Ok(StepOutcome::BarrierReached { .. }) => {}
+            outcome => break outcome,
+        }
+    };
+    assert!(matches!(outcome, Err(Error::Control(message)) if message.contains("unauthorized")));
+    assert!(matches!(d.step(at(20)), Err(Error::Failed)));
 }
 #[test]
 fn controller_target_is_invalid_but_host_authority_and_timing_remain() {
@@ -84,7 +122,6 @@ fn controller_target_is_invalid_but_host_authority_and_timing_remain() {
             spec(1, true, vec![]),
         ],
         Some(Some(MachineId(0))),
-        1,
     );
     d.schedule(
         at(3),
@@ -125,7 +162,6 @@ fn observed_admission_effect_and_reply_are_exact_not_round_delayed() {
             spec(1, true, vec![]),
         ],
         Some(Some(MachineId(0))),
-        4,
     );
     advance(&mut d, 25);
     let r = replies(&d);
@@ -151,7 +187,6 @@ fn same_time_host_input_precedes_later_enqueued_guest_admission() {
             spec(1, true, vec![]),
         ],
         Some(Some(MachineId(0))),
-        1,
     );
     d.schedule(
         at(7),
@@ -181,7 +216,6 @@ fn configured_reply_never_enters_successor_boot() {
             spec(1, true, vec![]),
         ],
         Some(Some(MachineId(0))),
-        1,
     );
     advance(&mut d, 8);
     assert!(d.execution.events.values().flatten().any(|e| matches!(
@@ -206,26 +240,24 @@ fn configured_reply_never_enters_successor_boot() {
     assert!(replies(&d).is_empty());
 }
 #[test]
-fn omission_preserves_sdk_events_streams_and_commit_timing() {
+fn omission_preserves_sdk_events_streams_and_floor_timing() {
     let specs = vec![
         spec(0, true, vec![(2, call(1, r#""op":"now""#))]),
         spec(1, true, vec![]),
     ];
-    let mut original_sdk = build(specs.clone(), vec![], true);
-    let mut sdk = configured(specs.clone(), None, 1);
-    let mut other = configured(specs, None, 4);
-    let original_events = advance(&mut original_sdk, 25);
+    let mut sdk = configured(specs.clone(), None);
+    let mut other = configured(specs, None);
     let configured_events = advance(&mut sdk, 25);
-    assert_eq!(original_events, configured_events);
-    assert_eq!(states(&original_sdk), states(&sdk));
     assert_eq!(configured_events, advance(&mut other, 25));
     assert_eq!(states(&sdk), states(&other));
+    // Without a controller a call is admitted and answered one floor (2 ns)
+    // after it is made, not at the commit of its round.
     let r = replies(&sdk);
-    assert_eq!(r[0].1["admitted_at_ns"], 10);
-    assert_eq!(r[0].1["replied_at_ns"], 10);
+    assert_eq!(r[0].1["admitted_at_ns"], 4);
+    assert_eq!(r[0].1["replied_at_ns"], 4);
 }
 #[test]
-fn both_due_queue_phases_roundtrip_codec_and_workers_without_readmission_or_draws() {
+fn both_due_queue_phases_roundtrip_codec_without_readmission_or_draws() {
     for boundary in [5, 8] {
         let specs = vec![
             spec(
@@ -244,7 +276,7 @@ fn both_due_queue_phases_roundtrip_codec_and_workers_without_readmission_or_draw
             ),
             spec(1, true, vec![(0, Response::Ready)]),
         ];
-        let mut source = configured(specs, Some(Some(MachineId(0))), 1);
+        let mut source = configured(specs, Some(Some(MachineId(0))));
         advance(&mut source, boundary);
         let (bytes, store) = artifact(source.checkpoint().unwrap());
         assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
@@ -252,13 +284,11 @@ fn both_due_queue_phases_roundtrip_codec_and_workers_without_readmission_or_draw
         let expected = advance(&mut source, 35);
         let expected_states = states(&source);
         drop(source);
-        for workers in [1, 4] {
-            let checkpoint = decode(&bytes, &store);
-            let mut restored = restore(&checkpoint, workers);
-            assert_eq!(advance(&mut restored, 35), expected);
-            assert_eq!(states(&restored), expected_states);
-            assert_eq!(replies(&restored).len(), 1, "{:?}", states(&restored));
-        }
+        let checkpoint = decode(&bytes, &store);
+        let mut restored = restore(&checkpoint);
+        assert_eq!(advance(&mut restored, 35), expected);
+        assert_eq!(states(&restored), expected_states);
+        assert_eq!(replies(&restored).len(), 1, "{:?}", states(&restored));
     }
 }
 #[test]
@@ -276,7 +306,6 @@ fn low_latency_overflow_and_wrong_identity_refuse_before_execution() {
     let result = Driver::<Mock>::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         51,
         || panic!("context must not run"),
         driver::fixture::definition(0),
@@ -323,7 +352,6 @@ fn guest_cannot_heal_host_network_handle_targeting_controller() {
     let mut d = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         51,
         || Ok(Context(None)),
         definition(0),

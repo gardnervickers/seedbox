@@ -485,13 +485,15 @@ impl State {
         commit: u64,
         reason: ExitReason,
     ) -> Result<Change, Error> {
+        // A repeated observation of the boot's exit changes nothing, even
+        // after a later fact (a logical Crash of the exited boot) was recorded.
+        if !self.poisoned && boot == self.boot && self.terminal.is_some() {
+            return Ok(Change::Unchanged);
+        }
         if self.check(boot, observed, commit)? == Change::Retired {
             return Ok(Change::Retired);
         }
         self.committed_at = commit;
-        if self.terminal.is_some() {
-            return Ok(Change::Unchanged);
-        }
         // A logically crashed boot already shows Down from its Crash.
         if self.vm() != Vm::Down {
             self.since(observed);

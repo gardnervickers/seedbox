@@ -128,12 +128,36 @@ pub(super) fn layout_for(
     Ok((setup as u64, address))
 }
 
+/// Linux's kernel argument limit on both architectures, including the
+/// terminating NUL.
+const COMMAND_LINE_SIZE: usize = 2048;
+
+/// Check one boot's complete kernel arguments.
 pub(super) fn arguments(command_line: &str) -> Result<(), String> {
+    limited(command_line, COMMAND_LINE_SIZE)
+}
+
+/// Check a machine's base arguments, which keep room for the realtime offset
+/// each boot appends (`seedbox_machine::clock::boot_command_line`).
+pub(super) fn base_arguments(command_line: &str) -> Result<(), String> {
+    if seedbox_machine::clock::sets_realtime_offset(command_line) {
+        return Err(
+            "PV base arguments set seedbox.clock_offset_ns; remove it, each boot appends its own"
+                .into(),
+        );
+    }
+    limited(
+        command_line,
+        COMMAND_LINE_SIZE - seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES,
+    )
+}
+
+fn limited(command_line: &str, size: usize) -> Result<(), String> {
     if command_line.contains('\0') {
         return Err("PV kernel arguments contain NUL".into());
     }
-    if command_line.len() >= 2048 {
-        return Err("PV kernel arguments exceed 2047 bytes".into());
+    if command_line.len() >= size {
+        return Err(format!("PV kernel arguments exceed {} bytes", size - 1));
     }
     Ok(())
 }

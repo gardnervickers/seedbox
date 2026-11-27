@@ -1,12 +1,10 @@
-//! Host-only tests of the actual shared init's named-controller parser.
+//! Host-only tests of the actual shared init's per-boot kernel argument parsers.
 #![cfg(unix)]
 use seedbox_test::process::Guarded;
 use std::{path::Path, process::Command};
-#[test]
-fn explicit_controller_overrides_environment_without_changing_legacy_fallback() {
+fn parser(dir: &Path) -> std::path::PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("policy-parser");
+    let binary = dir.join("policy-parser");
     let output = Command::new("cc")
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
         .arg("-I")
@@ -21,6 +19,12 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    binary
+}
+#[test]
+fn explicit_controller_overrides_environment_without_changing_legacy_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = parser(dir.path());
     for (fallback, command, expected) in [
         ("1", "", "1\n"),
         ("0", "quiet unknown=1", "0\n"),
@@ -46,6 +50,49 @@ fn explicit_controller_overrides_environment_without_changing_legacy_fallback() 
     ] {
         let o = Command::new(&binary)
             .args(["1", command])
+            .guarded_output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{command:?}");
+        assert_eq!(o.stdout, b"invalid\n");
+    }
+}
+#[test]
+fn clock_offset_is_exactly_one_signed_decimal_within_a_second() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = parser(dir.path());
+    for (command, expected) in [
+        ("seedbox.clock_offset_ns=0", "0\n"),
+        ("quiet seedbox.clock_offset_ns=4999999 x=1", "4999999\n"),
+        ("seedbox.clock_offset_ns=-5000000", "-5000000\n"),
+        ("seedbox.clock_offset_ns=1000000000", "1000000000\n"),
+        ("seedbox.clock_offset_ns=-1000000000", "-1000000000\n"),
+        (
+            "noseedbox.clock_offset_ns=7 seedbox.clock_offset_ns=8",
+            "8\n",
+        ),
+        ("\tseedbox.clock_offset_ns=-3\n", "-3\n"),
+    ] {
+        let o = Command::new(&binary)
+            .args(["offset", command])
+            .guarded_output()
+            .unwrap();
+        assert!(o.status.success(), "{command:?}");
+        assert_eq!(o.stdout, expected.as_bytes(), "{command:?}");
+    }
+    for command in [
+        "",
+        "quiet seedbox.control=1",
+        "noseedbox.clock_offset_ns=7 seedbox.clock_offset_nsx=7",
+        "seedbox.clock_offset_ns=",
+        "seedbox.clock_offset_ns=-",
+        "seedbox.clock_offset_ns=+5",
+        "seedbox.clock_offset_ns=5ms",
+        "seedbox.clock_offset_ns=1000000001",
+        "seedbox.clock_offset_ns=-99999999999999999999",
+        "seedbox.clock_offset_ns=1 seedbox.clock_offset_ns=1",
+    ] {
+        let o = Command::new(&binary)
+            .args(["offset", command])
             .guarded_output()
             .unwrap();
         assert_eq!(o.status.code(), Some(2), "{command:?}");

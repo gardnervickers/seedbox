@@ -94,6 +94,16 @@ impl Machine for Native {
             Self::Tcg { machine, .. } => machine.run(context, upto).map_err(|e| e.to_string()),
         }
     }
+    fn timed_inbox(&self) -> bool {
+        match self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+            ))]
+            Self::Pv { machine, .. } => machine.timed_inbox(),
+            Self::Tcg { .. } => false,
+        }
+    }
     fn split_run(&mut self) -> Option<&mut dyn SplitRun<(), String>> {
         match self {
             #[cfg(any(

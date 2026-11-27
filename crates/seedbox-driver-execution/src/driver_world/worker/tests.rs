@@ -25,6 +25,8 @@ struct Data {
     crashes: u64,
     random: [u8; 8],
 }
+/// The machine-time grid at whose points a [`Mock`] draws from its RNG.
+const DRAW_GRID_NS: u64 = 10;
 struct Mock {
     data: Data,
     runs: Arc<AtomicUsize>,
@@ -69,11 +71,14 @@ impl Machine for Mock {
                 .unwrap();
             self.data.first = false;
         }
-        if upto.as_nanos() > c.clock.now() {
+        // One draw, and one output of it, at each grid point the run crosses:
+        // where the run ends never changes what is drawn (C3).
+        let first = (c.clock.now() / DRAW_GRID_NS + 1) * DRAW_GRID_NS;
+        for at in (first..=upto.as_nanos()).step_by(DRAW_GRID_NS as usize) {
             c.rng.fill_bytes(&mut self.data.random);
             c.outbox
                 .emit(Output {
-                    at: upto,
+                    at: Timestamp::from_nanos(at),
                     payload: Response::ApplicationOutput {
                         stream: Stream::Stdout,
                         bytes: self.data.random.to_vec(),
@@ -133,21 +138,17 @@ fn inventory(root: &Path) -> Inventory {
         epoch_seconds: 1234,
     }
 }
-fn worker(workers: usize) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
-    worker_with_network(workers, false)
+fn worker() -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
+    worker_with_network(false)
 }
-fn worker_with_network(
-    workers: usize,
-    network: bool,
-) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
-    worker_writing(workers, network, |saved, writer| {
+fn worker_with_network(network: bool) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
+    worker_writing(network, |saved, writer| {
         serde_json::to_writer(writer, &saved.0)?;
         Ok(())
     })
 }
 type WriteSnapshot = fn(Saved, &mut std::io::BufWriter<std::fs::File>) -> Result<()>;
 fn worker_writing(
-    workers: usize,
     network: bool,
     write_snapshot: WriteSnapshot,
 ) -> (tempfile::TempDir, Worker<Mock>, Arc<AtomicUsize>) {
@@ -177,7 +178,6 @@ fn worker_writing(
     let driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         42,
         || Ok(()),
         oracle,
@@ -266,251 +266,224 @@ fn crash_proposal(worker: &mut Worker<Mock>, key: &str) -> PreparedInput {
 
 #[test]
 fn authored_same_time_entries_drain_individually_and_rejection_consumes_no_fault_id() {
-    let mut reference = None;
-    for workers in [1, 4] {
-        let (_root, mut worker, _) = worker(workers);
-        worker.step(Timestamp::from_nanos(10)).unwrap();
-        let actions = [
-            (
-                "crash",
-                seedbox_engine_protocol::control::Action::Crash {
-                    machine: "n1".into(),
-                },
-                Action::Crash(Target::Name("n1".into())),
-            ),
-            (
-                "reboot",
-                seedbox_engine_protocol::control::Action::Reboot {
-                    machine: "n1".into(),
-                },
-                Action::Reboot(Target::Name("n1".into())),
-            ),
-            (
-                "invalid-resume",
-                seedbox_engine_protocol::control::Action::Resume {
-                    machine: "n1".into(),
-                },
-                Action::Resume(Target::Name("n1".into())),
-            ),
-            (
-                "pause",
-                seedbox_engine_protocol::control::Action::Pause {
-                    machine: "n1".into(),
-                },
-                Action::Pause(Target::Name("n1".into())),
-            ),
-        ];
-        worker.state.world.input_program.inputs = actions
-            .iter()
-            .map(
-                |(key, action, _)| seedbox_engine_protocol::input_program::TimedInput {
-                    key: (*key).into(),
-                    at_ns: 10,
-                    timeout_ns: 10,
-                    action: action.clone(),
-                },
-            )
-            .collect();
-        for (index, (_, _, action)) in actions.into_iter().enumerate() {
-            assert!(worker.authored(action, None).unwrap());
-            assert_eq!(worker.state.world.input_program.next, index + 1);
-            assert_eq!(
-                worker.playback().unwrap().position.at,
-                Timestamp::from_nanos(10)
-            );
-        }
-        let program = &worker.state.world.input_program;
+    let (_root, mut worker, _) = worker();
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    let actions = [
+        (
+            "crash",
+            seedbox_engine_protocol::control::Action::Crash {
+                machine: "n1".into(),
+            },
+            Action::Crash(Target::Name("n1".into())),
+        ),
+        (
+            "reboot",
+            seedbox_engine_protocol::control::Action::Reboot {
+                machine: "n1".into(),
+            },
+            Action::Reboot(Target::Name("n1".into())),
+        ),
+        (
+            "invalid-resume",
+            seedbox_engine_protocol::control::Action::Resume {
+                machine: "n1".into(),
+            },
+            Action::Resume(Target::Name("n1".into())),
+        ),
+        (
+            "pause",
+            seedbox_engine_protocol::control::Action::Pause {
+                machine: "n1".into(),
+            },
+            Action::Pause(Target::Name("n1".into())),
+        ),
+    ];
+    worker.state.world.input_program.inputs = actions
+        .iter()
+        .map(
+            |(key, action, _)| seedbox_engine_protocol::input_program::TimedInput {
+                key: (*key).into(),
+                at_ns: 10,
+                timeout_ns: 10,
+                action: action.clone(),
+            },
+        )
+        .collect();
+    for (index, (_, _, action)) in actions.into_iter().enumerate() {
+        assert!(worker.authored(action, None).unwrap());
+        assert_eq!(worker.state.world.input_program.next, index + 1);
         assert_eq!(
-            program
-                .admissions
-                .iter()
-                .map(|row| row.plan.id)
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
+            worker.playback().unwrap().position.at,
+            Timestamp::from_nanos(10)
         );
-        assert_eq!(
-            program
-                .admissions
-                .iter()
-                .map(|row| row.key.as_str())
-                .collect::<Vec<_>>(),
-            ["crash", "reboot", "pause"]
-        );
-        assert_eq!(program.rejections.len(), 1);
-        assert_eq!(program.rejections[0].key, "invalid-resume");
-        program.validate_at(10).unwrap();
-        let machine = *worker
-            .names
-            .iter()
-            .find(|(_, name)| name.as_str() == "n1")
-            .unwrap()
-            .0;
-        assert!(worker
-            .driver
-            .with_barrier(|barrier| barrier.paused(machine))
-            .unwrap());
-        let continuing = (
-            fingerprint(&mut worker),
-            serde_json::to_value(&worker.state).unwrap(),
-        );
-        if let Some(reference) = &reference {
-            assert_eq!(&continuing, reference);
-        } else {
-            reference = Some(continuing);
-        }
     }
+    let program = &worker.state.world.input_program;
+    assert_eq!(
+        program
+            .admissions
+            .iter()
+            .map(|row| row.plan.id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        program
+            .admissions
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>(),
+        ["crash", "reboot", "pause"]
+    );
+    assert_eq!(program.rejections.len(), 1);
+    assert_eq!(program.rejections[0].key, "invalid-resume");
+    program.validate_at(10).unwrap();
+    let machine = *worker
+        .names
+        .iter()
+        .find(|(_, name)| name.as_str() == "n1")
+        .unwrap()
+        .0;
+    assert!(worker
+        .driver
+        .with_barrier(|barrier| barrier.paused(machine))
+        .unwrap());
 }
 
 #[test]
 fn paused_real_driver_prepare_journal_commit_receipt_holds_effect_and_releases_once() {
-    let mut reference = None;
-    for workers in [1, 4] {
-        let (root, mut worker, runs) = worker(workers);
-        worker.step(Timestamp::from_nanos(10)).unwrap();
-        assert!(worker.state.world.readiness.latched);
-        assert_eq!(
-            playback(
-                &mut worker,
-                1,
-                Command::SetRate {
-                    rate: host::PlaybackRate::Paused
-                }
-            )
-            .error,
-            None
-        );
-        let before = fingerprint(&mut worker);
-        let calls = runs.load(Ordering::SeqCst);
-        let state = worker.state.clone();
-        let prepare = request(
-            2,
-            Command::PrepareFault {
-                request_id: "crash".into(),
-                action: seedbox_engine_protocol::control::Action::Crash {
-                    machine: "n1".into(),
-                },
-                timeout_ns: 100,
-            },
-        );
-        let proposal = crash_proposal(&mut worker, "crash");
-        let reply = worker.prepared(&prepare, proposal).unwrap();
-        let record = reply.intervention.unwrap();
-        assert_eq!(fingerprint(&mut worker), before);
-        assert_eq!(worker.state, state);
-        assert_eq!(runs.load(Ordering::SeqCst), calls);
-        let denied = playback(
-            &mut worker,
-            3,
-            Command::Checkpoint {
-                request_id: "too-early".into(),
-            },
-        );
-        assert_eq!(denied.error, Some(ControlError::FaultPending));
-        assert!(worker.capture_pending().unwrap().is_none());
-        let journal_path = root.path().join("interventions.json");
-        let mut journal =
-            seedbox_artifacts::interventions::Journal::initialize(&journal_path).unwrap();
-        journal.append(record.clone()).unwrap();
-        assert_eq!(
-            seedbox_artifacts::interventions::read(&journal_path)
-                .unwrap()
-                .entries
-                .as_slice(),
-            std::slice::from_ref(&record)
-        );
-        let committed = worker
-            .commit(&request(
-                4,
-                Command::CommitFault {
-                    request_id: "crash".into(),
-                },
-            ))
-            .unwrap();
-        let mut committed_reply = serde_json::to_value(&committed).unwrap();
-        // Read-only host-rate telemetry is not the deterministic receipt.
-        // Compare every semantic reply field, never host speed samples.
-        committed_reply
-            .as_object_mut()
-            .unwrap()
-            .remove("achievedRate");
-        assert_eq!(committed.intervention, Some(record));
-        assert_eq!(committed.error, None);
-        assert_eq!(committed.rate, host::PlaybackRate::Paused);
-        assert!(!committed.stepping);
-        assert_eq!(runs.load(Ordering::SeqCst), calls);
-        assert_eq!(worker.state.world.input_program.next, 1);
-        assert_eq!(worker.state.world.intervention_next, 1);
-        assert_eq!(
-            playback(
-                &mut worker,
-                5,
-                Command::Checkpoint {
-                    request_id: "held".into()
-                }
-            )
-            .error,
-            None
-        );
-        let captured = worker.capture_pending().unwrap().unwrap();
-        assert_eq!(captured.state, host::CheckpointState::Captured);
-        assert!(worker
-            .state
-            .world
-            .publication
-            .session
-            .applied_faults
-            .is_empty());
+    let (root, mut worker, runs) = worker();
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    assert!(worker.state.world.readiness.latched);
+    assert_eq!(
         playback(
             &mut worker,
-            6,
+            1,
             Command::SetRate {
-                rate: host::PlaybackRate::Unlimited,
+                rate: host::PlaybackRate::Paused
+            }
+        )
+        .error,
+        None
+    );
+    let before = fingerprint(&mut worker);
+    let calls = runs.load(Ordering::SeqCst);
+    let state = worker.state.clone();
+    let prepare = request(
+        2,
+        Command::PrepareFault {
+            request_id: "crash".into(),
+            action: seedbox_engine_protocol::control::Action::Crash {
+                machine: "n1".into(),
             },
-        );
-        worker.step(Timestamp::from_nanos(10)).unwrap();
-        let crashes = worker
-            .driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(_, machine)| machine.data.crashes)
-                    .sum::<u64>())
-            })
-            .unwrap();
-        assert_eq!(crashes, 1);
-        worker.step(Timestamp::from_nanos(20)).unwrap();
-        assert!(
-            worker.state.world.readiness.latched,
-            "crash must not clear ever-ready latch"
-        );
-        assert_eq!(
-            worker.state.world.publication.session.applied_faults.len(),
-            1
-        );
-        assert_eq!(
-            worker
-                .report(StopReason::SimulatedTimeLimit, None, None, None)
-                .unwrap()
-                .faults
-                .len(),
-            1
-        );
-        let continuing = (
-            fingerprint(&mut worker),
-            serde_json::to_value(&worker.state).unwrap(),
-            std::fs::read(&journal_path).unwrap(),
-            committed_reply,
-        );
-        if let Some(reference) = &reference {
-            assert_eq!(&continuing, reference);
-        } else {
-            reference = Some(continuing);
-        }
-    }
+            timeout_ns: 100,
+        },
+    );
+    let proposal = crash_proposal(&mut worker, "crash");
+    let reply = worker.prepared(&prepare, proposal).unwrap();
+    let record = reply.intervention.unwrap();
+    assert_eq!(fingerprint(&mut worker), before);
+    assert_eq!(worker.state, state);
+    assert_eq!(runs.load(Ordering::SeqCst), calls);
+    let denied = playback(
+        &mut worker,
+        3,
+        Command::Checkpoint {
+            request_id: "too-early".into(),
+        },
+    );
+    assert_eq!(denied.error, Some(ControlError::FaultPending));
+    assert!(worker.capture_pending().unwrap().is_none());
+    let journal_path = root.path().join("interventions.json");
+    let mut journal = seedbox_artifacts::interventions::Journal::initialize(&journal_path).unwrap();
+    journal.append(record.clone()).unwrap();
+    assert_eq!(
+        seedbox_artifacts::interventions::read(&journal_path)
+            .unwrap()
+            .entries
+            .as_slice(),
+        std::slice::from_ref(&record)
+    );
+    let committed = worker
+        .commit(&request(
+            4,
+            Command::CommitFault {
+                request_id: "crash".into(),
+            },
+        ))
+        .unwrap();
+    let mut committed_reply = serde_json::to_value(&committed).unwrap();
+    // Read-only host-rate telemetry is not the deterministic receipt.
+    // Compare every semantic reply field, never host speed samples.
+    committed_reply
+        .as_object_mut()
+        .unwrap()
+        .remove("achievedRate");
+    assert_eq!(committed.intervention, Some(record));
+    assert_eq!(committed.error, None);
+    assert_eq!(committed.rate, host::PlaybackRate::Paused);
+    assert!(!committed.stepping);
+    assert_eq!(runs.load(Ordering::SeqCst), calls);
+    assert_eq!(worker.state.world.input_program.next, 1);
+    assert_eq!(worker.state.world.intervention_next, 1);
+    assert_eq!(
+        playback(
+            &mut worker,
+            5,
+            Command::Checkpoint {
+                request_id: "held".into()
+            }
+        )
+        .error,
+        None
+    );
+    let captured = worker.capture_pending().unwrap().unwrap();
+    assert_eq!(captured.state, host::CheckpointState::Captured);
+    assert!(worker
+        .state
+        .world
+        .publication
+        .session
+        .applied_faults
+        .is_empty());
+    playback(
+        &mut worker,
+        6,
+        Command::SetRate {
+            rate: host::PlaybackRate::Unlimited,
+        },
+    );
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    let crashes = worker
+        .driver
+        .with_barrier(|barrier| {
+            Ok(barrier
+                .machines()
+                .map(|(_, machine)| machine.data.crashes)
+                .sum::<u64>())
+        })
+        .unwrap();
+    assert_eq!(crashes, 1);
+    worker.step(Timestamp::from_nanos(20)).unwrap();
+    assert!(
+        worker.state.world.readiness.latched,
+        "crash must not clear ever-ready latch"
+    );
+    assert_eq!(
+        worker.state.world.publication.session.applied_faults.len(),
+        1
+    );
+    assert_eq!(
+        worker
+            .report(StopReason::SimulatedTimeLimit, None, None, None)
+            .unwrap()
+            .faults
+            .len(),
+        1
+    );
 }
 #[test]
 fn failed_real_journal_never_commits_and_prepared_scope_blocks_execution() {
-    let (root, mut worker, runs) = worker(1);
+    let (root, mut worker, runs) = worker();
     worker.step(Timestamp::from_nanos(10)).unwrap();
     playback(
         &mut worker,
@@ -548,7 +521,7 @@ fn failed_real_journal_never_commits_and_prepared_scope_blocks_execution() {
 }
 #[test]
 fn checkpoint_receipt_follows_durable_manifest_and_is_not_recaptured() {
-    let (_root, mut worker, _) = worker(1);
+    let (_root, mut worker, _) = worker();
     worker.step(Timestamp::from_nanos(10)).unwrap();
     playback(
         &mut worker,
@@ -620,7 +593,7 @@ fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
         request_id: id.into(),
     };
     for (stage, write) in attempts {
-        let (_root, mut worker, _) = worker_writing(1, false, write);
+        let (_root, mut worker, _) = worker_writing(false, write);
         worker.step(Timestamp::from_nanos(10)).unwrap();
         playback(
             &mut worker,
@@ -727,27 +700,22 @@ fn failed_capture_is_never_acknowledged_and_completion_fabricates_nothing() {
     }
 }
 #[test]
-fn event_chain_ignores_absent_observation_socket_and_worker_count() {
-    let mut results = vec![];
-    for workers in [1, 4] {
-        let (_root, mut worker, _) = worker(workers);
-        worker.step(Timestamp::from_nanos(10)).unwrap();
-        worker.step(Timestamp::from_nanos(20)).unwrap();
-        let report = worker
-            .report(StopReason::SimulatedTimeLimit, None, None, None)
-            .unwrap();
-        assert!(
-            report.full_state.is_none(),
-            "exit witness is never RAM equality"
-        );
-        assert!(
-            report.witness.is_none(),
-            "published events alone are not the final execution witness"
-        );
-        results.push(worker.publisher.published.clone());
-    }
-    assert!(!results[0].is_empty());
-    assert_eq!(results[0], results[1]);
+fn event_chain_ignores_absent_observation_socket() {
+    let (_root, mut worker, _) = worker();
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    worker.step(Timestamp::from_nanos(20)).unwrap();
+    let report = worker
+        .report(StopReason::SimulatedTimeLimit, None, None, None)
+        .unwrap();
+    assert!(
+        report.full_state.is_none(),
+        "exit witness is never RAM equality"
+    );
+    assert!(
+        report.witness.is_none(),
+        "published events alone are not the final execution witness"
+    );
+    assert!(!worker.publisher.published.is_empty());
 }
 
 #[test]
@@ -758,7 +726,7 @@ fn oom_publication_keeps_the_emitting_boot_and_kernel_victim() {
         out_of_memory::Kill,
     };
     use std::os::unix::net::UnixDatagram;
-    let (root, mut worker, _) = worker(1);
+    let (root, mut worker, _) = worker();
     let path = root.path().join("oom-observation.sock");
     let receiver = UnixDatagram::bind(&path).unwrap();
     receiver
@@ -801,4 +769,70 @@ fn oom_publication_keeps_the_emitting_boot_and_kernel_victim() {
     assert_eq!(record.incarnation, 7);
     assert_eq!(record.simulated_time_ns, 10);
     assert_eq!(record.kind, Kind::OutOfMemoryKill { kill });
+}
+
+#[test]
+fn application_readiness_is_published_after_the_ready_that_completes_it() {
+    use seedbox_engine_protocol::observation::{Kind, Observation};
+    use std::os::unix::net::UnixDatagram;
+    let (root, mut worker, _) = worker();
+    assert!(!worker.state.world.readiness.latched);
+    let path = root.path().join("ready-observation.sock");
+    let receiver = UnixDatagram::bind(&path).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    worker.publisher = Publisher::connect(Some(&path)).unwrap();
+    worker.step(Timestamp::from_nanos(10)).unwrap();
+    assert!(worker.state.world.readiness.latched);
+    // Every send happened on this thread before these receives.
+    let receive = |receiver: &UnixDatagram| {
+        let mut records = vec![];
+        let mut bytes = [0; 65_536];
+        loop {
+            match receiver.recv(&mut bytes) {
+                Ok(size) => {
+                    records.push(serde_json::from_slice::<Observation>(&bytes[..size]).unwrap())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return records,
+                Err(e) => panic!("observation receive: {e}"),
+            }
+        }
+    };
+    let records = receive(&receiver);
+    let readiness: Vec<_> = records
+        .iter()
+        .filter(|record| matches!(record.kind, Kind::MachineReady | Kind::ApplicationReady))
+        .map(|record| {
+            (
+                record.machine.as_str(),
+                record.simulated_time_ns,
+                &record.kind,
+            )
+        })
+        .collect();
+    assert_eq!(readiness.len(), 3, "{readiness:?}");
+    assert!(readiness[..2]
+        .iter()
+        .all(|(_, _, kind)| **kind == Kind::MachineReady));
+    let mut machines: Vec<_> = readiness[..2].iter().map(|(name, ..)| *name).collect();
+    machines.sort();
+    assert_eq!(machines, ["n1", "oracle"]);
+    assert_eq!(readiness[2], ("", readiness[1].1, &Kind::ApplicationReady));
+    // A worker that continues an already ready world says so first, at the
+    // position it continues from.
+    let mut state = worker.state.clone();
+    state.world.position.simulated_time_ns = 25;
+    let mut publisher = Publisher::connect(Some(&path)).unwrap();
+    publisher.restored_ready(&mut state).unwrap();
+    state.world.readiness.latched = false;
+    publisher.restored_ready(&mut state).unwrap();
+    let records = receive(&receiver);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        (
+            records[0].sequence,
+            records[0].simulated_time_ns,
+            &records[0].kind
+        ),
+        (1, 25, &Kind::ApplicationReady)
+    );
 }

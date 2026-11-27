@@ -56,7 +56,6 @@ fn uncertain_effect_retains_prior_settlement_and_never_claims_applied() {
     let mut driver = fixture::driver(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        2,
         SeededRng::new(0),
         || Ok(()),
         || {
@@ -214,7 +213,6 @@ fn ack_batch(final_batch: bool, bad_ack: bool) -> Driver<AckBatchProbe> {
     let mut driver = fixture::driver(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        2,
         SeededRng::new(0),
         || Ok(()),
         move || {
@@ -268,7 +266,9 @@ fn assert_ack_settlement(driver: &Driver<AckBatchProbe>, events: &[Event]) {
     );
     assert_eq!(*status, SettlementStatus::Applied);
     assert_eq!(*outcome_at, Some(Timestamp::from_nanos(11)));
-    assert_eq!(*committed_at, Timestamp::from_nanos(20));
+    // The settlement is stamped with the acknowledgement's own time, not the
+    // commit at 20 that carried it.
+    assert_eq!(*committed_at, Timestamp::from_nanos(11));
     // An immutable receipt is not permission to enqueue the reply or another
     // effect before the entire committed batch finishes control processing.
     assert!(!driver
@@ -312,16 +312,36 @@ fn earlier_ack_settlement_survives_later_bad_ack_in_same_committed_batch() {
     assert!(driver.drain_events().is_empty());
 }
 #[test]
-fn final_oracle_batch_retains_confirmed_peer_settlement_without_new_dispatch() {
+fn final_oracle_batch_keeps_peer_settlement_and_work_due_before_the_end() {
     let mut driver = ack_batch(true, false);
+    // The oracle's outcome at 15 ends the run one floor later, at 25. The
+    // stop's reply at 21 and the call at 13, admitted at 23, come before it.
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(20)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(20)
+        }
+    );
     let finished = StepOutcome::Finished {
-        at: Timestamp::from_nanos(20),
+        at: Timestamp::from_nanos(25),
         reason: ExitReason::ProgramExit { code: 0 },
     };
-    assert_eq!(driver.step(Timestamp::from_nanos(20)).unwrap(), finished);
+    let outcome = loop {
+        match driver.step(Timestamp::from_nanos(30)).unwrap() {
+            StepOutcome::BarrierReached { .. } => {}
+            outcome => break outcome,
+        }
+    };
+    assert_eq!(outcome, finished);
     let events = driver.drain_events();
     assert_ack_settlement(&driver, &events);
     assert!(fixture::outputs(&events).iter().any(|output| matches!(output.payload, Response::SimulationControl { id, .. } if id.request.get() == 2)));
+    let replies: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ReplyAdmitted { .. }))
+        .map(|event| event.at.as_nanos())
+        .collect();
+    assert_eq!(replies, [21, 23]);
     assert_eq!(driver.step(Timestamp::from_nanos(30)).unwrap(), finished);
     assert!(driver.drain_events().is_empty());
 }

@@ -15,6 +15,7 @@ use crate::{
 };
 use seedbox_test_time::{GuestProgress, HangGuard};
 use std::{
+    collections::BTreeSet,
     fmt::Debug,
     fs,
     num::NonZeroI64,
@@ -202,7 +203,6 @@ impl Plan {
 /// mid-drift, inside the same Driver.
 fn scenario<M, F>(
     backend: &str,
-    workers: usize,
     migrate: bool,
     plan: Plan,
     mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
@@ -221,7 +221,6 @@ where
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         FixtureRng(3),
         || Ok(()),
         oracle,
@@ -390,7 +389,7 @@ impl Reference {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Line {
     at: u64,
     boot: u64,
@@ -399,8 +398,11 @@ struct Line {
     mono: i128,
     raw: i128,
     cnt: i128,
+    /// The boot's realtime offset, from its kernel argument.
+    off: i128,
 }
-/// Clock-machine stdout lines; `rt` is relative to the realtime epoch.
+/// Clock-machine stdout lines; `rt` is relative to the realtime epoch plus
+/// the boot's offset.
 fn lines(events: &[Event], clock: MachineId, epoch_seconds: u32) -> Vec<Line> {
     let epoch = i128::from(epoch_seconds) * 1_000_000_000;
     let mut lines = Vec::new();
@@ -436,14 +438,17 @@ fn lines(events: &[Event], clock: MachineId, epoch_seconds: u32) -> Vec<Line> {
                     .parse()
                     .unwrap()
             };
+            let (rt, mono, raw, cnt) = (value("rt"), value("mono"), value("raw"), value("cnt"));
+            let off = value("off");
             lines.push(Line {
                 at: output.at.as_nanos(),
                 boot: output.boot,
                 tag,
-                rt: value("rt") - epoch,
-                mono: value("mono"),
-                raw: value("raw"),
-                cnt: value("cnt"),
+                rt: rt - epoch - off,
+                mono,
+                raw,
+                cnt,
+                off,
             });
         }
     }
@@ -492,8 +497,8 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
     // other machines' work never run it, and these scenarios have no
     // pause/resume. Runs with inputs (requests, replies, lifecycle) are the only
     // legitimate earlier runs. So every input-free run after a Blocked stop is
-    // that timer's wake: it must never be early, and it must happen at the
-    // earliest simulation time whose mapped time reaches the deadline.
+    // that timer's wake: it must never be early, and it starts at the deadline
+    // itself, at the earliest simulation time whose mapped time reaches it.
     let mut exact = 0;
     let mut straddled = 0;
     let mut reconverted = 0;
@@ -518,7 +523,10 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
             next.now
         );
         let wake = reference.inverse(due);
-        assert_eq!(next.now, reference.floor(wake), "{backend}: due {due}");
+        // The wake starts at the deadline itself, which a fast clock can place
+        // inside the simulation nanosecond it wakes at, before that
+        // nanosecond's machine time.
+        assert_eq!(next.now, due, "{backend}: wake at the deadline");
         exact += 1;
         // A pending timer straddling a rate change was re-converted: its wake
         // differs from the one its deadline had under the earlier rates.
@@ -526,12 +534,13 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
             let boundary = reference.floor(change);
             if reached.as_nanos() < boundary && boundary < next.now {
                 straddled += 1;
-                // Rates here are never slow, so the mapping is injective and
-                // the observed clock identifies the wake: a stale (unconverted)
-                // wake would be observed differently.
+                // A stale (unconverted) wake earlier than the true one would
+                // have started the run before the deadline, at the stale
+                // nanosecond's machine time; one later is not told apart by
+                // the run, which starts at the deadline either way.
                 let earlier = Reference(reference.0[..index].to_vec());
                 let stale = earlier.inverse(due);
-                if stale != wake {
+                if stale < wake {
                     assert_ne!(reference.floor(stale), next.now, "{backend}: stale wake");
                     reconverted += 1;
                 }
@@ -552,13 +561,23 @@ fn find<'l>(lines: &'l [Line], boot: u64, tag: &str) -> Vec<&'l Line> {
         .filter(|l| l.boot == boot && l.tag == tag)
         .collect()
 }
-/// Every boot starts realtime at the factory epoch plus the counter.
+/// Every boot starts realtime at the factory epoch plus the counter plus
+/// its own offset, which is bounded and fixed for the boot.
 fn check_boots(backend: &str, lines: &[Line], boots: u64) {
+    let bound = i128::from(seedbox_machine::clock::REALTIME_OFFSET_BOUND_NS);
     for boot in 0..boots {
         let line = find(lines, boot, "BOOT")[0];
         assert!(
             line.cnt - line.rt >= 0 && line.cnt - line.rt < LATENCY,
             "{backend}: {line:?}"
+        );
+        assert!(line.off.abs() <= bound, "{backend}: {line:?}");
+        assert!(
+            lines
+                .iter()
+                .filter(|l| l.boot == boot)
+                .all(|l| l.off == line.off),
+            "{backend}: boot {boot} offset"
         );
     }
 }
@@ -877,13 +896,12 @@ fn check_refusal(backend: &str, (events, clock, runs, _, _): &Outcome) {
     assert!(find(&lines, 0, "CANCELED").is_empty());
 }
 
-fn tcg(workers: usize, migrate: bool, plan: Plan) -> Outcome {
+fn tcg(migrate: bool, plan: Plan) -> Outcome {
     let qemu = input("SEEDBOX_TCG_QEMU");
     let mut factory =
         super::tcg::Factory::new(&qemu, &input("SEEDBOX_TCG_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "TCG",
-        workers,
         migrate,
         plan,
         move |definition| factory.create(definition).unwrap(),
@@ -892,32 +910,28 @@ fn tcg(workers: usize, migrate: bool, plan: Plan) -> Outcome {
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
-fn tcg_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
-    let serial = tcg(1, false, Plan::Guest);
+fn tcg_clock_faults_guest_drift_step_reboot_and_snapshot() {
+    let serial = tcg(false, Plan::Guest);
     check_guest("TCG", &serial);
-    assert_eq!(serial, tcg(4, false, Plan::Guest), "workers");
-    assert_eq!(serial, tcg(1, true, Plan::Guest), "restored mid-drift");
+    assert_eq!(serial, tcg(true, Plan::Guest), "restored mid-drift");
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
-fn tcg_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
-    let serial = tcg(1, false, Plan::Host);
-    check_host("TCG", &serial);
-    assert_eq!(serial, tcg(4, false, Plan::Host), "workers");
+fn tcg_clock_faults_host_drift_negative_step_heal_and_holds() {
+    check_host("TCG", &tcg(false, Plan::Host));
 }
 #[test]
 #[ignore = "requires native TCG kernel/helper and clock-fault application"]
 fn tcg_clock_faults_step_below_monotonic_is_refused() {
-    check_refusal("TCG", &tcg(1, false, Plan::Refusal));
+    check_refusal("TCG", &tcg(false, Plan::Refusal));
 }
 #[cfg(seedbox_pv)]
-fn pv(workers: usize, migrate: bool, plan: Plan) -> Outcome {
+fn pv(migrate: bool, plan: Plan) -> Outcome {
     let worker = input("SEEDBOX_PV_WORKER");
     let mut factory =
         super::pv::Factory::new(&worker, &input("SEEDBOX_PV_ASSETS"), plan.epoch()).unwrap();
     scenario(
         "PV",
-        workers,
         migrate,
         plan,
         move |definition| factory.create(definition).unwrap(),
@@ -929,25 +943,170 @@ fn pv(workers: usize, migrate: bool, plan: Plan) -> Outcome {
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
-fn pv_clock_faults_guest_drift_step_reboot_snapshot_and_workers() {
-    let serial = pv(1, false, Plan::Guest);
+fn pv_clock_faults_guest_drift_step_reboot_and_snapshot() {
+    let serial = pv(false, Plan::Guest);
     check_guest("PV", &serial);
-    assert_eq!(serial, pv(4, false, Plan::Guest), "workers");
-    assert_eq!(serial, pv(1, true, Plan::Guest), "restored mid-drift");
+    assert_eq!(serial, pv(true, Plan::Guest), "restored mid-drift");
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
-fn pv_clock_faults_host_drift_negative_step_heal_holds_and_workers() {
-    let serial = pv(1, false, Plan::Host);
-    check_host("PV", &serial);
-    assert_eq!(serial, pv(4, false, Plan::Host), "workers");
+fn pv_clock_faults_host_drift_negative_step_heal_and_holds() {
+    check_host("PV", &pv(false, Plan::Host));
 }
 #[cfg(seedbox_pv)]
 #[test]
 #[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
 fn pv_clock_faults_step_below_monotonic_is_refused() {
-    check_refusal("PV", &pv(1, false, Plan::Refusal));
+    check_refusal("PV", &pv(false, Plan::Refusal));
+}
+
+/// Three clock machines staggered as a world staggers them, beside an idle
+/// oracle: each one's BOOT line, once all three printed it.
+fn staggered<M>(
+    backend: &str,
+    mut construct: impl FnMut(&crate::definition::MachineDefinition) -> M + Send + 'static,
+) -> Vec<Line>
+where
+    M: Machine<Context = ()> + Send + 'static,
+    M::Error: Debug + Send + 'static,
+{
+    let (oracle, clock) = definitions(backend, "idle");
+    let replicas = (1..=3)
+        .map(|n| {
+            let mut replica = clock.clone();
+            replica.name = format!("c{n}");
+            replica
+        })
+        .collect();
+    let mut driver = Driver::new(
+        at(0),
+        Duration::from_nanos(QUANTUM),
+        FixtureRng(3),
+        || Ok(()),
+        oracle,
+        replicas,
+        Vec::new(),
+        crate::driver::NetworkConfig::default(),
+        move |definition| Ok(construct(definition)),
+    )
+    .unwrap();
+    driver.stagger_boots(crate::driver::BOOT_SPREAD).unwrap();
+    let replicas: Vec<MachineId> = driver
+        .with_barrier(|b| Ok(b.machines().skip(1).map(|machine| machine.0).collect()))
+        .unwrap();
+    let guard = HangGuard::new(
+        format!("{backend} staggered boots transport must return"),
+        Duration::from_secs(600),
+    );
+    // The clock fixture's 40 s simulated boot allowance, plus the spread.
+    // Each replica's Ready and BOOT output may share a barrier.
+    let mut progress = GuestProgress::new(
+        "staggered clock boots",
+        Duration::ZERO,
+        Duration::from_secs(41),
+        2 * 3,
+    )
+    .unwrap();
+    let mut events = driver.drain_observations().events;
+    let mut now = at(0);
+    loop {
+        guard
+            .remaining()
+            .expect("staggered boot infrastructure hang");
+        let boots: Vec<Line> = replicas
+            .iter()
+            .filter_map(|&id| {
+                lines(&events, id, crate::machine::TEST_EPOCH_SECONDS)
+                    .into_iter()
+                    .find(|line| line.tag == "BOOT")
+            })
+            .collect();
+        if boots.len() == replicas.len() {
+            return boots;
+        }
+        let limit = progress
+            .next(
+                Duration::from_nanos(now.as_nanos()),
+                Duration::from_nanos(QUANTUM),
+            )
+            .unwrap_or_else(|error| panic!("{backend} {}: {error}", progress.phase()));
+        match driver
+            .step(at(limit.as_nanos().try_into().unwrap()))
+            .unwrap()
+        {
+            StepOutcome::BarrierReached { at } | StepOutcome::Blocked { at } => now = at,
+            other => panic!("{backend}: unexpected {other:?}"),
+        }
+        events.extend(driver.drain_observations().events);
+    }
+}
+/// Staggered replicas start their processes apart, with distinct boot
+/// instants and wall clocks, and the same ones on a fresh rerun.
+fn check_staggered(backend: &str, boots: &[Line]) {
+    let spread = i128::try_from(crate::driver::BOOT_SPREAD.as_nanos()).unwrap();
+    let bound = i128::from(seedbox_machine::clock::REALTIME_OFFSET_BOUND_NS);
+    // A boot's instant on the shared counter: the counter less monotonic.
+    let instants: Vec<i128> = boots.iter().map(|line| line.cnt - line.mono).collect();
+    let offsets: BTreeSet<i128> = boots.iter().map(|line| line.off).collect();
+    let started: BTreeSet<u64> = boots.iter().map(|line| line.at).collect();
+    assert_eq!(offsets.len(), 3, "{backend}: offsets {boots:?}");
+    assert!(offsets.iter().all(|off| off.abs() <= bound));
+    assert_eq!(started.len(), 3, "{backend}: process starts {boots:?}");
+    let (first, last) = (
+        instants.iter().min().unwrap(),
+        instants.iter().max().unwrap(),
+    );
+    assert!(
+        last - first > LATENCY && last - first < spread + LATENCY,
+        "{backend}: boot instants {instants:?}"
+    );
+    // The replica that booted first printed first.
+    let order = |key: &dyn Fn(&Line) -> i128| {
+        let mut order: Vec<usize> = (0..boots.len()).collect();
+        order.sort_by_key(|&i| key(&boots[i]));
+        order
+    };
+    assert_eq!(
+        order(&|line: &Line| line.cnt - line.mono),
+        order(&|line: &Line| i128::from(line.at)),
+        "{backend}: {boots:?}"
+    );
+}
+#[test]
+#[ignore = "requires native TCG kernel/helper and clock-fault application"]
+fn tcg_staggered_replicas_boot_apart_with_their_own_wall_clocks() {
+    let run = || {
+        let qemu = input("SEEDBOX_TCG_QEMU");
+        let mut factory = super::tcg::Factory::new(
+            &qemu,
+            &input("SEEDBOX_TCG_ASSETS"),
+            crate::machine::TEST_EPOCH_SECONDS,
+        )
+        .unwrap();
+        staggered("TCG", move |definition| factory.create(definition).unwrap())
+    };
+    let serial = run();
+    check_staggered("TCG", &serial);
+    assert_eq!(serial, run(), "fresh rerun");
+}
+#[cfg(seedbox_pv)]
+#[test]
+#[ignore = "requires native PV hypervisor/kernel/helper and clock-fault application"]
+fn pv_staggered_replicas_boot_apart_with_their_own_wall_clocks() {
+    let run = || {
+        let worker = input("SEEDBOX_PV_WORKER");
+        let mut factory = super::pv::Factory::new(
+            &worker,
+            &input("SEEDBOX_PV_ASSETS"),
+            crate::machine::TEST_EPOCH_SECONDS,
+        )
+        .unwrap();
+        staggered("PV", move |definition| factory.create(definition).unwrap())
+    };
+    let serial = run();
+    check_staggered("PV", &serial);
+    assert_eq!(serial, run(), "fresh rerun");
 }
 
 #[test]

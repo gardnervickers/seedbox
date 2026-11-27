@@ -52,22 +52,23 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         execution,
         playback,
         observations,
-        workers: _,
+        host: _,
         factory: _,
+        stops: _,
     } = d;
     let ExecutionState {
         clock,
         rng,
         quantum_ns,
-        quantum_end,
+        origin,
         machines,
         events,
         boundary_index,
-        completed_quanta,
-        quantum_committed,
         failed,
         stopped,
         oracle,
+        needed,
+        finishing,
         finished,
         oracle_stops,
         control,
@@ -92,18 +93,18 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         clock.now(),
         rng,
         quantum_ns,
-        quantum_end,
+        origin,
         events,
         staged_events,
         published,
         next_sequence,
         boundary_index,
-        completed_quanta,
-        quantum_committed,
         playback.checkpoint(),
         failed,
         stopped,
         oracle,
+        needed,
+        finishing,
         finished,
         oracle_stops,
         control,
@@ -126,6 +127,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
             inbox: entry.inbox.clone(),
             staged: entry.staged.clone(),
             last_ended_published: entry.last_ended_published,
+            powered_on_at: entry.powered_on_at,
         }
         .put(&mut e)
         .unwrap();
@@ -166,7 +168,7 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             .unwrap();
         let before = d.playback.clone();
         let position = d.position();
-        let quantum_end = d.execution.quantum_end;
+        let quantum_end = d.execution.quantum_end(d.now()).unwrap();
         let native = states(&d);
         let p = prepare(&mut d, "live", pause());
         assert_eq!(p.key(), &key("live"));
@@ -187,11 +189,15 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
             "including exact host anchor and step target"
         );
         assert_eq!(d.now(), position.at);
-        assert_eq!(d.execution.quantum_end, quantum_end);
-        assert_eq!(d.execution.completed_quanta, position.completed_quanta);
+        assert_eq!(d.execution.quantum_end(d.now()).unwrap(), quantum_end);
+        assert_eq!(
+            d.execution.completed_quanta(d.now()),
+            position.completed_quanta
+        );
         assert_eq!(states(&d), native, "held effect must not run a machine");
         assert!(!d.execution.machines[1].lifecycle.paused());
-        assert_eq!(d.position().boundary_index, position.boundary_index + 1);
+        // Output held at the barrier commits before the input's admission.
+        assert_eq!(d.position().boundary_index, position.boundary_index + 2);
         let events = d.drain_events();
         assert_eq!(
             events
@@ -226,13 +232,19 @@ fn paused_commit_holds_without_touching_anchor_or_quantum_and_releases_once() {
         if stepping_release {
             d.with_barrier(|b| b.step_quantum()).unwrap();
             d.step(quantum_end).unwrap();
-            assert_eq!(d.execution.completed_quanta, position.completed_quanta + 1);
+            assert_eq!(
+                d.execution.completed_quanta(d.now()),
+                position.completed_quanta + 1
+            );
             assert!(!status(&mut d).stepping);
         } else {
             d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
                 .unwrap();
             d.step(at(3)).unwrap();
-            assert_eq!(d.execution.completed_quanta, position.completed_quanta);
+            assert_eq!(
+                d.execution.completed_quanta(d.now()),
+                position.completed_quanta
+            );
         }
         assert!(d.playback.held.is_none());
         assert!(d.execution.machines[1].lifecycle.paused());
@@ -255,17 +267,17 @@ fn pending_step_survives_due_dispatch_and_next_step_finishes_exactly_one_quantum
     .unwrap();
     let playback = d.playback.clone();
     let now = d.now();
-    let end = d.execution.quantum_end;
-    let quanta = d.execution.completed_quanta;
+    let end = d.execution.quantum_end(d.now()).unwrap();
+    let quanta = d.execution.completed_quanta(d.now());
     let p = prepare(&mut d, "pause", pause());
     assert_eq!(commit(&mut d, &p), DueOutcome::Applied { at: now });
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), now);
-    assert_eq!(d.execution.quantum_end, end);
-    assert_eq!(d.execution.completed_quanta, quanta);
+    assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+    assert_eq!(d.execution.completed_quanta(d.now()), quanta);
     assert!(d.execution.machines[1].lifecycle.paused());
     d.step(end).unwrap();
-    assert_eq!(d.execution.completed_quanta, quanta + 1);
+    assert_eq!(d.execution.completed_quanta(d.now()), quanta + 1);
     assert!(!status(&mut d).stepping);
     assert!(matches!(
         d.step(at(30)).unwrap(),
@@ -294,8 +306,8 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
         }
         let playback = d.playback.clone();
         let now = d.now();
-        let end = d.execution.quantum_end;
-        let quanta = d.execution.completed_quanta;
+        let end = d.execution.quantum_end(d.now()).unwrap();
+        let quanta = d.execution.completed_quanta(d.now());
         let p = prepare(&mut d, "throttle", throttle());
         let result = commit(&mut d, &p);
         if armed {
@@ -327,8 +339,8 @@ fn limited_waiting_bypassed_without_reanchor_but_armed_hold_uses_existing_semant
             );
         }
         assert_eq!(d.now(), now);
-        assert_eq!(d.execution.quantum_end, end);
-        assert_eq!(d.execution.completed_quanta, quanta);
+        assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+        assert_eq!(d.execution.completed_quanta(d.now()), quanta);
     }
 }
 
@@ -601,6 +613,10 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
         vec![],
         true,
     );
+    // Paced, so the first round ends at the quantum boundary before the
+    // deadline.
+    d.with_barrier(|b| b.set_rate(crate::test_support::paced()))
+        .unwrap();
     assert_eq!(
         d.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }
@@ -622,10 +638,19 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
     assert_eq!(due(&mut d), DueOutcome::Applied { at: at(15) });
     assert!(!d.execution.machines[2].lifecycle.paused());
     // Its run starts at the deadline with a budget; the call it makes there
-    // is admitted when that round commits.
+    // is admitted one floor (10 ns) later.
     assert_eq!(
         d.step(at(100)).unwrap(),
-        StepOutcome::Blocked { at: at(15) }
+        StepOutcome::BarrierReached { at: at(15) }
+    );
+    assert!(!d.execution.machines[2].lifecycle.paused());
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BarrierReached { at: at(20) }
+    );
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::Blocked { at: at(25) }
     );
     assert!(d.execution.machines[2].lifecycle.paused());
 }
@@ -687,12 +712,12 @@ fn stopped_finished_and_poisoned_preflights_never_mutate() {
         }
         if kind == 1 {
             let p = prepare(&mut d, "end", Action::Crash(Target::Machine(MachineId(0))));
+            assert!(matches!(commit(&mut d, &p), DueOutcome::Applied { .. }));
+            // The oracle's crash ends the run one floor later.
+            advance(&mut d, 100);
             assert!(matches!(
-                commit(&mut d, &p),
-                DueOutcome::Finished {
-                    reason: ExitReason::Crashed,
-                    ..
-                }
+                d.execution.finished,
+                Some((_, ExitReason::Crashed))
             ));
         }
         if kind == 2 {
@@ -753,59 +778,57 @@ fn sequential_same_time_entries_apply_but_prequeued_fifo_still_rejects_reboot() 
 }
 
 #[test]
-fn start_paused_authored_hold_and_live_replay_have_identical_events_workers_one_four() {
-    for workers in [1, 4] {
-        let mut source = build(
-            (0..3).map(|i| spec(i, true, vec![])).collect(),
-            vec![],
-            true,
-        );
-        let c = source.checkpoint().unwrap();
-        let mut paused = restore(&c, workers);
-        let mut replay = restore(&c, workers);
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
-            .unwrap();
-        for d in [&mut paused, &mut replay] {
-            d.schedule(at(0), key("authored"), throttle()).unwrap();
-        }
-        assert!(matches!(due(&mut paused), DueOutcome::BeforeFault { .. }));
-        assert!(matches!(
-            paused.with_barrier(|b| b.prepare_input(key("live"), pause())),
-            Err(Error::BeforeFault)
-        ));
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        paused.step(at(0)).unwrap();
-        due(&mut replay);
-        assert_eq!(paused.position(), replay.position());
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
-            .unwrap();
-        let p = prepare(&mut paused, "live", pause());
-        let q = prepare(&mut replay, "live", pause());
-        assert_eq!(p, q);
-        assert!(matches!(
-            commit(&mut paused, &p),
-            DueOutcome::BeforeFault { .. }
-        ));
-        assert!(matches!(
-            commit(&mut replay, &q),
-            DueOutcome::Applied { .. }
-        ));
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        paused.step(at(0)).unwrap();
-        assert_eq!(advance(&mut paused, 30), advance(&mut replay, 30));
-        assert_eq!(states(&paused), states(&replay));
-        assert_eq!(paused.position(), replay.position());
+fn start_paused_authored_hold_and_live_replay_have_identical_events() {
+    let mut source = build(
+        (0..3).map(|i| spec(i, true, vec![])).collect(),
+        vec![],
+        true,
+    );
+    let c = source.checkpoint().unwrap();
+    let mut paused = restore(&c);
+    let mut replay = restore(&c);
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
+        .unwrap();
+    for d in [&mut paused, &mut replay] {
+        d.schedule(at(0), key("authored"), throttle()).unwrap();
     }
+    assert!(matches!(due(&mut paused), DueOutcome::BeforeFault { .. }));
+    assert!(matches!(
+        paused.with_barrier(|b| b.prepare_input(key("live"), pause())),
+        Err(Error::BeforeFault)
+    ));
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    paused.step(at(0)).unwrap();
+    due(&mut replay);
+    assert_eq!(paused.position(), replay.position());
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
+        .unwrap();
+    let p = prepare(&mut paused, "live", pause());
+    let q = prepare(&mut replay, "live", pause());
+    assert_eq!(p, q);
+    assert!(matches!(
+        commit(&mut paused, &p),
+        DueOutcome::BeforeFault { .. }
+    ));
+    assert!(matches!(
+        commit(&mut replay, &q),
+        DueOutcome::Applied { .. }
+    ));
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    paused.step(at(0)).unwrap();
+    assert_eq!(advance(&mut paused, 30), advance(&mut replay, 30));
+    assert_eq!(states(&paused), states(&replay));
+    assert_eq!(paused.position(), replay.position());
 }
 
 #[test]
-fn unarmed_paused_hold_roundtrips_codec_and_releases_once_workers_one_four() {
+fn unarmed_paused_hold_roundtrips_codec_and_releases_once() {
     let mut d = ready();
     d.with_barrier(|b| b.set_rate(PlaybackRate::Paused))
         .unwrap();
@@ -819,19 +842,17 @@ fn unarmed_paused_hold_roundtrips_codec_and_releases_once_workers_one_four() {
     let expected_states = states(&d);
     drop(d);
     let c = decode(&encoded, &store);
-    for workers in [1, 4] {
-        let mut d = restore(&c, workers);
-        assert_eq!(d.playback.held.as_ref(), Some(record(&p)));
-        assert!(!d.playback.before_next);
-        assert!(matches!(
-            d.step(at(100)).unwrap(),
-            StepOutcome::BeforeFault { .. }
-        ));
-        d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        assert_eq!(advance(&mut d, 30), expected);
-        assert_eq!(states(&d), expected_states);
-    }
+    let mut d = restore(&c);
+    assert_eq!(d.playback.held.as_ref(), Some(record(&p)));
+    assert!(!d.playback.before_next);
+    assert!(matches!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BeforeFault { .. }
+    ));
+    d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    assert_eq!(advance(&mut d, 30), expected);
+    assert_eq!(states(&d), expected_states);
 }
 
 #[test]
@@ -872,7 +893,7 @@ fn immediate_unavailable_admission_has_exact_record_even_without_pending_effect(
 }
 
 #[test]
-fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_finish() {
+fn a_finishing_commit_keeps_pending_step_and_anchor_until_the_end() {
     let mut d = ready();
     d.with_barrier(|b| {
         b.set_rate(PlaybackRate::Paused)?;
@@ -881,27 +902,40 @@ fn due_completion_keeps_pending_step_and_anchor_until_ordinary_step_observes_fin
     .unwrap();
     let playback = d.playback.clone();
     let position = d.position();
-    let end = d.execution.quantum_end;
+    let end = d.execution.quantum_end(d.now()).unwrap();
     let p = prepare(
         &mut d,
         "finish",
         Action::Crash(Target::Machine(MachineId(0))),
     );
+    // The oracle's crash ends the run one floor later, not at its commit.
+    assert_eq!(commit(&mut d, &p), DueOutcome::Applied { at: position.at });
     assert_eq!(
-        commit(&mut d, &p),
-        DueOutcome::Finished {
-            at: position.at,
-            reason: ExitReason::Crashed
-        }
+        d.execution.finishing,
+        Some((at(position.at.as_nanos() + 10), ExitReason::Crashed))
     );
     assert_eq!(d.playback, playback);
     assert_eq!(d.now(), position.at);
-    assert_eq!(d.execution.quantum_end, end);
-    assert_eq!(d.execution.completed_quanta, position.completed_quanta);
-    assert!(matches!(
+    assert_eq!(d.execution.quantum_end(d.now()).unwrap(), end);
+    assert_eq!(
+        d.execution.completed_quanta(d.now()),
+        position.completed_quanta
+    );
+    // The pending step admits the rest of its quantum, and the next one
+    // reaches the end of the run.
+    assert_eq!(
         d.step(at(100)).unwrap(),
-        StepOutcome::Finished { .. }
-    ));
+        StepOutcome::BarrierReached { at: end }
+    );
+    assert!(!status(&mut d).stepping);
+    d.with_barrier(|b| b.step_quantum()).unwrap();
+    assert_eq!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::Finished {
+            at: at(position.at.as_nanos() + 10),
+            reason: ExitReason::Crashed
+        }
+    );
     assert!(!status(&mut d).stepping);
 }
 
@@ -931,7 +965,6 @@ fn spy() -> (Driver<Spy>, BudgetCalls) {
     let restored = calls.clone();
     let d = Driver::<Spy>::from_checkpoint(
         &c,
-        4,
         || Ok(Context(None)),
         move |s| {
             Ok(Spy {
@@ -976,7 +1009,8 @@ fn applied_is_dispatch_not_future_ack_settlement_and_only_zero_budgets_run() {
     assert!(!events
         .iter()
         .any(|e| matches!(e.kind, EventKind::FaultSettled { .. })));
-    d.step(at(6)).unwrap();
+    // Acknowledged at 6, and committed once no machine can emit before it.
+    d.step(at(7)).unwrap();
     assert!(d.drain_events().iter().any(|e| matches!(&e.kind, EventKind::FaultSettled { record: fault, status: SettlementStatus::Applied, .. } if fault == record(&p))));
 }
 

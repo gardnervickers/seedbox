@@ -11,6 +11,20 @@
 //! timers before executing. No instructions execute during the elapsed gap;
 //! an overdue timer becomes deliverable at the adopted time. Shared time may
 //! lag local progress while the driver brings other machines to the same barrier.
+//! A run that starts where the last one stopped, with nothing to deliver,
+//! adopts nothing and draws nothing. Its budget splits a translated block as a
+//! timer deadline does, and the split finds no new interrupt: timers run only
+//! between blocks, and an I/O instruction that raises one ends its block. A
+//! run too short to complete one instruction (possible only above the nominal
+//! factor) is charged as part of the next instruction only once its CPU has
+//! taken what was pending at its start: an interrupt is delivered at the time
+//! a longer run delivers it, and a CPU that stays halted is charged nothing.
+//! Timers due when a run ends run before it stops, and none run while the
+//! machine is stopped (adopting time included), whichever of QEMU's threads
+//! gets there first.
+//! So where runs end should leave no trace in the guest or its witness. The
+//! native `stop_tests` checks that on one Linux guest with one CPU and no
+//! frames, disk or host input, under nominal and throttled pricing.
 //!
 //! Work is priced in QEMU icount steps, not hardware retirement. Ordinary
 //! instructions and translator-raised exceptions such as `ud2` cost one step.
@@ -106,6 +120,16 @@ use qemu::Process;
 
 /// x86 Linux `COMMAND_LINE_SIZE`, including the terminating NUL.
 const COMMAND_LINE_SIZE: usize = 2048;
+/// Width of each boot's entropy argument (` seedbox.entropy=` and 16 hex
+/// digits).
+const ENTROPY_ARGUMENT_BYTES: usize = " seedbox.entropy=".len() + 16;
+/// Room each boot's kernel command line keeps for the arguments appended per
+/// boot (see `qemu::boot_command_line`): its entropy and its widest realtime
+/// offset.
+const PER_BOOT_ARGUMENT_BYTES: usize =
+    ENTROPY_ARGUMENT_BYTES + seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES;
+/// Capacity of a manifest's command line, including the terminating NUL.
+const COMMAND_LINE_CAPACITY: usize = COMMAND_LINE_SIZE - PER_BOOT_ARGUMENT_BYTES;
 /// Size of a [`Boot::Program`] image: one 64 KiB BIOS ROM.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const PROGRAM_BYTES: usize = 64 * 1024;
@@ -446,11 +470,14 @@ impl TcgMachine {
         };
         // x86 COMMAND_LINE_SIZE includes its trailing NUL; Linux would
         // silently truncate a longer line copied from the boot parameters.
-        if command_line.contains('\0') || command_line.len() >= COMMAND_LINE_SIZE {
+        if command_line.contains('\0') || command_line.len() >= COMMAND_LINE_CAPACITY {
             return Err(Error(format!(
                 "TCG kernel command line must contain no NUL and fit in {} bytes",
-                COMMAND_LINE_SIZE - 1
+                COMMAND_LINE_CAPACITY - 1
             )));
+        }
+        if seedbox_machine::clock::sets_realtime_offset(&command_line) {
+            return Err(Error("TCG kernel command line sets seedbox.clock_offset_ns; remove it, each boot appends its own".into()));
         }
         // TCG needs no application instrumentation. Packaging borrows the
         // immutable prepared input; PV may derive its own private preparation.
@@ -711,7 +738,7 @@ impl TcgMachine {
                     "{command_line} seedbox.control={}",
                     u8::from(policy.controller.as_deref() == Some(name))
                 );
-                if next.len() >= COMMAND_LINE_SIZE {
+                if next.len() >= COMMAND_LINE_CAPACITY {
                     return Err(Error("TCG configured controller argument exceeds kernel command-line capacity; shorten the base command line".into()));
                 }
                 *command_line = next;
@@ -1370,6 +1397,9 @@ mod execution_tests;
 
 #[cfg(test)]
 mod network_unit_tests;
+
+#[cfg(test)]
+mod stop_tests;
 
 /// Explicit fixture-only construction and stopped evidence for retained scenarios.
 /// These helpers are absent unless `test-support` is enabled; they never export

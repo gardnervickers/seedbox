@@ -10,7 +10,7 @@ fn apply(driver: &mut Driver<TestMachine>, time: u64, action: Action) -> StepOut
 
 #[test]
 fn shutdown_after_reboot_targets_the_new_boot() {
-    let mut driver = controlled_targets(1, &[&[Op::Work(100)]]);
+    let mut driver = controlled_targets(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -39,7 +39,7 @@ fn shutdown_after_reboot_targets_the_new_boot() {
 
 #[test]
 fn shutdown_refreshes_blocked_scheduling_without_cpu_and_later_runs_exit() {
-    let mut driver = controlled(2, &[&[Op::Sleep(100), Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Sleep(100), Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -71,10 +71,11 @@ fn shutdown_refreshes_blocked_scheduling_without_cpu_and_later_runs_exit() {
         driver.step(at(2)).unwrap(),
         StepOutcome::BarrierReached { at: at(2) }
     );
+    // It exits at 3, and the run ends one floor later.
     assert_eq!(
-        driver.step(at(100)).unwrap(),
+        run_to(&mut driver, 100),
         StepOutcome::Finished {
-            at: at(3),
+            at: at(13),
             reason: ExitReason::Shutdown
         }
     );
@@ -95,7 +96,7 @@ fn shutdown_refreshes_blocked_scheduling_without_cpu_and_later_runs_exit() {
 
 #[test]
 fn paused_shutdown_is_delivered_once_without_executing_cleanup_until_resume() {
-    let mut driver = controlled(2, &[&[Op::Park, Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Park, Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -146,10 +147,11 @@ fn paused_shutdown_is_delivered_once_without_executing_cleanup_until_resume() {
             Ok(())
         })
         .unwrap();
+    // It exits at 12, and the run ends one floor later.
     assert_eq!(
-        driver.step(at(100)).unwrap(),
+        run_to(&mut driver, 100),
         StepOutcome::Finished {
-            at: at(12),
+            at: at(22),
             reason: ExitReason::Shutdown
         }
     );
@@ -159,7 +161,7 @@ fn paused_shutdown_is_delivered_once_without_executing_cleanup_until_resume() {
 
 #[test]
 fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_again() {
-    let mut driver = controlled_targets(1, &[&[Op::Work(100)]]);
+    let mut driver = controlled_targets(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -206,7 +208,7 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
         })
         .unwrap();
     for crash in [false, true] {
-        let mut driver = controlled_targets(1, &[&[Op::Exit]]);
+        let mut driver = controlled_targets(&[&[Op::Exit]]);
         let id = ids(&mut driver)[0];
         if crash {
             driver
@@ -241,7 +243,7 @@ fn repeated_in_progress_and_exited_shutdown_requests_do_not_latch_or_deliver_aga
 #[test]
 fn crash_and_reboot_discard_pending_or_delivered_shutdown_without_affecting_snapshot() {
     for paused in [false, true] {
-        let mut driver = controlled_targets(1, &[&[Op::Work(100)]]);
+        let mut driver = controlled_targets(&[&[Op::Work(100)]]);
         let id = ids(&mut driver)[0];
         driver
             .with_barrier(|barrier| {
@@ -310,7 +312,7 @@ fn crash_and_reboot_discard_pending_or_delivered_shutdown_without_affecting_snap
 #[test]
 fn shutdown_request_or_delivery_error_poisons_before_later_actions() {
     for request_error in [false, true] {
-        let mut driver = configured(2, {
+        let mut driver = configured({
             let mut guest = machine(0, &[Op::Work(100)]);
             guest.fail_shutdown = request_error;
             guest.fail_run_at = (!request_error).then_some(5);
@@ -335,90 +337,61 @@ fn shutdown_request_or_delivery_error_poisons_before_later_actions() {
 }
 
 #[test]
-fn every_effective_fault_holds_in_order_and_worker_count_does_not_change_results() {
-    let mut reference = None;
-    for workers in [1, 2, 4] {
-        let mut driver = controlled(
-            workers,
-            &[&[Op::Sleep(100), Op::Work(100)], &[Op::Work(100)]],
-        );
-        let ids = ids(&mut driver);
-        driver
-            .with_barrier(|barrier| {
-                for (time, name, action) in [
-                    (3, "pause", Action::Pause(Target::Machine(ids[0]))),
-                    (5, "shutdown", Action::Shutdown(Target::Machine(ids[0]))),
-                    (7, "resume", Action::Resume(Target::Machine(ids[0]))),
-                    (
-                        7,
-                        "shutdown-again",
-                        Action::Shutdown(Target::Machine(ids[0])),
-                    ),
-                    (8, "crash", Action::Crash(Target::Machine(ids[1]))),
-                ] {
-                    barrier.schedule(at(time), key(name), action)?;
-                }
-                barrier.pause_before_next_fault(PlaybackRate::Unlimited)
-            })
-            .unwrap();
-        let mut outcomes = Vec::new();
-        let mut holds = Vec::new();
-        loop {
-            let outcome = driver.step(at(100)).unwrap();
-            outcomes.push(outcome.clone());
-            if let Some(fault) = held(&outcome) {
-                holds.push(fault);
-                // Rearming applies the held effect exactly once and stops
-                // before the next effective fault.
-                driver
-                    .with_barrier(|barrier| {
-                        barrier.pause_before_next_fault(PlaybackRate::Unlimited)
-                    })
-                    .unwrap();
+fn every_effective_fault_holds_in_order() {
+    let mut driver = controlled(&[&[Op::Sleep(100), Op::Work(100)], &[Op::Work(100)]]);
+    let ids = ids(&mut driver);
+    driver
+        .with_barrier(|barrier| {
+            for (time, name, action) in [
+                (3, "pause", Action::Pause(Target::Machine(ids[0]))),
+                (5, "shutdown", Action::Shutdown(Target::Machine(ids[0]))),
+                (7, "resume", Action::Resume(Target::Machine(ids[0]))),
+                (
+                    7,
+                    "shutdown-again",
+                    Action::Shutdown(Target::Machine(ids[0])),
+                ),
+                (8, "crash", Action::Crash(Target::Machine(ids[1]))),
+            ] {
+                barrier.schedule(at(time), key(name), action)?;
             }
-            if matches!(outcome, StepOutcome::Finished { .. }) {
-                break;
-            }
-            assert!(outcomes.len() < 20);
+            barrier.pause_before_next_fault(PlaybackRate::Unlimited)
+        })
+        .unwrap();
+    let mut outcomes = Vec::new();
+    let mut holds = Vec::new();
+    loop {
+        let outcome = driver.step(at(100)).unwrap();
+        outcomes.push(outcome.clone());
+        if let Some(fault) = held(&outcome) {
+            holds.push(fault);
+            // Rearming applies the held effect exactly once and stops
+            // before the next effective fault.
+            driver
+                .with_barrier(|barrier| barrier.pause_before_next_fault(PlaybackRate::Unlimited))
+                .unwrap();
         }
-        assert_eq!(
-            holds,
-            [
-                (at(3), FaultAction::Pause, ids[0]),
-                (at(5), FaultAction::Shutdown, ids[0]),
-                (at(7), FaultAction::Resume, ids[0]),
-                (at(7), FaultAction::Shutdown, ids[0]),
-                (at(8), FaultAction::Crash, ids[1]),
-            ]
-        );
-        assert_eq!(
-            *outcomes.last().unwrap(),
-            StepOutcome::Finished {
-                at: at(9),
-                reason: ExitReason::Shutdown
-            }
-        );
-        let observed = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(id, guest)| {
-                        (
-                            barrier.stopped(id).unwrap(),
-                            guest.executed,
-                            guest.shutdown_latches,
-                            guest.shutdown_deliveries,
-                            guest.log.lock().unwrap().clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>())
-            })
-            .unwrap();
-        let result = (outcomes, observed, driver.drain_observations().events);
-        if let Some(reference) = &reference {
-            assert_eq!(&result, reference);
-        } else {
-            reference = Some(result);
+        if matches!(outcome, StepOutcome::Finished { .. }) {
+            break;
         }
+        assert!(outcomes.len() < 20);
     }
+    assert_eq!(
+        holds,
+        [
+            (at(3), FaultAction::Pause, ids[0]),
+            (at(5), FaultAction::Shutdown, ids[0]),
+            (at(7), FaultAction::Resume, ids[0]),
+            (at(7), FaultAction::Shutdown, ids[0]),
+            (at(8), FaultAction::Crash, ids[1]),
+        ]
+    );
+    assert_eq!(
+        *outcomes.last().unwrap(),
+        // The oracle exits at 9, and the run ends one floor later.
+        StepOutcome::Finished {
+            at: at(19),
+            reason: ExitReason::Shutdown
+        }
+    );
 }

@@ -36,10 +36,7 @@ fn exercise_streaming(mut d: Driver<Mock>) {
     let expected = continue_from(&mut d);
     drop(d);
     let reusable = decode(&bytes, &store);
-    let branches: Vec<_> = [1, 4]
-        .into_iter()
-        .map(|workers| restore(&reusable, workers))
-        .collect();
+    let branches: Vec<_> = (0..2).map(|_| restore(&reusable)).collect();
     drop(reusable);
     for mut b in branches {
         assert_eq!(status(&mut b), before);
@@ -136,26 +133,24 @@ fn streamed_capture_preserves_held_fault_and_pending_quantum_without_resuming() 
     let expected = advance(&mut d, 30);
     let expected_states = states(&d);
     drop(d);
-    for workers in [1, 4] {
-        let decoded = decode(&bytes, &store);
-        let mut b = restore(&decoded, workers);
-        assert_eq!(status(&mut b), before);
-        assert!(matches!(
-            b.step(at(100)).unwrap(),
-            StepOutcome::BeforeFault { .. }
-        ));
-        b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        assert_eq!(advance(&mut b, 30), expected);
-        assert_eq!(states(&b), expected_states);
-        assert_eq!(
-            b.execution.machines[1]
-                .lifecycle
-                .execution()
-                .factor_permille(),
-            2000
-        );
-    }
+    let decoded = decode(&bytes, &store);
+    let mut b = restore(&decoded);
+    assert_eq!(status(&mut b), before);
+    assert!(matches!(
+        b.step(at(100)).unwrap(),
+        StepOutcome::BeforeFault { .. }
+    ));
+    b.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    assert_eq!(advance(&mut b, 30), expected);
+    assert_eq!(states(&b), expected_states);
+    assert_eq!(
+        b.execution.machines[1]
+            .lifecycle
+            .execution()
+            .factor_permille(),
+        2000
+    );
     let mut d = build(vec![spec(0, true, vec![])], vec![], true);
     d.step(at(3)).unwrap();
     d.with_barrier(|b| {
@@ -234,7 +229,6 @@ fn tracked(count: usize) -> (Driver<Tracked>, Arc<Audit>) {
     let driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         51,
         move || {
             contexts.contexts.fetch_add(1, Ordering::SeqCst);

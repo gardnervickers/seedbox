@@ -75,7 +75,7 @@ fn validate(c: &Capture, disk: Option<&DiskImage>) -> Result<()> {
         return Err(invalid("RAM layout version"));
     }
     boot::RamLayout::native(c.memory_bytes).map_err(|_| invalid("RAM layout"))?;
-    boot::arguments(&c.command_line).map_err(|_| invalid("kernel arguments"))?;
+    boot::base_arguments(&c.command_line).map_err(|_| invalid("kernel arguments"))?;
     if let Some(mac) = c.network {
         seedbox_machine::definition::MacAddress::new(mac).map_err(|_| invalid("network MAC"))?;
     }

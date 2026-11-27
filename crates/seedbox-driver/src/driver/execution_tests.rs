@@ -71,11 +71,10 @@ fn at(n: u64) -> Timestamp {
 fn config(n: u32) -> ExecutionConfig {
     ExecutionConfig::new(n).unwrap()
 }
-fn driver(start: u64, workers: usize, machines: Vec<RecordingMachine>) -> Driver<RecordingMachine> {
+fn driver(start: u64, machines: Vec<RecordingMachine>) -> Driver<RecordingMachine> {
     super::fixture::driver(
         at(start),
         Duration::from_nanos(10),
-        workers,
         SeededRng::new(7),
         || Ok(()),
         || Ok(machines),
@@ -113,7 +112,7 @@ fn rejected(events: &[Event]) -> Vec<(InputKey, RejectionReason)> {
 
 #[test]
 fn throttle_and_heal_apply_in_fifo_order_without_a_run_of_their_own() {
-    let mut driver = driver(0, 1, vec![RecordingMachine::default()]);
+    let mut driver = driver(0, vec![RecordingMachine::default()]);
     let id = MachineId(0);
     let slow = key("slow");
     driver
@@ -170,7 +169,7 @@ fn throttle_and_heal_apply_in_fifo_order_without_a_run_of_their_own() {
 
 #[test]
 fn paused_setting_does_not_adopt_machine_time_or_shift_its_timer() {
-    let mut driver = driver(0, 1, vec![RecordingMachine::default()]);
+    let mut driver = driver(0, vec![RecordingMachine::default()]);
     let id = MachineId(0);
     let blocked = StopReason::Blocked {
         reached: at(0),
@@ -212,7 +211,6 @@ fn paused_setting_does_not_adopt_machine_time_or_shift_its_timer() {
 fn exited_settings_and_crash_reboot_retain_the_configured_value() {
     let mut driver = driver(
         0,
-        1,
         vec![
             RecordingMachine::default(),
             RecordingMachine {
@@ -282,44 +280,38 @@ fn exited_settings_and_crash_reboot_retain_the_configured_value() {
 }
 
 #[test]
-fn settings_are_machine_local_and_worker_count_independent() {
-    let run = |workers| {
-        let mut driver = driver(
-            0,
-            workers,
-            vec![RecordingMachine::default(), RecordingMachine::default()],
-        );
-        let first = key("first");
-        driver
-            .schedule(at(0), first.clone(), setting(MachineId(0), 1001))
-            .unwrap();
-        driver
-            .schedule(at(0), auto_key(), setting(MachineId(1), 3000))
-            .unwrap();
-        driver.schedule(at(1), auto_key(), heal(&first)).unwrap();
-        driver
-            .schedule(at(2), auto_key(), setting(MachineId(0), 4000))
-            .unwrap();
-        while driver.now() < at(4) {
-            driver.step(at(4)).unwrap();
-        }
-        [
-            calls(&driver, MachineId(0)).to_vec(),
-            calls(&driver, MachineId(1)).to_vec(),
-        ]
-    };
-    let serial = run(1);
-    assert_eq!(serial, run(2));
-    assert!(serial[0].iter().any(|call| call.factor == 1001));
-    assert!(serial[0].iter().any(|call| call.factor == 4000));
-    assert!(serial[1].iter().all(|call| call.factor == 3000));
+fn settings_are_machine_local() {
+    let mut driver = driver(
+        0,
+        vec![RecordingMachine::default(), RecordingMachine::default()],
+    );
+    let first = key("first");
+    driver
+        .schedule(at(0), first.clone(), setting(MachineId(0), 1001))
+        .unwrap();
+    driver
+        .schedule(at(0), auto_key(), setting(MachineId(1), 3000))
+        .unwrap();
+    driver.schedule(at(1), auto_key(), heal(&first)).unwrap();
+    driver
+        .schedule(at(2), auto_key(), setting(MachineId(0), 4000))
+        .unwrap();
+    while driver.now() < at(4) {
+        driver.step(at(4)).unwrap();
+    }
+    let observed = [
+        calls(&driver, MachineId(0)).to_vec(),
+        calls(&driver, MachineId(1)).to_vec(),
+    ];
+    assert!(observed[0].iter().any(|call| call.factor == 1001));
+    assert!(observed[0].iter().any(|call| call.factor == 4000));
+    assert!(observed[1].iter().all(|call| call.factor == 3000));
 }
 
 #[test]
 fn invalid_scheduling_and_failed_steps_do_not_apply_later_settings() {
     let mut driver = driver(
         3,
-        1,
         vec![RecordingMachine {
             fail: true,
             ..Default::default()
@@ -380,7 +372,7 @@ fn invalid_scheduling_and_failed_steps_do_not_apply_later_settings() {
 
 #[test]
 fn global_playback_pause_withholds_setting_admission() {
-    let mut driver = driver(0, 1, vec![RecordingMachine::default()]);
+    let mut driver = driver(0, vec![RecordingMachine::default()]);
     let id = MachineId(0);
     driver
         .with_barrier(|barrier| barrier.set_rate(PlaybackRate::Paused))
@@ -411,7 +403,7 @@ fn self_crash_while_paused_keeps_the_pause_gate_but_permits_reboot() {
     // A Driver pause and a confirmed physical crash are separate committed
     // facts: the crash makes the boot Down (Reboot directly eligible, Crash,
     // Pause and Resume refused) while `paused` still reports the gate.
-    let mut driver = driver(0, 1, vec![Default::default(), Default::default()]);
+    let mut driver = driver(0, vec![Default::default(), Default::default()]);
     let id = MachineId(1);
     driver
         .schedule(at(1), key("pause"), Action::Pause(Target::Machine(id)))

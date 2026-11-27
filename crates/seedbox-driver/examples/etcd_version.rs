@@ -73,7 +73,6 @@ where
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         Duration::from_millis(10),
-        1,
         Bytes(7),
         || Ok(()),
         definition,

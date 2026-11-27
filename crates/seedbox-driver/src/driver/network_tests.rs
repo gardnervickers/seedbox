@@ -315,8 +315,8 @@ impl Spec {
     }
     /// As [`Spec::bell`], coming back only once the Driver sleeps in a park:
     /// a Driver that waits any other way never sees the run stop. Every
-    /// machine of the world must split, since the Driver parks with no lent
-    /// job out, and the Driver must hold the doorbell.
+    /// machine of the world must split, so that the Driver has no inline run
+    /// left when it parks, and the Driver must hold the doorbell.
     fn parked(mut self) -> Self {
         self.parked = true;
         self.bell()
@@ -369,7 +369,6 @@ fn networked(index: usize, nic: Option<u8>) -> MachineDefinition {
 fn world(
     start: u64,
     quantum: u64,
-    workers: usize,
     config: NetworkConfig,
     specs: Vec<Spec>,
     spawnable: Vec<Spec>,
@@ -417,7 +416,6 @@ fn world(
     let driver = Driver::new_seeded(
         at(start),
         Duration::from_nanos(quantum),
-        workers,
         5,
         || Ok(()),
         oracle,
@@ -434,7 +432,7 @@ fn world(
 }
 
 fn simple(quantum: u64, config: NetworkConfig, specs: Vec<Spec>) -> World {
-    world(0, quantum, 1, config, specs, Vec::new()).unwrap()
+    world(0, quantum, config, specs, Vec::new()).unwrap()
 }
 
 /// Step to `upto`, returning each barrier reached on the way.
@@ -493,43 +491,32 @@ fn blocked_networked_machines_jump_to_their_next_event() {
         .all(|&(_, start, _)| start == 0 || start >= 10_000 * MS));
 }
 
+/// Every runnable machine bounds a round by one floor after its start, with
+/// or without a network interface: whatever follows from its output, a frame
+/// or a control consequence, is due one floor after it (C1).
 #[test]
-fn runnable_attached_machines_bound_rounds_by_latency_but_unattached_do_not() {
-    let (mut driver, log) = simple(
-        10 * MS,
-        NetworkConfig::default(),
-        vec![spec(Some(1)).busy(), spec(Some(2))],
-    );
-    barriers(&mut driver, 5 * MS);
-    let runs: Vec<_> = log
-        .lock()
-        .unwrap()
-        .runs
-        .iter()
-        .filter(|run| run.0 == 0)
-        .map(|run| (run.1, run.2))
-        .collect();
-    assert_eq!(
-        runs,
-        (0..5).map(|n| (n * MS, (n + 1) * MS)).collect::<Vec<_>>()
-    );
-
-    let (mut driver, log) = simple(
-        10 * MS,
-        NetworkConfig::default(),
-        vec![spec(None).busy(), spec(Some(2))],
-    );
-    barriers(&mut driver, 5 * MS);
-    // Only the attached machine's initial runnable round is bounded.
-    let runs: Vec<_> = log
-        .lock()
-        .unwrap()
-        .runs
-        .iter()
-        .filter(|r| r.0 == 0)
-        .copied()
-        .collect();
-    assert_eq!(runs, [(0, 0, MS), (0, MS, 5 * MS)]);
+fn runnable_machines_bound_rounds_by_latency_attached_or_not() {
+    for attached in [Some(1), None] {
+        let (mut driver, log) = simple(
+            10 * MS,
+            NetworkConfig::default(),
+            vec![spec(attached).busy(), spec(Some(2))],
+        );
+        barriers(&mut driver, 5 * MS);
+        let runs: Vec<_> = log
+            .lock()
+            .unwrap()
+            .runs
+            .iter()
+            .filter(|run| run.0 == 0)
+            .map(|run| (run.1, run.2))
+            .collect();
+        assert_eq!(
+            runs,
+            (0..5).map(|n| (n * MS, (n + 1) * MS)).collect::<Vec<_>>(),
+            "attached {attached:?}"
+        );
+    }
 }
 
 #[test]
@@ -750,7 +737,6 @@ fn spawned_machines_join_the_network_and_host_additions_stay_unattached() {
     let (mut driver, log) = world(
         0,
         10 * MS,
-        1,
         NetworkConfig::default(),
         vec![spec(Some(1)).send(5 * MS, frame(mac(2), 9))],
         vec![spec(Some(2))],
@@ -811,7 +797,6 @@ fn the_nameserver_answers_current_members_regardless_of_partitions() {
     let (mut driver, log) = world(
         0,
         10 * MS,
-        1,
         NetworkConfig::default(),
         vec![
             spec(Some(1))
@@ -897,7 +882,6 @@ fn duplicate_macs_are_rejected_before_the_factory_runs() {
     let result = Driver::<Net>::new(
         at(0),
         Duration::from_nanos(10),
-        1,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         oracle,
@@ -918,7 +902,6 @@ fn duplicate_addresses_are_rejected_before_the_factory_runs() {
     let result = Driver::<Net>::new(
         at(0),
         Duration::from_nanos(10),
-        1,
         crate::rng::SeededRng::new(0),
         || Ok(()),
         networked(0, Some(1)),
@@ -947,7 +930,6 @@ fn definitions_cannot_claim_the_nameserver() {
         let result = Driver::<Net>::new(
             at(0),
             Duration::from_nanos(10),
-            1,
             crate::rng::SeededRng::new(0),
             || Ok(()),
             networked(0, Some(1)),
@@ -967,7 +949,6 @@ fn unrepresentable_arrivals_fail_with_time_overflow_and_bounds_may_overflow() {
     let (mut driver, _) = world(
         start,
         10,
-        1,
         NetworkConfig::default(),
         vec![spec(Some(1)).busy(), spec(Some(2))],
         Vec::new(),
@@ -980,7 +961,6 @@ fn unrepresentable_arrivals_fail_with_time_overflow_and_bounds_may_overflow() {
     let (mut driver, _) = world(
         start,
         10,
-        1,
         NetworkConfig::default(),
         vec![spec(Some(1)).send(start, frame(mac(2), 0)), spec(Some(2))],
         Vec::new(),
@@ -993,47 +973,35 @@ fn unrepresentable_arrivals_fail_with_time_overflow_and_bounds_may_overflow() {
 }
 
 #[test]
-fn worker_count_never_changes_network_results() {
-    let run = |workers| {
-        let config = NetworkConfig::new(
-            Duration::from_micros(100),
-            Duration::from_micros(50),
-            100_000,
-        )
-        .unwrap();
-        let (mut driver, log) = world(
-            0,
-            MS,
-            workers,
-            config,
-            vec![
-                spec(Some(1)).echo(mac(2)).send(0, frame(mac(2), 0)).busy(),
-                spec(Some(2)).echo([0xff; 6]),
-                spec(Some(3)).echo(mac(1)).send(10, frame([0xff; 6], 100)),
-            ],
-            Vec::new(),
-        )
-        .unwrap();
-        named(&mut driver, 2 * MS, "cut", partition(&[0], &[1]));
-        named(
-            &mut driver,
-            8 * MS,
-            "heal",
-            Action::Heal(HealTarget::Input(InputKey::new("cut").unwrap())),
-        );
-        barriers(&mut driver, 20 * MS);
-        let events = driver.drain_events();
-        let log = log.lock().unwrap();
-        // Workers append concurrently; each machine's own order is the evidence.
-        let mut received = log.received.clone();
-        received.sort_by_key(|r| r.0);
-        let mut runs = log.runs.clone();
-        runs.sort_by_key(|r| r.0);
-        (format!("{events:?}"), received, runs)
-    };
-    let one = run(1);
-    assert!(one.1.len() > 50, "traffic exercised: {}", one.1.len());
-    assert_eq!(one, run(4));
+fn partitioned_echo_traffic_flows_before_and_after_the_heal() {
+    let config = NetworkConfig::new(
+        Duration::from_micros(100),
+        Duration::from_micros(50),
+        100_000,
+    )
+    .unwrap();
+    let (mut driver, log) = world(
+        0,
+        MS,
+        config,
+        vec![
+            spec(Some(1)).echo(mac(2)).send(0, frame(mac(2), 0)).busy(),
+            spec(Some(2)).echo([0xff; 6]),
+            spec(Some(3)).echo(mac(1)).send(10, frame([0xff; 6], 100)),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    named(&mut driver, 2 * MS, "cut", partition(&[0], &[1]));
+    named(
+        &mut driver,
+        8 * MS,
+        "heal",
+        Action::Heal(HealTarget::Input(InputKey::new("cut").unwrap())),
+    );
+    barriers(&mut driver, 20 * MS);
+    let received = log.lock().unwrap().received.len();
+    assert!(received > 50, "traffic exercised: {received}");
 }
 
 fn partition(left: &[usize], right: &[usize]) -> Action {
@@ -1222,7 +1190,6 @@ fn partition_membership_is_rejected_before_allocation() {
     let (mut driver, _) = world(
         0,
         10 * MS,
-        1,
         NetworkConfig::default(),
         vec![spec(Some(1)), spec(Some(2)), spec(None)],
         vec![spec(Some(4))],
@@ -1483,49 +1450,43 @@ fn down_members_can_be_partitioned_and_stay_cut_after_reboot() {
 
 #[test]
 fn machines_run_whole_windows_and_take_frames_at_their_arrival() {
-    let mut seen = Vec::new();
-    for workers in [1, 3] {
-        let (mut driver, log) = world(
-            0,
-            MS,
-            workers,
-            NetworkConfig::default(),
-            vec![
-                spec(Some(1)).busy().send(MS / 10, frame(mac(2), 7)),
-                spec(Some(2)),
-                spec(Some(3)).busy(),
-            ],
-            Vec::new(),
-        )
-        .unwrap();
-        // The frame arrives inside the second window: the round does not end
-        // there, the receiver takes it at its arrival and the others run
-        // the whole window in one run.
-        assert_eq!(
-            barriers(&mut driver, 2 * MS),
-            [
-                StepOutcome::BarrierReached { at: at(MS) },
-                StepOutcome::BarrierReached { at: at(2 * MS) },
-            ]
-        );
-        let log = log.lock().unwrap();
-        assert_eq!(log.received, [(1, MS + MS / 10, 7)]);
-        let mut runs = log.runs.clone();
-        runs.sort();
-        assert_eq!(
-            runs,
-            [
-                (0, 0, MS),
-                (0, MS, 2 * MS),
-                (1, 0, MS),
-                (1, MS + MS / 10, 2 * MS),
-                (2, 0, MS),
-                (2, MS, 2 * MS),
-            ]
-        );
-        seen.push((log.received.clone(), runs));
-    }
-    assert_eq!(seen[0], seen[1]);
+    let (mut driver, log) = world(
+        0,
+        MS,
+        NetworkConfig::default(),
+        vec![
+            spec(Some(1)).busy().send(MS / 10, frame(mac(2), 7)),
+            spec(Some(2)),
+            spec(Some(3)).busy(),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    // The frame arrives inside the second window: the round does not end
+    // there, the receiver takes it at its arrival and the others run
+    // the whole window in one run.
+    assert_eq!(
+        barriers(&mut driver, 2 * MS),
+        [
+            StepOutcome::BarrierReached { at: at(MS) },
+            StepOutcome::BarrierReached { at: at(2 * MS) },
+        ]
+    );
+    let log = log.lock().unwrap();
+    assert_eq!(log.received, [(1, MS + MS / 10, 7)]);
+    let mut runs = log.runs.clone();
+    runs.sort();
+    assert_eq!(
+        runs,
+        [
+            (0, 0, MS),
+            (0, MS, 2 * MS),
+            (1, 0, MS),
+            (1, MS + MS / 10, 2 * MS),
+            (2, 0, MS),
+            (2, MS, 2 * MS),
+        ]
+    );
 }
 
 #[test]
@@ -1569,35 +1530,28 @@ type Observed = (
 );
 
 /// Echo chains between busy and blocked machines at 1 ms latency, each
-/// machine split (its runs in flight on the Driver's thread) or lent to a
-/// worker as `split` says; returns the barriers and the sorted log.
-fn echo_world(workers: usize, split: [bool; 3]) -> Observed {
-    echo_world_waiting(workers, split, Idle::default(), SpinThenSleep::SPIN, false)
+/// machine split (its runs in flight beside the others) or run inline as
+/// `split` says; returns the barriers and the sorted log.
+fn echo_world(split: [bool; 3]) -> Observed {
+    echo_world_waiting(split, Idle::default(), SpinThenSleep::SPIN, false)
 }
 
 /// As [`echo_world`], each split machine coming back on another thread and
 /// ringing the doorbell if `bell`, and the Driver waiting as `idle` says for
 /// up to `spin` before each sleep.
-fn echo_world_waiting(
-    workers: usize,
-    split: [bool; 3],
-    idle: Idle,
-    spin: Duration,
-    bell: bool,
-) -> Observed {
+fn echo_world_waiting(split: [bool; 3], idle: Idle, spin: Duration, bell: bool) -> Observed {
     let back = |spec: Spec, splits| match (splits, bell) {
         (false, _) => spec,
         (true, false) => spec.split(),
         (true, true) => spec.bell(),
     };
-    echo_world_as(workers, back, split, idle, spin, None).0
+    echo_world_as(back, split, idle, spin, None).0
 }
 
 /// The echo world with each machine's spec passed through `split` with its
 /// place in `split_machines`, the Driver's worker processes ringing `doorbell`
 /// if given; also returns the split runs the Driver finished.
 fn echo_world_as(
-    workers: usize,
     split: impl Fn(Spec, bool) -> Spec,
     split_machines: [bool; 3],
     idle: Idle,
@@ -1619,10 +1573,10 @@ fn echo_world_as(
         .zip(split_machines)
         .map(|(spec, splits)| split(spec, splits))
         .collect();
-    let (mut driver, log) = world(0, MS, workers, config, specs, Vec::new()).unwrap();
-    driver.workers.set_idle(idle.with_budget(spin));
+    let (mut driver, log) = world(0, MS, config, specs, Vec::new()).unwrap();
+    driver.host.set_idle(idle.with_budget(spin));
     if let Some(doorbell) = doorbell {
-        driver.workers.set_doorbell(doorbell);
+        driver.host.set_doorbell(doorbell);
     }
     let seen = barriers(&mut driver, 40 * MS);
     let log = log.lock().unwrap();
@@ -1664,54 +1618,39 @@ fn the_coordinator_collects_a_later_machine_while_the_first_is_still_running() {
 }
 
 #[test]
-fn split_machines_run_their_lanes_as_lent_machines_do() {
-    let lent = echo_world(1, [false; 3]);
-    assert!(lent.2.len() > 20, "frames crossed every lane: {:?}", lent.2);
-    for workers in [1, 2, 4] {
-        assert_eq!(
-            echo_world(workers, [false; 3]),
-            lent,
-            "lent, {workers} workers"
-        );
-        assert_eq!(
-            echo_world(workers, [true; 3]),
-            lent,
-            "split, {workers} workers"
-        );
-        assert_eq!(
-            echo_world(workers, [true, false, true]),
-            lent,
-            "mixed, {workers} workers"
-        );
-    }
+fn split_machines_run_their_lanes_as_inline_machines_do() {
+    let inline = echo_world([false; 3]);
+    assert!(
+        inline.2.len() > 20,
+        "frames crossed every lane: {:?}",
+        inline.2
+    );
+    assert_eq!(echo_world([true; 3]), inline, "split");
+    assert_eq!(echo_world([true, false, true]), inline, "mixed");
 }
 
 #[test]
 fn split_lanes_reach_the_same_results_however_the_driver_waits() {
-    let lent = echo_world(1, [false; 3]);
+    let inline = echo_world([false; 3]);
     for (idle, spin) in waits() {
-        for workers in [1, 3] {
-            assert_eq!(
-                echo_world_waiting(workers, [true; 3], idle, spin, false),
-                lent,
-                "{idle:?} for {spin:?}, {workers} workers"
-            );
-        }
+        assert_eq!(
+            echo_world_waiting([true; 3], idle, spin, false),
+            inline,
+            "{idle:?} for {spin:?}"
+        );
     }
 }
 
 #[test]
 fn doorbell_lanes_reach_the_same_results_however_the_driver_waits() {
-    let lent = echo_world(1, [false; 3]);
+    let inline = echo_world([false; 3]);
     for (idle, spin) in waits() {
-        for workers in [1, 3] {
-            for split in [[true; 3], [true, false, true]] {
-                assert_eq!(
-                    echo_world_waiting(workers, split, idle, spin, true),
-                    lent,
-                    "{idle:?} for {spin:?}, {workers} workers, {split:?}"
-                );
-            }
+        for split in [[true; 3], [true, false, true]] {
+            assert_eq!(
+                echo_world_waiting(split, idle, spin, true),
+                inline,
+                "{idle:?} for {spin:?}, {split:?}"
+            );
         }
     }
 }
@@ -1733,17 +1672,16 @@ fn contained<T: Send + 'static>(reason: &str, scenario: impl FnOnce() -> T + Sen
 
 #[test]
 fn runs_that_stop_only_for_a_sleeping_driver_wake_it_with_their_tickets() {
-    let lent = echo_world(1, [false; 3]);
+    let inline = echo_world([false; 3]);
     for (idle, spin) in waits() {
         let (observed, finishes, tickets) = contained("every parked run is woken", move || {
             // Its own doorbell: Drivers of other tests cannot hold it.
             let doorbell = Doorbell::detached().unwrap();
             let back = |spec: Spec, _| spec.parked().on(doorbell);
-            let (observed, finishes) =
-                echo_world_as(1, back, [true; 3], idle, spin, Some(doorbell));
+            let (observed, finishes) = echo_world_as(back, [true; 3], idle, spin, Some(doorbell));
             (observed, finishes, doorbell.tickets_read())
         });
-        assert_eq!(observed, lent, "{idle:?} for {spin:?}");
+        assert_eq!(observed, inline, "{idle:?} for {spin:?}");
         // No run stops before the Driver sleeps in a park that names it. Only
         // that park's ticket ends it, and one park names at most every
         // machine's run.
@@ -1757,7 +1695,7 @@ fn runs_that_stop_only_for_a_sleeping_driver_wake_it_with_their_tickets() {
 
 #[test]
 fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() {
-    let lent = echo_world(1, [false; 3]);
+    let inline = echo_world([false; 3]);
     for (idle, spin) in waits() {
         for split in [[true; 3], [true, false, true]] {
             let (observed, tickets) = contained("every run is finished", move || {
@@ -1768,10 +1706,10 @@ fn a_driver_without_the_doorbell_sleeps_in_its_oldest_run_to_the_same_results() 
                     true => spec.bell().on(doorbell),
                     false => spec,
                 };
-                let (observed, _) = echo_world_as(1, back, split, idle, spin, Some(doorbell));
+                let (observed, _) = echo_world_as(back, split, idle, spin, Some(doorbell));
                 (observed, doorbell.tickets_read())
             });
-            assert_eq!(observed, lent, "{idle:?} for {spin:?}, {split:?}");
+            assert_eq!(observed, inline, "{idle:?} for {spin:?}, {split:?}");
             assert_eq!(tickets, 0, "the Driver never parked on the doorbell");
         }
     }
@@ -1789,8 +1727,8 @@ fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
             let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
             let held = || spec(None).busy().held(&release);
             let (mut driver, log) = simple(MS, config, vec![held(), held()]);
-            driver.workers.set_idle(idle.with_budget(spin));
-            driver.workers.set_doorbell(doorbell);
+            driver.host.set_idle(idle.with_budget(spin));
+            driver.host.set_doorbell(doorbell);
             driver.step(at(MS)).unwrap();
             assert!(release.lock().unwrap().is_none(), "the doorbell was let go");
             assert_eq!(doorbell.tickets_read(), 0);
@@ -1821,5 +1759,180 @@ fn a_round_without_the_doorbell_scans_every_run_then_sleeps_in_its_oldest() {
             !watched,
             "{idle:?} for {spin:?}: the round parked after its first scan"
         );
+    }
+}
+
+#[test]
+fn a_machine_not_yet_switched_on_drops_frames_and_takes_them_once_booted() {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
+    let (mut driver, log) = simple(
+        10 * MS,
+        config,
+        vec![
+            spec(Some(1))
+                .send(0, frame(mac(2), 1))
+                .send(spread + MS, frame(mac(2), 2)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    driver.stagger_boots(BOOT_SPREAD).unwrap();
+    let boot = driver.execution.machines[1]
+        .rng
+        .as_ref()
+        .unwrap()
+        .boot_delay(spread);
+    assert!(boot > MS, "the first frame arrives before the boot: {boot}");
+    barriers(&mut driver, spread + 5 * MS);
+    // The frame arriving at 1 ms was dropped, by the lane and with no run;
+    // the receiver first ran at its boot and took the later frame.
+    assert_eq!(received(&log), [(1, spread + 2 * MS, 2)]);
+    let first = log
+        .lock()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|run| run.0 == 1)
+        .copied()
+        .unwrap();
+    assert_eq!(first.1, boot);
+    let facts = driver.drain_observations().frames.facts;
+    let dropped: Vec<_> = facts
+        .iter()
+        .filter(|fact| matches!(fact.fate, FrameFate::ReceiverDropped))
+        .map(|fact| fact.due)
+        .collect();
+    assert_eq!(dropped, [Some(at(MS))]);
+}
+
+/// How the receiver of [`frames_after_a_staggered_boot_are_offered_wherever_steps_end`]
+/// spends its staggered boot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Receiver {
+    /// Boots at its seeded time.
+    Staggered,
+    /// Paused through its boot time: it admits frames at a boundary.
+    Paused,
+    /// Resumed before its boot time and both arrivals, which boots it then.
+    Early,
+    /// Its clock runs ten percent fast from the start, which brings its boot
+    /// forward with its timer.
+    Fast,
+}
+
+/// The two-machine world of the staggered-receiver test: machine 0 sends
+/// machine 1 frame 1 at `s1` and frame 2 at `s2`.
+fn staggered_receiver(receiver: Receiver, s1: u64, s2: u64) -> World {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let (mut driver, log) = simple(
+        100 * MS,
+        config,
+        vec![
+            spec(Some(1))
+                .send(s1, frame(mac(2), 1))
+                .send(s2, frame(mac(2), 2)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    driver.stagger_boots(BOOT_SPREAD).unwrap();
+    let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
+    let boot = driver.execution.machines[1]
+        .rng
+        .as_ref()
+        .unwrap()
+        .boot_delay(spread);
+    let resume = match receiver {
+        Receiver::Staggered | Receiver::Fast => None,
+        Receiver::Paused => Some(spread + MS),
+        Receiver::Early => Some(boot.saturating_sub(2 * MS)),
+    };
+    if let Some(resume) = resume {
+        schedule(&mut driver, 0, Action::Pause(Target::Machine(MachineId(1))));
+        schedule(
+            &mut driver,
+            resume,
+            Action::Resume(Target::Machine(MachineId(1))),
+        );
+    }
+    if receiver == Receiver::Fast {
+        let rate = seedbox_machine::clock::ClockRate::new(100_000_000).unwrap();
+        driver
+            .with_barrier(|barrier| barrier.schedule_clock_rate(at(0), MachineId(1), rate))
+            .unwrap();
+    }
+    (driver, log)
+}
+
+/// A frame arriving after a staggered machine is on is offered, even when an
+/// earlier one, arriving while it was off, shares its lane window and is
+/// dropped. Where the caller's steps end changes nothing, whether the machine
+/// boots at its seeded time, is paused through it and admits the frame at a
+/// boundary, or boots early, by a resume or a fast clock.
+#[test]
+fn frames_after_a_staggered_boot_are_offered_wherever_steps_end() {
+    for receiver in [
+        Receiver::Staggered,
+        Receiver::Paused,
+        Receiver::Early,
+        Receiver::Fast,
+    ] {
+        // The boot timer's time, once the rate change at zero has moved it;
+        // a paused machine has no next run.
+        let boot = |receiver| {
+            let (mut probe, _) = staggered_receiver(receiver, 99 * MS, 99 * MS);
+            probe.step(at(0)).unwrap();
+            let entry = &probe.execution.machines[1];
+            entry.next().or(entry.powered_on_at).unwrap().as_nanos()
+        };
+        let (boot, nominal) = (boot(receiver), boot(Receiver::Staggered));
+        if receiver == Receiver::Fast {
+            assert!(boot + MS < nominal, "{boot} {nominal}");
+        }
+        assert!(boot > 2 * MS, "{receiver:?}: {boot}");
+        // Frame 1 arrives 200 us before the boot and frame 2 200 us after
+        // it, both well inside one 100 ms round.
+        let (s1, s2) = (boot - MS - 200_000, boot - MS + 200_000);
+        let run = |splits: &[u64]| {
+            let (mut driver, log) = staggered_receiver(receiver, s1, s2);
+            for &split in splits {
+                barriers(&mut driver, split);
+            }
+            barriers(&mut driver, 100 * MS);
+            let fates: Vec<_> = (driver.drain_observations().frames.facts.into_iter())
+                .filter(|fact| fact.to == MachineId(1) && fact.due.is_some())
+                .map(|fact| (fact.due, fact.fate))
+                .collect();
+            (received(&log), fates)
+        };
+        let whole = run(&[]);
+        let delivered: Vec<_> = whole.0.iter().map(|&(id, _, tag)| (id, tag)).collect();
+        let dropped = |due| {
+            whole
+                .1
+                .contains(&(Some(at(due)), FrameFate::ReceiverDropped))
+        };
+        if receiver == Receiver::Early {
+            assert_eq!(delivered, [(1, 1), (1, 2)], "{receiver:?}: {whole:?}");
+            assert!(!dropped(s1 + MS), "{receiver:?}: {whole:?}");
+        } else {
+            assert_eq!(delivered, [(1, 2)], "{receiver:?}: {whole:?}");
+            assert!(dropped(s1 + MS), "{receiver:?}: {whole:?}");
+        }
+        assert!(!dropped(s2 + MS), "{receiver:?}: {whole:?}");
+        // A step ending after both sends leaves both frames to one lane.
+        for splits in [
+            &[s2 + 100_000][..],
+            &[boot + 100_000],
+            &[boot - 100_000],
+            &[s1 + MS + 100_000, boot, s2 + MS],
+        ] {
+            assert_eq!(
+                run(splits),
+                whole,
+                "{receiver:?}: steps ending at {splits:?}"
+            );
+        }
     }
 }

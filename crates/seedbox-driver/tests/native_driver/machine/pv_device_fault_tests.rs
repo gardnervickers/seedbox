@@ -1,7 +1,7 @@
 //! Disk and scheduler faults and a block request breakpoint on real Linux
 //! under native PV, through the Driver: each fault takes effect in the guest,
 //! heals settle with the device's counts, and the run is identical across
-//! worker counts, machine migration through snapshots and a Driver checkpoint.
+//! machine migration through snapshots and a Driver checkpoint.
 use crate::{
     driver::{
         faults, Action, BreakEnd, Cause, Driver, Event, EventKind, FaultAction, FaultHandle,
@@ -232,12 +232,7 @@ const DONE: [(&str, &str); 6] = [
     ("calm", "DISK threads switches="),
 ];
 
-fn driver(
-    backend: &Backend<PVMachine>,
-    workers: usize,
-    migrate: bool,
-    resume: bool,
-) -> Driver<Migrating> {
+fn driver(backend: &Backend<PVMachine>, migrate: bool, resume: bool) -> Driver<Migrating> {
     let mut definitions: Vec<_> = layout()
         .into_iter()
         .map(|(name, arguments, _)| {
@@ -254,7 +249,6 @@ fn driver(
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(QUANTUM),
-        workers,
         23,
         || Ok(()),
         oracle,
@@ -451,13 +445,8 @@ fn heal(driver: &mut Driver<Migrating>, events: &mut Vec<Event>) {
     };
     advance(driver, events, None, healed);
 }
-fn run(
-    backend: &Backend<PVMachine>,
-    workers: usize,
-    snapshot_every: Option<u64>,
-    resume: bool,
-) -> Vec<Event> {
-    let mut driver = driver(backend, workers, snapshot_every.is_some(), resume);
+fn run(backend: &Backend<PVMachine>, snapshot_every: Option<u64>, resume: bool) -> Vec<Event> {
+    let mut driver = driver(backend, snapshot_every.is_some(), resume);
     schedule(&mut driver);
     let mut events = Vec::new();
     let done = if resume { finished_resumed } else { finished };
@@ -647,31 +636,29 @@ fn check_faults(events: &[Event]) {
 
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
-fn pv_device_faults_take_effect_and_runs_match_across_workers_and_migration() {
+fn pv_device_faults_take_effect_and_runs_match_across_migration() {
     let backend = backend();
-    let serial = run(&backend, 1, None, false);
+    let serial = run(&backend, None, false);
     check(&serial);
-    assert!(serial == run(&backend, 4, None, false), "workers=4");
     // Snapshot-and-restore every machine but the held one each 7 quanta,
     // while latency completions, preempt streams and holds are live.
-    assert!(serial == run(&backend, 2, Some(7), false), "migration");
+    assert!(serial == run(&backend, Some(7), false), "migration");
 }
 
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
 fn pv_block_request_breakpoint_resumes_the_held_flush_in_order() {
     let backend = backend();
-    let serial = run(&backend, 1, None, true);
+    let serial = run(&backend, None, true);
     check_resumed(&serial);
-    assert!(serial == run(&backend, 4, None, true), "workers=4");
-    assert!(serial == run(&backend, 2, Some(7), true), "migration");
+    assert!(serial == run(&backend, Some(7), true), "migration");
 }
 
 #[test]
 #[ignore = "requires native PV worker, rebuilt assets and disk fixtures"]
 fn pv_device_faults_and_holds_continue_from_a_driver_checkpoint() {
     let backend = backend();
-    let mut source = driver(&backend, 1, false, false);
+    let mut source = driver(&backend, false, false);
     schedule(&mut source);
     let mut before = Vec::new();
     // Capture once the held machine's hold has counted a FLUSH, while
@@ -699,7 +686,6 @@ fn pv_device_faults_and_holds_continue_from_a_driver_checkpoint() {
     let mut factory = (factory_backend.factory)();
     let mut restored = Driver::from_checkpoint(
         &checkpoint,
-        2,
         || Ok(()),
         |snapshot| {
             Ok(Migrating {

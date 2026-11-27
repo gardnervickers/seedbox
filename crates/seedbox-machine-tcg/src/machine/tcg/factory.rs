@@ -27,7 +27,8 @@ impl Factory {
     ///
     /// `epoch_seconds` is the realtime epoch of every machine this factory
     /// creates: on every boot, before Ready, the guest sets `CLOCK_REALTIME` to
-    /// the epoch plus the machine counter (its time base), and the board RTC
+    /// the epoch plus the machine counter (its time base) plus the boot's
+    /// realtime offset, which derives from its boot seed, and the board RTC
     /// derives from the same epoch. Use one epoch for all machines of a run,
     /// including spawned machines; it is part of each machine's boot inputs
     /// and snapshots, not a Driver setting.
@@ -38,7 +39,7 @@ impl Factory {
         assets::bzimage(&kernel)?;
         let init = assets::read(guest_assets, "init")?;
         assets::elf(&init, EM_X86_64, true)?;
-        let command_line = assets::arguments(guest_assets, super::COMMAND_LINE_SIZE)?;
+        let command_line = assets::arguments(guest_assets, super::COMMAND_LINE_CAPACITY)?;
         let firmware = assets::read(guest_assets, "firmware")?;
         assets::bios(&firmware)?;
         let path = guest_assets.join("mke2fs");

@@ -128,13 +128,12 @@ fn make_with(target: Fixture) -> (Driver<Fixture>, MachineId) {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        2,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
         vec![seedbox_driver::test_support::definition("target")],
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         move |definition| {
             Ok(if definition.name == "target" {
                 target.clone()
@@ -387,13 +386,12 @@ fn failed_admission_run_poisons_before_any_response_can_be_observed() {
     let mut driver = Driver::new(
         at(0),
         Duration::from_nanos(10),
-        2,
         Rng,
         || Ok(()),
         seedbox_driver::test_support::definition("oracle"),
         Vec::new(),
         Vec::new(),
-        seedbox_driver::driver::NetworkConfig::default(),
+        seedbox_driver::test_support::floor(Duration::from_nanos(10)),
         |_| {
             Ok(Fixture {
                 fail: true,
@@ -440,14 +438,19 @@ fn same_time_process_effects_follow_fifo_input_order() {
             barrier.schedule(at(20), auto_key(), stop(oracle))
         })
         .unwrap();
-    assert!(matches!(
+    assert_eq!(
         driver.step(at(20)).unwrap(),
+        StepOutcome::BarrierReached { at: at(20) }
+    );
+    let responses = outputs(&driver.drain_observations().events);
+    // The oracle's acknowledgement at 20 ends the run one floor later.
+    assert!(matches!(
+        driver.step(at(100)).unwrap(),
         StepOutcome::Finished {
             reason: ExitReason::Shutdown,
             ..
         }
     ));
-    let responses = outputs(&driver.drain_observations().events);
     assert_eq!(
         responses
             .iter()

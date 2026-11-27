@@ -13,7 +13,7 @@ pub use export::pv_large_export_under_load;
 mod disk;
 mod held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
-pub use disk::{disk_checkpoint_continuation, disk_repeat_workers};
+pub use disk::{disk_checkpoint_continuation, disk_repeat};
 pub use held_checkpoint::native_held_checkpoint;
 #[cfg(any(feature = "kvm-tests", feature = "tcg-tests"))]
 mod fault_api;
@@ -82,7 +82,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -197,7 +197,6 @@ struct NativeProvider {
     backend: CpuBackend,
     session: PathBuf,
     runtimes: Arc<Mutex<Vec<PathBuf>>>,
-    workers: Arc<AtomicUsize>,
     observed: Arc<AtomicBool>,
 }
 /// Test-only executor that launches its inner Driver worker without the
@@ -215,9 +214,6 @@ impl ExecutionBackend for Unobserved {
     }
     fn profile(&self) -> ExecutionProfile {
         self.0.profile()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        self.0.performance_parameters()
     }
     fn execute(
         &self,
@@ -254,13 +250,9 @@ impl BackendProvider for NativeProvider {
             .lock()
             .unwrap()
             .push(selected.archive().parent().unwrap().to_owned());
-        let executor = DriverExecutor::new(
-            inputs.profile.clone(),
-            self.backend,
-            self.workers.load(Ordering::SeqCst),
-        )?
-        .with_runtime(selected)?
-        .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE)));
+        let executor = DriverExecutor::new(inputs.profile.clone(), self.backend)?
+            .with_runtime(selected)?
+            .with_launch_context(vec![], Some(self.session.join(SESSION_LEASE_FILE)));
         // Only an explicitly opted-in test can replace the monitor executable;
         // the retained real release Driver child and guest remain unchanged.
         #[cfg(feature = "worker-failure-tests")]
@@ -683,7 +675,6 @@ struct NativeSession {
     store: ContentStore,
     execution_root: PathBuf,
     runtime_paths: Arc<Mutex<Vec<PathBuf>>>,
-    workers: Arc<AtomicUsize>,
     observed: Arc<AtomicBool>,
     client: Client,
     submitted: usize,
@@ -705,7 +696,6 @@ impl NativeSession {
         let runtime_paths = Arc::new(Mutex::new(Vec::new()));
         #[cfg(feature = "worker-failure-tests")]
         let worker_failure: WorkerFailureSetup = Default::default();
-        let workers = Arc::new(AtomicUsize::new(1));
         let observed = Arc::new(AtomicBool::new(true));
         let manager = Arc::new(Manager::new(Catalogue::in_memory()));
         let execution_root = session.path().join("execution");
@@ -720,7 +710,6 @@ impl NativeSession {
                     backend,
                     session: session.path().to_owned(),
                     runtimes: runtime_paths.clone(),
-                    workers: workers.clone(),
                     observed: observed.clone(),
                 }),
             )
@@ -750,20 +739,13 @@ impl NativeSession {
             store,
             execution_root,
             runtime_paths,
-            workers,
             observed,
             bound: simulated_bound(backend),
             client,
             submitted: 0,
         }
     }
-    async fn submit(
-        &mut self,
-        mut request: SubmitRequest,
-        workers: usize,
-    ) -> seedbox_api::SimulationId {
-        self.workers.store(workers, Ordering::SeqCst);
-        request.options.machine_workers = Some(workers as u32);
+    async fn submit(&mut self, mut request: SubmitRequest) -> seedbox_api::SimulationId {
         request.request_id = format!("native-run-{}", self.submitted);
         request.metadata.name = format!("native-pv-service-{}", self.submitted);
         let accepted = self.client.submit(&request).await.unwrap();
@@ -950,7 +932,6 @@ impl NativeSession {
         &self,
         id: &seedbox_api::SimulationId,
         stopped: bool,
-        workers: usize,
         seed: u64,
     ) -> Option<String> {
         let mut watch = self.client.watch(id).await.unwrap();
@@ -1021,12 +1002,11 @@ impl NativeSession {
                 .hex();
             assert_eq!(witness.len(), 64);
             assert!(!witness.is_empty());
-            eprintln!("native witness: id={id} workers={workers} witness={witness}");
+            eprintln!("native witness: id={id} witness={witness}");
             Some(witness.to_owned())
         };
         // Verify the actual launched Driver request, not just the test setting.
         let request = self.launch_request(id);
-        assert_eq!(request.machine_workers, workers);
         assert_eq!(request.seed, seed);
         assert_eq!(self.runtime_paths.lock().unwrap().len(), self.submitted);
         let _barriers = self.assert_cleanup();
@@ -1142,14 +1122,12 @@ impl NativeSession {
 struct NativeRun {
     iterations: u64,
     seed: u64,
-    workers: usize,
 }
 impl NativeRun {
     fn cpu(iterations: u64) -> Self {
         Self {
             iterations,
             seed: 123,
-            workers: 1,
         }
     }
 }
@@ -1357,7 +1335,7 @@ async fn native_runs(
         if index == 0 {
             original = Some(request.clone());
         }
-        let id = session.submit(request, run.workers).await;
+        let id = session.submit(request).await;
         assert!(
             !ids.contains(&id),
             "fresh submission reused an old execution"
@@ -1371,14 +1349,12 @@ async fn native_runs(
             );
             session.client.stop(&id).await.unwrap();
         }
-        let witness = session
-            .complete(&id, cancelled, run.workers, run.seed)
-            .await;
+        let witness = session.complete(&id, cancelled, run.seed).await;
         assert!(!worker.exists());
         if let Some(witness) = witness {
             eprintln!(
-                "native run: id={id} seed={} workers={} iterations={} witness={witness}",
-                run.seed, run.workers, run.iterations
+                "native run: id={id} seed={} iterations={} witness={witness}",
+                run.seed, run.iterations
             );
             if index == 1 {
                 let comparison = session.client.compare(&ids[0], &id).await.unwrap();
@@ -1436,27 +1412,6 @@ pub async fn native_completion_and_cancellation(backend: CpuBackend) {
     })
     .await;
 }
-pub async fn pv_worker_counts() {
-    native_case(|owner| {
-        Box::pin(async move {
-            owner
-                .scenario(
-                    CpuBackend::Pv,
-                    &[
-                        NativeRun::cpu(200_000),
-                        NativeRun {
-                            workers: 4,
-                            ..NativeRun::cpu(200_000)
-                        },
-                    ],
-                    false,
-                    Some(true),
-                )
-                .await;
-        })
-    })
-    .await;
-}
 pub async fn pv_seed_report() {
     // CPU-only input need not consume seed randomness; report raw results.
     native_case(|owner| {
@@ -1487,10 +1442,10 @@ pub async fn pv_checkpoint_continuation() {
         // More than one virtual window of CPU work, still a finite stock fixture.
         let request = submission(CpuBackend::Pv, session.root.path(), &session.store, 2_000_000, 123);
 
-        let baseline = session.submit(request.clone(), 1).await;
+        let baseline = session.submit(request.clone()).await;
 
         session.worker(&baseline).await;
-        let uninterrupted = session.complete(&baseline, false, 1, 123).await.unwrap();
+        let uninterrupted = session.complete(&baseline, false, 123).await.unwrap();
 
         let final_ns = session.client.describe(&baseline).await.unwrap().status.simulated_time_ns;
         let target_ns = final_ns.div_ceil(2);
@@ -1498,7 +1453,7 @@ pub async fn pv_checkpoint_continuation() {
             "CPU fixture must span multiple committed windows");
         let mut capture_request = request;
         capture_request.options.start_paused = true;
-        let source = session.submit(capture_request, 1).await;
+        let source = session.submit(capture_request).await;
         session.worker(&source).await;
         session.control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let mut step = 0u64;
@@ -1543,22 +1498,20 @@ pub async fn pv_checkpoint_continuation() {
         assert!(captured_ns >= target_ns && captured_ns < final_ns);
         eprintln!("C2 mid-workload capture: final_ns={final_ns} target_ns={target_ns} captured_ns={captured_ns} captured_rounds={captured_rounds} source_START_count=1 source_END_count=0");
 
-        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
 
         let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
         let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
         assert!(!assets.is_empty());
 
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, 123).await;
+        session.complete(&source, true, 123).await;
 
         // Import must use the exported content closure, not the source paths.
 
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
-        session.workers.store(4, Ordering::SeqCst);
-        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(restored, source);
@@ -1588,7 +1541,7 @@ pub async fn pv_checkpoint_continuation() {
         let after_continue = session.client.playback(&restored).await.unwrap().state;
         eprintln!("restore position AFTER continue: {after_continue:?}");
 
-        let continued = session.complete(&restored, false, 4, 123).await.unwrap();
+        let continued = session.complete(&restored, false, 123).await.unwrap();
 
         eprintln!("restore final simulated_time_ns={}", session.client.describe(&restored).await.unwrap().status.simulated_time_ns);
         let continued_output = session.output(&restored).await;
@@ -1932,9 +1885,11 @@ fn network_world_submission(
     request
 }
 /// `request` with one input at `at_ns` that no application observes: a one
-/// second realtime step of the oracle, whose relative nanosleep is measured on
-/// the monotonic clock. It gives the public pre-fault pause a deterministic
-/// boundary at that time; runs that compare carry it alike.
+/// second realtime step of the server, whose probe reads no clock. It gives
+/// the public pre-fault pause a deterministic boundary at that time; runs that
+/// compare carry it alike. It is not the oracle's: the run ends one latency
+/// after the oracle's exit, and the guest work of a step moves that exit (on
+/// TCG, 27 to 28 us sooner, whether the step comes at 1.9 s, 6 s or 14 s).
 fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest {
     let seedbox_api::InputSource::Resolved { definition } = &request.spec.inputs else {
         panic!("resolved submission required")
@@ -1944,7 +1899,7 @@ fn with_capture_marker(mut request: SubmitRequest, at_ns: u64) -> SubmitRequest 
         id: "capture-marker".into(),
         at_ns,
         action: serde_json::json!({
-            "action": "clock_skew", "handle": "capture-marker", "machine": "oracle", "offset_ns": 1_000_000_000u64
+            "action": "clock_skew", "handle": "capture-marker", "machine": "server", "offset_ns": 1_000_000_000u64
         }),
         timeout_ns: seedbox_spec::definition::default_timeout_ns(),
     });
@@ -2008,9 +1963,9 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
         // An unmarked run only locates the transfer in simulated time.
-        let plain = session.submit(request.clone(), 1).await;
+        let plain = session.submit(request.clone()).await;
         session.worker(&plain).await;
-        session.complete(&plain, false, 1, seed).await.unwrap();
+        session.complete(&plain, false, seed).await.unwrap();
         let plain_final_ns = session.client.describe(&plain).await.unwrap().status.simulated_time_ns;
         let client_timed = session.stdout_timed(&plain, "client", false).await;
         // The client prints ARP completion just before it connects, and TCP
@@ -2023,16 +1978,17 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         eprintln!("uninterrupted transfer: arp_ok_ns={tcp_begin_ns} tcp_ok_ns={tcp_end_ns} target_ns={target_ns}");
         assert!(tcp_begin_ns < target_ns && target_ns < tcp_end_ns && tcp_end_ns < IDLE_SLEEP_NS);
         let request = with_capture_marker(request, target_ns);
-        let baseline = session.submit(request.clone(), 1).await;
+        let baseline = session.submit(request.clone()).await;
         session.worker(&baseline).await;
-        let uninterrupted = session.complete(&baseline, false, 1, seed).await.unwrap();
+        let uninterrupted = session.complete(&baseline, false, seed).await.unwrap();
         let final_ns = session.client.describe(&baseline).await.unwrap().status.simulated_time_ns;
         let expected = [
             session.stdout(&baseline, "oracle", false).await,
             session.stdout(&baseline, "server", false).await,
             session.stdout(&baseline, "client", false).await,
         ];
-        // No application observes the marker: output and end are unchanged.
+        // No application observes the marker, and the oracle, whose exit
+        // ends the run, does not run for it: output and end are unchanged.
         assert_eq!(expected[2], client_timed.0);
         assert_eq!(final_ns, plain_final_ns);
 
@@ -2047,7 +2003,7 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
 
         let mut capture_request = request;
         capture_request.options.start_paused = true;
-        let source = session.submit(capture_request, 1).await;
+        let source = session.submit(capture_request).await;
         session.worker(&source).await;
         session
             .control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused })
@@ -2094,7 +2050,7 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         assert_eq!(oracle.name, "oracle");
         assert_eq!(oracle.exit_code, None, "oracle sleep must be pending at capture");
 
-        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         let InputSource::Resolved { definition } = &exported.spec.inputs else {
             panic!("resolved export required")
         };
@@ -2103,7 +2059,7 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         };
         assert!(!assets.is_empty());
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, seed).await;
+        session.complete(&source, true, seed).await;
         let prefix = [
             session.stdout(&source, "oracle", true).await,
             session.stdout(&source, "server", true).await,
@@ -2136,9 +2092,7 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
 
-        // Import from the exported content closure alone, on four workers.
-        session.workers.store(4, Ordering::SeqCst);
-        exported.options.machine_workers = Some(4);
+        // Import from the exported content closure alone.
         let restored = session
             .client
             .submit_definition(&serde_json::to_value(exported).unwrap(), true)
@@ -2163,7 +2117,7 @@ pub async fn checkpoint_in_flight_continuation(backend: CpuBackend) {
         session
             .control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
             .await;
-        let continued = session.complete(&restored, false, 4, seed).await.unwrap();
+        let continued = session.complete(&restored, false, seed).await.unwrap();
         assert_eq!(
             session.client.describe(&restored).await.unwrap().status.simulated_time_ns,
             final_ns
@@ -2200,7 +2154,7 @@ fn scheduled(frames: &[seedbox_api::Frame], from: &str, to: &str) -> (u64, u64) 
         })
 }
 /// Frames are observation only: in the bd-f50 network world, fresh runs with
-/// observations on and off, on one and four workers, and continuations of a
+/// observations on and off, and continuations of a
 /// mid-transfer checkpoint with observations on and off, all reach one raw
 /// witness. Observed runs publish their routed frames and link counters.
 pub async fn pv_network_frames_are_observation_only() {
@@ -2211,9 +2165,9 @@ pub async fn pv_network_frames_are_observation_only() {
         let session = owner.session(backend);
         session.bound = network_bound(backend);
         let request = network_submission(backend, session.root.path(), &session.store, seed);
-        let plain = session.submit(request.clone(), 1).await;
+        let plain = session.submit(request.clone()).await;
         session.worker(&plain).await;
-        session.complete(&plain, false, 1, seed).await.unwrap();
+        session.complete(&plain, false, seed).await.unwrap();
         let client_timed = session.stdout_timed(&plain, "client", false).await;
         let tcp_begin_ns = marker_time(&client_timed, PROBE_CLIENT_MID);
         let tcp_end_ns = marker_time(&client_timed, PROBE_TCP_DONE);
@@ -2222,12 +2176,11 @@ pub async fn pv_network_frames_are_observation_only() {
 
         // Fresh runs: subscribe while paused at start, so every frame is seen.
         let mut witnesses = Vec::new();
-        let mut reference = None;
-        for (observed, workers) in [(true, 1), (true, 4), (false, 1), (false, 4)] {
+        for observed in [true, false] {
             session.observed.store(observed, Ordering::SeqCst);
             let mut paused = request.clone();
             paused.options.start_paused = true;
-            let id = session.submit(paused, workers).await;
+            let id = session.submit(paused).await;
             session.worker(&id).await;
             session
                 .control(&id, "frames-paused", ControlCommand::SetRate { rate: PlaybackRate::Paused })
@@ -2236,11 +2189,11 @@ pub async fn pv_network_frames_are_observation_only() {
             session
                 .control(&id, "frames-run", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
                 .await;
-            let witness = session.complete(&id, false, workers, seed).await.unwrap();
+            let witness = session.complete(&id, false, seed).await.unwrap();
             let (frames, missing) = bounded(frames).await.unwrap();
             let up = scheduled(&frames, "client", "server");
             let down = scheduled(&frames, "server", "client");
-            eprintln!("fresh observed={observed} workers={workers} witness={witness} frames={} missing={missing} client_to_server={up:?} server_to_client={down:?}", frames.len());
+            eprintln!("fresh observed={observed} witness={witness} frames={} missing={missing} client_to_server={up:?} server_to_client={down:?}", frames.len());
             if observed {
                 // The whole echoed stream crosses each direction, every frame
                 // scheduled for a later delivery, with nothing omitted.
@@ -2259,8 +2212,6 @@ pub async fn pv_network_frames_are_observation_only() {
                         frames.iter().filter(|f| f.from == from && f.to == to).map(|f| f.sent_ns).max()
                     );
                 }
-                let stream = (frames.len(), up, down);
-                assert_eq!(*reference.get_or_insert(stream), stream, "frames depend on workers");
             } else {
                 assert!(frames.is_empty() && missing == 0, "unobserved run published frames");
             }
@@ -2273,7 +2224,7 @@ pub async fn pv_network_frames_are_observation_only() {
         session.observed.store(true, Ordering::SeqCst);
         let mut capture = request.clone();
         capture.options.start_paused = true;
-        let source = session.submit(capture, 1).await;
+        let source = session.submit(capture).await;
         session.worker(&source).await;
         session
             .control(&source, "verify-paused-source", ControlCommand::SetRate { rate: PlaybackRate::Paused })
@@ -2312,7 +2263,7 @@ pub async fn pv_network_frames_are_observation_only() {
         assert!(captured_ns > tcp_begin_ns && captured_ns < tcp_end_ns);
         let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, seed).await;
+        session.complete(&source, true, seed).await;
         let (frames, missing) = bounded(source_frames).await.unwrap();
         assert_eq!(missing, 0);
         assert!(frames.iter().all(|f| f.sent_ns <= captured_ns));
@@ -2325,11 +2276,8 @@ pub async fn pv_network_frames_are_observation_only() {
 
         // Continue the one exported capture observed and unobserved.
         let definition = serde_json::to_value(exported).unwrap();
-        for (observed, workers) in [(true, 4), (false, 1)] {
+        for observed in [true, false] {
             session.observed.store(observed, Ordering::SeqCst);
-            session.workers.store(workers, Ordering::SeqCst);
-            let mut definition = definition.clone();
-            definition["options"]["machineWorkers"] = workers.into();
             let restored = session.client.submit_definition(&definition, true).await.unwrap().metadata.id;
             session.submitted += 1;
             session.worker(&restored).await;
@@ -2343,9 +2291,9 @@ pub async fn pv_network_frames_are_observation_only() {
             session
                 .control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited })
                 .await;
-            let continued = session.complete(&restored, false, workers, seed).await.unwrap();
+            let continued = session.complete(&restored, false, seed).await.unwrap();
             let (frames, missing) = bounded(frames).await.unwrap();
-            eprintln!("restored observed={observed} workers={workers} witness={continued} frames={} missing={missing}", frames.len());
+            eprintln!("restored observed={observed} witness={continued} frames={} missing={missing}", frames.len());
             if observed {
                 // Only frames routed after the capture are published again.
                 assert_eq!(missing, 0);
@@ -2354,10 +2302,10 @@ pub async fn pv_network_frames_are_observation_only() {
             } else {
                 assert!(frames.is_empty() && missing == 0);
             }
-            assert_eq!(continued, uninterrupted, "restored observed={observed} workers={workers}");
+            assert_eq!(continued, uninterrupted, "restored observed={observed}");
         }
         session.client.delete(&source).await.unwrap();
-        eprintln!("frames observation-only: witness={uninterrupted} fresh=on1,on4,off1,off4 restored=on4,off1");
+        eprintln!("frames observation-only: witness={uninterrupted} fresh=on,off restored=on,off");
     })).await;
 }
 fn label(backend: CpuBackend) -> &'static str {
@@ -2442,7 +2390,7 @@ pub async fn native_forced_failure(backend: CpuBackend, timeout: bool) {
         move |owner| Box::pin(async move {
             let session = owner.session(backend);
             let request = submission(backend, session.root.path(), &session.store, 2_000_000_000, 123);
-            let id = session.submit(request, 1).await;
+            let id = session.submit(request).await;
             session.worker(&id).await;
             session.guest_start(&id).await;
             session.control(&id, "forced-failure-pause", seedbox_api::ControlCommand::SetRate {

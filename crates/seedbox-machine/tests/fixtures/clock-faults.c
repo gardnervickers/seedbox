@@ -6,7 +6,8 @@
  *   idle        an oracle for host-driven runs: sleeps 12.5 s, then exits 0.
  *   ticks       TCG only: times the local APIC timer against the counter and
  *               prints "TICKS loc=<count> late=<ns> source=<clocksource>".
- * Every other line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns>". */
+ * Every other line is "<TAG> rt=<ns> mono=<ns> raw=<ns> cnt=<ns> off=<ns>", where
+ * off is the boot's realtime offset from its seedbox.clock_offset_ns argument. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -52,13 +53,14 @@ static uint64_t counter(void) {
 #error clock-faults requires x86-64 or AArch64
 #endif
 }
+static long long boot_offset;
 static void line(const char *tag) {
     char text[256];
     uint64_t rt = ns(CLOCK_REALTIME), mono = ns(CLOCK_MONOTONIC), raw = ns(CLOCK_MONOTONIC_RAW);
     uint64_t cnt = counter();
-    int size = snprintf(text, sizeof(text), "%s rt=%llu mono=%llu raw=%llu cnt=%llu\n", tag,
+    int size = snprintf(text, sizeof(text), "%s rt=%llu mono=%llu raw=%llu cnt=%llu off=%lld\n", tag,
                         (unsigned long long)rt, (unsigned long long)mono,
-                        (unsigned long long)raw, (unsigned long long)cnt);
+                        (unsigned long long)raw, (unsigned long long)cnt, boot_offset);
     if (size < 0 || (size_t)size >= sizeof(text)) fail("line");
     put(STDOUT_FILENO, text, (size_t)size);
 }
@@ -115,6 +117,14 @@ static void slurp(const char *path, char *text, size_t size) {
     }
     close(fd);
     text[used] = 0;
+}
+/* The boot's realtime offset: its seedbox.clock_offset_ns kernel argument. */
+static void read_boot_offset(void) {
+    static char text[4096];
+    slurp("/proc/cmdline", text, sizeof(text));
+    const char *argument = strstr(text, "seedbox.clock_offset_ns=");
+    if (!argument) fail("clock offset argument");
+    boot_offset = strtoll(argument + strlen("seedbox.clock_offset_ns="), NULL, 10);
 }
 /* The LOC row of /proc/interrupts: local APIC timer interrupts so far. */
 static uint64_t local_timer_interrupts(void) {
@@ -213,7 +223,7 @@ static void controller_role(void) {
 }
 int main(int argc, char **argv) {
     if (argc != 2) fail("role");
-    if (!strcmp(argv[1], "clock")) clock_role();
+    if (!strcmp(argv[1], "clock")) { read_boot_offset(); clock_role(); }
     else if (!strcmp(argv[1], "controller")) controller_role();
     else if (!strcmp(argv[1], "ticks")) ticks_role();
     else if (!strcmp(argv[1], "idle")) {

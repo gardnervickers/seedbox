@@ -22,7 +22,6 @@ fn driver() -> Driver<Park> {
     fixture::driver(
         at(0),
         Duration::from_nanos(100),
-        1,
         SeededRng::new(0),
         || Ok(()),
         || Ok(vec![Park]),

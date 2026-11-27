@@ -292,7 +292,6 @@ fn tail(text: &str, bytes: usize) -> &str {
 
 fn run<M>(
     stage: &str,
-    workers: usize,
     factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
 ) -> Run
 where
@@ -303,7 +302,6 @@ where
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         QUANTUM,
-        workers,
         Seed::new(1),
         || Ok(()),
         oracle,
@@ -368,7 +366,7 @@ where
 }
 
 /// Run `stage` on the backend `SEEDBOX_ETCD_BACKEND` selects.
-fn on_backend(stage: &str, workers: usize) -> Run {
+fn on_backend(stage: &str) -> Run {
     let backend = std::env::var("SEEDBOX_ETCD_BACKEND").expect("set SEEDBOX_ETCD_BACKEND");
     let epoch = TEST_EPOCH_SECONDS;
     match backend.as_str() {
@@ -379,7 +377,7 @@ fn on_backend(stage: &str, workers: usize) -> Run {
                 epoch,
             )
             .unwrap();
-            run(stage, workers, move |definition| factory.create(definition))
+            run(stage, move |definition| factory.create(definition))
         }
         #[cfg(seedbox_pv)]
         "pv" => {
@@ -389,7 +387,7 @@ fn on_backend(stage: &str, workers: usize) -> Run {
                 epoch,
             )
             .unwrap();
-            run(stage, workers, move |definition| factory.create(definition))
+            run(stage, move |definition| factory.create(definition))
         }
         other => panic!("unsupported SEEDBOX_ETCD_BACKEND {other:?} on this host"),
     }
@@ -400,39 +398,30 @@ fn on_backend(stage: &str, workers: usize) -> Run {
 #[test]
 #[ignore = "requires SEEDBOX_ETCD_BACKEND, its backend inputs, etcd and the etcd fixtures"]
 fn cluster_acceptance() {
-    assert_smoke(&on_backend("smoke", 1));
+    assert_smoke(&on_backend("smoke"));
 }
 
-/// Repeat S0 at one worker, then four; compare every published event and
-/// its timestamp without filtering application output or normalizing results.
+/// Repeat S0 on a fresh Driver; compare every published event and its
+/// timestamp without filtering application output or normalizing results.
 #[test]
 #[ignore = "requires SEEDBOX_ETCD_BACKEND, its backend inputs, etcd and the etcd fixtures"]
-fn cluster_worker_repeatability() {
-    let reference = on_backend("smoke", 1);
+fn cluster_repeatability() {
+    let reference = on_backend("smoke");
     assert_smoke(&reference);
-    for workers in [1, 4] {
-        let repeated = on_backend("smoke", workers);
-        assert_smoke(&repeated);
-        assert_eq!(reference.ids, repeated.ids, "workers={workers}");
-        assert_eq!(reference.outcome, repeated.outcome, "workers={workers}");
-        assert_eq!(
-            reference.events.len(),
-            repeated.events.len(),
-            "event count differs, workers={workers}\n{}",
-            repeated.report()
-        );
-        for (index, (expected, actual)) in reference.events.iter().zip(&repeated.events).enumerate()
-        {
-            assert_eq!(
-                expected, actual,
-                "first differing event {index}, workers={workers}"
-            );
-        }
-        eprintln!(
-            "etcd exact repeatability: workers={workers}, {} events",
-            repeated.events.len()
-        );
+    let repeated = on_backend("smoke");
+    assert_smoke(&repeated);
+    assert_eq!(reference.ids, repeated.ids);
+    assert_eq!(reference.outcome, repeated.outcome);
+    assert_eq!(
+        reference.events.len(),
+        repeated.events.len(),
+        "event count differs\n{}",
+        repeated.report()
+    );
+    for (index, (expected, actual)) in reference.events.iter().zip(&repeated.events).enumerate() {
+        assert_eq!(expected, actual, "first differing event {index}");
     }
+    eprintln!("etcd exact repeatability: {} events", repeated.events.len());
 }
 
 fn assert_smoke(run: &Run) {

@@ -90,6 +90,25 @@ out:
 	return value;
 }
 
+/* Reads before the page was mapped advanced early_last, which no bound could
+ * stop. Bring LAST up to it now within each run's bound, as a split charge
+ * does: at the bound, yield until the host publishes a later one. Interrupts
+ * are still masked and the machine has no wake yet, so these are bound yields
+ * and leave no trace (a run as short as a nanosecond can end here).
+ */
+static void __init seedbox_early_charge(void)
+{
+	u64 last, bound;
+
+	while ((last = READ_ONCE(page->last)) < early_last) {
+		bound = READ_ONCE(page->bound);
+		if (last < bound)
+			WRITE_ONCE(page->last, min(bound, early_last));
+		else
+			writeq(1, event + 24);
+	}
+}
+
 /* The preempt fault's draw: one step of a splitmix64 stream kept in kernel
  * memory, so checkpoints continue it, reseeded whenever the host publishes a
  * new seed word (each boot has its own). Zero rate is off. Interrupts are
@@ -270,7 +289,7 @@ void __init seedbox_time_init(void)
 	if (!event || !page || READ_ONCE(page->abi) != 3)
 		panic("seedbox: PV ABI 3 page unavailable");
 	seedbox_exclusive_epoch = &page->exclusive_epoch;
-	WRITE_ONCE(page->last, early_last);
+	seedbox_early_charge();
 	writeq(3, event + 32);
 	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v3");
 	if (!node)

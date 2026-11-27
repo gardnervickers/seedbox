@@ -409,6 +409,7 @@ fn synchronous_reply_streams_its_validated_trailer_across_fragments() {
                 time: 7,
                 stop: Stop::Horizon,
                 writes: 1,
+                taken: 0,
             };
             let producer = std::thread::spawn(move || {
                 worker.reply(&response, Some(&writes)).unwrap();
@@ -425,6 +426,7 @@ fn synchronous_reply_streams_its_validated_trailer_across_fragments() {
                         time: 7,
                         stop: Stop::Horizon,
                         writes,
+                        ..
                     } => crate::machine::pv::wire::receive_writes(input, writes),
                     _ => Err("unexpected reply".into()),
                 }
@@ -455,6 +457,7 @@ fn invalid_last_record_leaves_a_long_reply_unpublished() {
         time: 2,
         stop: Stop::Horizon,
         writes: 2,
+        taken: 0,
     };
     assert!(worker.reply(&reply, Some(&writes)).is_err());
     assert_eq!(

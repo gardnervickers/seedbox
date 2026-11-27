@@ -197,13 +197,12 @@ impl Machine for Mock {
         Ok(self.clone())
     }
 }
-fn make(mode: Mode, workers: usize, members: usize) -> Driver<Mock> {
+fn make(mode: Mode, members: usize) -> Driver<Mock> {
     let mut machines = std::collections::VecDeque::from([Mock::new(Mode::Busy)]);
     machines.extend((0..members).map(|_| Mock::new(mode)));
     Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        workers,
         42,
         || Ok(()),
         fixture::definition(0),
@@ -235,7 +234,7 @@ fn outputs(d: &mut Driver<Mock>) -> Vec<MachineResponse> {
 
 #[test]
 fn an_offered_but_unconsumed_crash_is_not_end_proof() {
-    let mut d = make(Mode::IgnoreCrash, 1, 1);
+    let mut d = make(Mode::IgnoreCrash, 1);
     d.drain_events();
     schedule(
         &mut d,
@@ -256,7 +255,7 @@ fn an_offered_but_unconsumed_crash_is_not_end_proof() {
 #[test]
 fn boot_end_cursor_but_not_historical_payloads_survives_the_closed_codec() {
     for mode in [Mode::NaturalExit, Mode::ProgramExit(17)] {
-        let mut d = make(mode, 1, 1);
+        let mut d = make(mode, 1);
         step(&mut d, 10);
         let c = roundtrip(d.checkpoint().unwrap());
         let expected = d.drain_events();
@@ -266,7 +265,6 @@ fn boot_end_cursor_but_not_historical_payloads_survives_the_closed_codec() {
         );
         let mut restored = Driver::<Mock>::from_checkpoint(
             &c,
-            1,
             || Ok(()),
             |s| Ok(s.clone()),
             |_| Err(io::Error::other("unexpected spawn")),
@@ -279,7 +277,7 @@ fn boot_end_cursor_but_not_historical_payloads_survives_the_closed_codec() {
 
 #[test]
 fn natural_exit_reports_initial_zero_and_preserves_ordinary_stamping() {
-    let mut d = make(Mode::NaturalExit, 1, 1);
+    let mut d = make(Mode::NaturalExit, 1);
     step(&mut d, 10);
     let out = outputs(&mut d);
     assert!(out.iter().any(|o| matches!(
@@ -299,7 +297,7 @@ fn natural_exit_reports_initial_zero_and_preserves_ordinary_stamping() {
 }
 #[test]
 fn crash_before_initial_native_start_has_no_fabricated_ram() {
-    let mut d = make(Mode::Busy, 1, 1);
+    let mut d = make(Mode::Busy, 1);
     schedule(
         &mut d,
         0,
@@ -321,7 +319,7 @@ fn crash_before_initial_native_start_has_no_fabricated_ram() {
 }
 #[test]
 fn reboot_payload_names_old_boot_but_every_carrier_keeps_prospective_boot() {
-    let mut d = make(Mode::DeferredCrash, 1, 1);
+    let mut d = make(Mode::DeferredCrash, 1);
     step(&mut d, 10);
     assert_eq!(d.execution.machines[1].last_ended_published, None);
     d.drain_events();
@@ -353,7 +351,7 @@ fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
         Mode::Bad(u64::MAX, true),
         Mode::Bad(0, false),
     ] {
-        let mut d = make(mode, 1, 1);
+        let mut d = make(mode, 1);
         d.drain_events();
         assert!(matches!(
             d.step(Timestamp::from_nanos(10)),
@@ -363,7 +361,7 @@ fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
         assert_eq!(d.execution.machines[1].last_ended_published, None);
         assert!(matches!(d.with_barrier(|_| Ok(())), Err(Error::Failed)));
     }
-    let mut d = make(Mode::DeferredCrash, 1, 1);
+    let mut d = make(Mode::DeferredCrash, 1);
     step(&mut d, 10);
     schedule(
         &mut d,
@@ -382,7 +380,7 @@ fn future_arbitrary_noend_and_past_identities_poison_without_publication() {
 }
 #[test]
 fn exit_then_reboot_cannot_publish_the_same_ended_boot_again() {
-    let mut d = make(Mode::Busy, 1, 1);
+    let mut d = make(Mode::Busy, 1);
     schedule(
         &mut d,
         0,
@@ -447,8 +445,8 @@ fn roundtrip(c: Checkpoint<Mock>) -> Checkpoint<Mock> {
     .unwrap()
 }
 #[test]
-fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
-    let mut source = make(Mode::DeferredCrash, 4, 3);
+fn cursor_codec_and_mock_continuation_match_the_source() {
+    let mut source = make(Mode::DeferredCrash, 3);
     step(&mut source, 10);
     for id in 1..=3 {
         schedule(
@@ -483,34 +481,31 @@ fn cursor_codec_and_mock_continuation_match_one_and_four_workers() {
         d.drain_events()
     };
     let expected = continue_driver(&mut source);
-    for workers in [1, 4] {
-        let mut restored = Driver::<Mock>::from_checkpoint(
-            &c,
-            workers,
-            || Ok(()),
-            |s| Ok(s.clone()),
-            |_| Err(io::Error::other("unexpected spawn")),
-        )
-        .unwrap();
-        assert!(restored
-            .execution
-            .machines
-            .iter()
-            .skip(1)
-            .all(|e| e.last_ended_published == Some(0)));
-        assert!(restored.drain_events().is_empty());
-        assert_eq!(continue_driver(&mut restored), expected);
-        assert!(restored
-            .execution
-            .machines
-            .iter()
-            .skip(1)
-            .all(|e| e.last_ended_published == Some(1)));
-    }
+    let mut restored = Driver::<Mock>::from_checkpoint(
+        &c,
+        || Ok(()),
+        |s| Ok(s.clone()),
+        |_| Err(io::Error::other("unexpected spawn")),
+    )
+    .unwrap();
+    assert!(restored
+        .execution
+        .machines
+        .iter()
+        .skip(1)
+        .all(|e| e.last_ended_published == Some(0)));
+    assert!(restored.drain_events().is_empty());
+    assert_eq!(continue_driver(&mut restored), expected);
+    assert!(restored
+        .execution
+        .machines
+        .iter()
+        .skip(1)
+        .all(|e| e.last_ended_published == Some(1)));
 }
 #[test]
 fn duplicate_after_closed_restore_poisoned_without_new_publication() {
-    let mut source = make(Mode::Busy, 1, 1);
+    let mut source = make(Mode::Busy, 1);
     schedule(
         &mut source,
         0,
@@ -522,7 +517,6 @@ fn duplicate_after_closed_restore_poisoned_without_new_publication() {
     let c = roundtrip(source.checkpoint().unwrap());
     let mut restored = Driver::<Mock>::from_checkpoint(
         &c,
-        1,
         || Ok(()),
         |s| {
             let mut m = s.clone();

@@ -212,15 +212,6 @@ pub(in crate::driver) fn build_network(
     seeded: bool,
     networked: bool,
 ) -> Driver<Mock> {
-    build_network_workers(specs, spawn, seeded, networked, 1)
-}
-pub(in crate::driver) fn build_network_workers(
-    specs: Vec<State>,
-    spawn: Vec<State>,
-    seeded: bool,
-    networked: bool,
-    workers: usize,
-) -> Driver<Mock> {
     let definition = |index| {
         let mut d = fixture::definition(index);
         if networked {
@@ -238,7 +229,7 @@ pub(in crate::driver) fn build_network_workers(
     let config = if networked {
         NetworkConfig::new(Duration::from_nanos(5), Duration::from_nanos(3), 100_000).unwrap()
     } else {
-        NetworkConfig::default()
+        fixture::floor(Duration::from_nanos(10))
     };
     let mut definitions: Vec<_> = (0..specs.len()).map(definition).collect();
     let oracle = definitions.remove(0);
@@ -255,7 +246,6 @@ pub(in crate::driver) fn build_network_workers(
         Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            workers,
             51,
             || Ok(Context(None)),
             oracle,
@@ -269,7 +259,6 @@ pub(in crate::driver) fn build_network_workers(
         Driver::new(
             at(0),
             Duration::from_nanos(10),
-            workers,
             SeededRng::new(51),
             || Ok(Context(None)),
             oracle,
@@ -327,8 +316,8 @@ pub(in crate::driver) fn fresh(d: &MachineDefinition) -> Result<Mock, Io> {
     let index = d.name.strip_prefix("fixture-").unwrap().parse().unwrap();
     Ok(Mock::new(spec(index, true, vec![(0, Response::Ready)])))
 }
-pub(in crate::driver) fn restore(c: &Checkpoint<Saved>, workers: usize) -> Driver<Mock> {
-    Driver::from_checkpoint(c, workers, || Ok(Context(None)), Mock::restore, fresh).unwrap()
+pub(in crate::driver) fn restore(c: &Checkpoint<Saved>) -> Driver<Mock> {
+    Driver::from_checkpoint(c, || Ok(Context(None)), Mock::restore, fresh).unwrap()
 }
 pub(in crate::driver) fn status(d: &mut Driver<Mock>) -> PlaybackStatus {
     d.with_barrier(|b| Ok(b.playback())).unwrap()

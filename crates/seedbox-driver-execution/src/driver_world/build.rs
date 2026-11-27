@@ -28,9 +28,6 @@ fn bad(message: impl Into<String>) -> Error {
 }
 
 pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
-    if request.machine_workers == 0 {
-        return Err(bad("Driver worker count must be positive"));
-    }
     super::policy::check_optional(request.prepared.inventory.backend_policy()).map_err(bad)?;
     super::controller::resolve(
         &request.prepared.inventory,
@@ -45,12 +42,46 @@ pub(super) fn open(request: &wire::Request) -> Result<Worker<Native>> {
         fresh(request)
     }
 }
-/// Native PV executes each vCPU in its own process. Only TCG needs host
-/// threads for blocking machine calls. Restore uses the same selection.
-fn execution_threads(request: &wire::Request) -> usize {
-    match request.prepared.inventory {
-        Inventory::Pv { .. } => 1,
-        Inventory::Tcg { .. } => request.machine_workers,
+/// Apply the request's stop policy, which only a test-support build has,
+/// and say on stderr (the run's retained worker diagnostics) which seed it
+/// draws from, so that the run's stops can be repeated.
+fn stop_policy(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    let Some(seed) = request.stop_policy else {
+        return Ok(());
+    };
+    #[cfg(feature = "test-support")]
+    {
+        eprintln!("{}", super::executor::stop_seed_notice(seed));
+        driver.set_stop_policy(Some(seedbox_driver::test_support::StopPolicy::seeded(seed)));
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = (driver, seed);
+        Err(bad(
+            "a Driver stop policy needs a worker built with test support",
+        ))
+    }
+}
+/// Turn timed inboxes off when the request asks, which only a test-support
+/// build can.
+fn timed_inbox(driver: &mut Driver<Native>, request: &wire::Request) -> Result<()> {
+    if !request.no_timed_inbox {
+        return Ok(());
+    }
+    #[cfg(feature = "test-support")]
+    {
+        // The whole-run oracle reads this to see that the switch took.
+        eprintln!("seedbox: Driver timed inboxes off");
+        driver.set_timed_inbox(false);
+        Ok(())
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = driver;
+        Err(bad(
+            "turning timed inboxes off needs a worker built with test support",
+        ))
     }
 }
 fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
@@ -70,8 +101,7 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     )
     .map_err(bad)?;
     let environments = factory.environments();
-    let (oracle, machines, spawned) =
-        conversion::definitions(&request.prepared, request.machine_workers)?;
+    let (oracle, machines, spawned) = conversion::definitions(&request.prepared)?;
     let mut initial: Vec<_> = std::iter::once(oracle.name.clone())
         .chain(machines.iter().map(|machine| machine.name.clone()))
         .collect();
@@ -116,7 +146,6 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     let mut driver = Driver::new_seeded(
         Timestamp::from_nanos(0),
         Duration::from_nanos(request.prepared.quantum_ns),
-        execution_threads(request),
         request.seed,
         || Ok(()),
         oracle,
@@ -136,8 +165,15 @@ fn fresh(request: &wire::Request) -> Result<Worker<Native>> {
     driver
         .allow_crashes(allow_crashes(&request.prepared))
         .map_err(|e| bad(e.to_string()))?;
+    // Initial machines boot in a seeded order across the first moments of the
+    // run; a restored Driver keeps the boots its checkpoint captured.
+    driver
+        .stagger_boots(seedbox_driver::driver::BOOT_SPREAD)
+        .map_err(|e| bad(e.to_string()))?;
     // The engine decides the oracle's device faults and breakpoints.
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if request.start_paused {
         driver
             .with_barrier(|barrier| barrier.set_rate(seedbox_driver::driver::PlaybackRate::Paused))
@@ -312,7 +348,6 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     )?;
     let mut driver = Driver::<Native>::from_checkpoint(
         &retained,
-        execution_threads(request),
         || Ok(()),
         |snapshot| {
             let name = names
@@ -339,6 +374,8 @@ fn restore(request: &wire::Request, path: &Path) -> Result<Worker<Native>> {
     )
     .map_err(|e| bad(e.to_string()))?;
     driver.set_engine(super::actions::engine(&request.prepared.inventory));
+    stop_policy(&mut driver, request)?;
+    timed_inbox(&mut driver, request)?;
     if names.next().is_some() {
         return Err(bad("Driver checkpoint name inventory has unused entries"));
     }

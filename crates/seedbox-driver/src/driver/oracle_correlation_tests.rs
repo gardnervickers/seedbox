@@ -17,7 +17,6 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
     let mut driver = fixture::driver(
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
-        1,
         SeededRng::new(0),
         || Ok(()),
         || Ok(vec![Park]),
@@ -55,7 +54,6 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
             1,
             command,
             Timestamp::from_nanos(0),
-            Timestamp::from_nanos(0),
         )
         .unwrap();
     let ack = |boot| MachineResponse {
@@ -69,13 +67,14 @@ fn retired_boot_ack_does_not_complete_current_boot_pending_stop() {
     };
     driver.execution.machines[0].staged.push(ack(0));
     driver.commit_boundary().unwrap();
-    assert!(driver.execution.finished.is_none());
+    assert!(driver.execution.finishing.is_none());
     assert!(driver.execution.oracle_stops.contains(&(1, command)));
     driver.execution.machines[0].staged.push(ack(1));
     driver.commit_boundary().unwrap();
+    // The run will end one floor after the acknowledgement.
     assert_eq!(
-        driver.execution.finished,
-        Some((Timestamp::from_nanos(0), ExitReason::Shutdown))
+        driver.execution.finishing,
+        Some((Timestamp::from_nanos(10), ExitReason::Shutdown))
     );
     assert_eq!(fixture::outputs(&driver.drain_events()).len(), 2);
 }
@@ -86,7 +85,6 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
         let mut driver = fixture::driver(
             Timestamp::from_nanos(0),
             Duration::from_nanos(10),
-            1,
             SeededRng::new(0),
             || Ok(()),
             || Ok(vec![Park]),
@@ -115,7 +113,6 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
                 0,
                 id,
                 Timestamp::from_nanos(0),
-                Timestamp::from_nanos(0),
             )
             .unwrap();
         driver.execution.machines[0].stopped = StopReason::Exited {
@@ -142,10 +139,11 @@ fn first_terminal_response_wins_and_physical_shutdown_is_only_a_fallback() {
             })
             .collect();
         driver.commit_boundary().unwrap();
+        // The run will end one floor after the first terminal response.
         assert_eq!(
-            driver.execution.finished,
+            driver.execution.finishing,
             Some((
-                Timestamp::from_nanos(0),
+                Timestamp::from_nanos(10),
                 if stop_first {
                     ExitReason::Shutdown
                 } else {
