@@ -18,7 +18,7 @@ struct Arrival {
     delivery: network::Delivery,
     /// The frame's length; its bytes move to the receiver's inbox.
     len: usize,
-    /// Whether its receiver had exited, or was not yet switched on, by the
+    /// Whether its receiver had exited, or was not yet switched on, at the
     /// arrival.
     dropped: bool,
 }
@@ -52,9 +52,10 @@ where
     M: Machine,
 {
     /// Whether frames for each machine can arrive inside its lane: an exited
-    /// or not yet switched on receiver drops them there. A paused or suspended receiver admits them
-    /// at a round boundary instead, in a zero-budget run. These states cannot
-    /// change before the round commits.
+    /// receiver drops them there. A paused or suspended receiver admits them
+    /// at a round boundary instead, in a zero-budget run, or drops them there
+    /// if it is not switched on yet. These states cannot change before the
+    /// round commits.
     pub(super) fn lane_receivers(&self) -> Vec<bool> {
         let breaks = &self.execution.control.service.breaks;
         let any_suspended = breaks.hits().next().is_some();
@@ -63,7 +64,7 @@ where
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                entry.drops_frames()
+                matches!(entry.stopped, StopReason::Exited { .. })
                     || !entry.lifecycle.paused()
                         && !(any_suspended
                             && breaks.suspended(&control::Control::source(MachineId(index))))
@@ -169,8 +170,13 @@ where
             let entry = &mut self.execution.machines[id.0];
             let next = entry.next();
             if let Some(at) = arrival {
-                if entry.drops_frames() {
+                if entry.drops_frame(at) {
+                    // Only the arrivals before a switched-off machine's boot
+                    // drop. Its boot timer then runs before later arrivals.
                     while let Some(&index) = window.lanes[id.0].front() {
+                        if !entry.drops_frame(window.arrivals[index].at) {
+                            break;
+                        }
                         window.arrivals[index].dropped = true;
                         window.lanes[id.0].pop_front();
                     }

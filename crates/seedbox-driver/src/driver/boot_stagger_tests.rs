@@ -178,18 +178,18 @@ fn staggered_machines_stay_switched_off_until_their_boot() {
     driver.stagger_boots(BOOT_SPREAD).unwrap();
     assert!(driver.execution.machines[1..]
         .iter()
-        .all(|entry| entry.powered_off));
+        .all(|entry| entry.powered_on_at.is_some()));
     let expected = staggered(9, 3);
     // Up to just before the first boot, then onward.
     let early = expected[1..].iter().min().unwrap() - 1;
     driver.step(at(early)).unwrap();
     assert!(driver.execution.machines[1..]
         .iter()
-        .all(|entry| entry.powered_off));
+        .all(|entry| entry.powered_on_at.is_some()));
     assert_eq!(first_runs(&mut driver, &runs, 100 * MS), expected);
     assert!(driver
         .execution
         .machines
         .iter()
-        .all(|entry| !entry.powered_off));
+        .all(|entry| entry.powered_on_at.is_none()));
 }

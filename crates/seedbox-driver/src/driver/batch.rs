@@ -518,7 +518,7 @@ where
             entry.position = position;
             entry.timer = timer;
             entry.last_ended_published = last_ended;
-            entry.powered_off = false;
+            entry.powered_on_at = None;
             entry
                 .staged
                 .extend(outputs.into_iter().map(|output| MachineResponse {

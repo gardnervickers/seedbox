@@ -86,7 +86,8 @@ The [supervisor](../crates/seedbox-machine/src/pv/guest_service_init.c) initiali
 
 Each initial machine but the oracle waits, switched off, for a seeded time below 50 ms before its first boot
 ([`Driver::stagger_boots`](../crates/seedbox-driver/src/driver.rs)), so services start in a varying order.
-Until then it drops arriving frames; a request admitted for it boots it early. Spawns and reboots boot at once.
+It drops the frames that arrive before its boot time, never later ones its first run has not reached yet;
+a request admitted for it boots it early. Spawns and reboots boot at once.
 
 ## Prepared boot inputs
 

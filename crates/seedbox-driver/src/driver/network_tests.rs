@@ -1816,3 +1816,134 @@ fn a_machine_not_yet_switched_on_drops_frames_and_takes_them_once_booted() {
         .collect();
     assert_eq!(dropped, [Some(at(MS))]);
 }
+
+/// How the receiver of [`frames_after_a_staggered_boot_are_offered_wherever_steps_end`]
+/// spends its staggered boot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Receiver {
+    /// Boots at its seeded time.
+    Staggered,
+    /// Paused through its boot time: it admits frames at a boundary.
+    Paused,
+    /// Resumed before its boot time and both arrivals, which boots it then.
+    Early,
+    /// Its clock runs ten percent fast from the start, which brings its boot
+    /// forward with its timer.
+    Fast,
+}
+
+/// The two-machine world of the staggered-receiver test: machine 0 sends
+/// machine 1 frame 1 at `s1` and frame 2 at `s2`.
+fn staggered_receiver(receiver: Receiver, s1: u64, s2: u64) -> World {
+    let config = NetworkConfig::new(Duration::from_millis(1), Duration::ZERO, 0).unwrap();
+    let (mut driver, log) = simple(
+        100 * MS,
+        config,
+        vec![
+            spec(Some(1))
+                .send(s1, frame(mac(2), 1))
+                .send(s2, frame(mac(2), 2)),
+            spec(Some(2)),
+        ],
+    );
+    driver.set_frame_capacity(8);
+    driver.stagger_boots(BOOT_SPREAD).unwrap();
+    let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
+    let boot = driver.execution.machines[1]
+        .rng
+        .as_ref()
+        .unwrap()
+        .boot_delay(spread);
+    let resume = match receiver {
+        Receiver::Staggered | Receiver::Fast => None,
+        Receiver::Paused => Some(spread + MS),
+        Receiver::Early => Some(boot.saturating_sub(2 * MS)),
+    };
+    if let Some(resume) = resume {
+        schedule(&mut driver, 0, Action::Pause(Target::Machine(MachineId(1))));
+        schedule(
+            &mut driver,
+            resume,
+            Action::Resume(Target::Machine(MachineId(1))),
+        );
+    }
+    if receiver == Receiver::Fast {
+        let rate = seedbox_machine::clock::ClockRate::new(100_000_000).unwrap();
+        driver
+            .with_barrier(|barrier| barrier.schedule_clock_rate(at(0), MachineId(1), rate))
+            .unwrap();
+    }
+    (driver, log)
+}
+
+/// A frame arriving after a staggered machine is on is offered, even when an
+/// earlier one, arriving while it was off, shares its lane window and is
+/// dropped. Where the caller's steps end changes nothing, whether the machine
+/// boots at its seeded time, is paused through it and admits the frame at a
+/// boundary, or boots early, by a resume or a fast clock.
+#[test]
+fn frames_after_a_staggered_boot_are_offered_wherever_steps_end() {
+    for receiver in [
+        Receiver::Staggered,
+        Receiver::Paused,
+        Receiver::Early,
+        Receiver::Fast,
+    ] {
+        // The boot timer's time, once the rate change at zero has moved it;
+        // a paused machine has no next run.
+        let boot = |receiver| {
+            let (mut probe, _) = staggered_receiver(receiver, 99 * MS, 99 * MS);
+            probe.step(at(0)).unwrap();
+            let entry = &probe.execution.machines[1];
+            entry.next().or(entry.powered_on_at).unwrap().as_nanos()
+        };
+        let (boot, nominal) = (boot(receiver), boot(Receiver::Staggered));
+        if receiver == Receiver::Fast {
+            assert!(boot + MS < nominal, "{boot} {nominal}");
+        }
+        assert!(boot > 2 * MS, "{receiver:?}: {boot}");
+        // Frame 1 arrives 200 us before the boot and frame 2 200 us after
+        // it, both well inside one 100 ms round.
+        let (s1, s2) = (boot - MS - 200_000, boot - MS + 200_000);
+        let run = |splits: &[u64]| {
+            let (mut driver, log) = staggered_receiver(receiver, s1, s2);
+            for &split in splits {
+                barriers(&mut driver, split);
+            }
+            barriers(&mut driver, 100 * MS);
+            let fates: Vec<_> = (driver.drain_observations().frames.facts.into_iter())
+                .filter(|fact| fact.to == MachineId(1) && fact.due.is_some())
+                .map(|fact| (fact.due, fact.fate))
+                .collect();
+            (received(&log), fates)
+        };
+        let whole = run(&[]);
+        let delivered: Vec<_> = whole.0.iter().map(|&(id, _, tag)| (id, tag)).collect();
+        let dropped = |due| {
+            whole
+                .1
+                .contains(&(Some(at(due)), FrameFate::ReceiverDropped))
+        };
+        if receiver == Receiver::Early {
+            assert_eq!(delivered, [(1, 1), (1, 2)], "{receiver:?}: {whole:?}");
+            assert!(!dropped(s1 + MS), "{receiver:?}: {whole:?}");
+        } else {
+            assert_eq!(delivered, [(1, 2)], "{receiver:?}: {whole:?}");
+            assert!(dropped(s1 + MS), "{receiver:?}: {whole:?}");
+        }
+        assert!(!dropped(s2 + MS), "{receiver:?}: {whole:?}");
+        // A step ending after both sends leaves both frames to one lane.
+        for splits in [
+            &[s2 + 100_000][..],
+            &[boot + 100_000],
+            &[boot - 100_000],
+            &[s1 + MS + 100_000, boot, s2 + MS],
+        ] {
+            assert_eq!(
+                run(splits),
+                whole,
+                "{receiver:?}: steps ending at {splits:?}"
+            );
+        }
+    }
+}

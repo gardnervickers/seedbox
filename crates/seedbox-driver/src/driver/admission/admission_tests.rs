@@ -126,7 +126,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
             inbox: entry.inbox.clone(),
             staged: entry.staged.clone(),
             last_ended_published: entry.last_ended_published,
-            powered_off: entry.powered_off,
+            powered_on_at: entry.powered_on_at,
         }
         .put(&mut e)
         .unwrap();

@@ -948,10 +948,12 @@ where
                 if let (StopReason::Blocked { reached, .. }, Some(timer)) =
                     (entry.stopped, entry.timer)
                 {
-                    entry.stopped = StopReason::Blocked {
-                        reached,
-                        deadline: entry.simulation_time(now, timer),
-                    };
+                    let deadline = entry.simulation_time(now, timer);
+                    entry.stopped = StopReason::Blocked { reached, deadline };
+                    // A switched-off machine's boot moves with its timer.
+                    if let (Some(_), Some(deadline)) = (entry.powered_on_at, deadline) {
+                        entry.powered_on_at = Some(deadline);
+                    }
                 }
             }
             DriverEvent::Resume(_)

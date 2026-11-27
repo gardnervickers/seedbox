@@ -156,10 +156,11 @@ struct Entry<M> {
     /// Greatest ended ordinal accepted into retained staging/publication.
     /// None is distinct from logical boot zero; no unbounded boot registry.
     last_ended_published: Option<u64>,
-    /// A staggered initial machine before its first run: it waits, Blocked
-    /// until its boot time, and drops arriving frames as a machine that is
-    /// not yet switched on would. Its first run, whenever it comes, ends this.
-    powered_off: bool,
+    /// A staggered initial machine's boot time, until its first run: it
+    /// waits, Blocked until then, and drops the frames arriving before it, as
+    /// a machine that is not yet switched on would. Its first run, whenever
+    /// it comes, ends this.
+    powered_on_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Copy)]
@@ -223,7 +224,7 @@ impl<M> Entry<M> {
             inbox: VecDeque::new(),
             staged: Vec::new(),
             last_ended_published: None,
-            powered_off: false,
+            powered_on_at: None,
         }
     }
 
@@ -235,14 +236,19 @@ impl<M> Entry<M> {
             deadline: Some(at),
         };
         self.timer = Some(timer);
-        self.powered_off = true;
+        self.powered_on_at = Some(at);
         Ok(())
     }
 
-    /// Whether a frame for this machine is dropped instead of offered: its
-    /// boot has exited, or it has not been switched on yet.
-    fn drops_frames(&self) -> bool {
-        self.powered_off || matches!(self.stopped, StopReason::Exited { .. })
+    /// Whether a frame arriving for this machine at `at` is dropped instead
+    /// of offered: its boot has exited, or it is not switched on until later.
+    // The comparison is with the arrival, never with where a round ends: a
+    // frame arriving after the boot time is offered whether or not the first
+    // run has committed yet. A request or resume that boots the machine early
+    // commits a run at its own barrier, which every schedule shares.
+    fn drops_frame(&self, at: Timestamp) -> bool {
+        self.powered_on_at.is_some_and(|on| at < on)
+            || matches!(self.stopped, StopReason::Exited { .. })
     }
 
     /// Map a simulation time at or after the last rate change into machine time.
@@ -1524,8 +1530,9 @@ where
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
     /// (sender, sequence, receiver) order. A receiver whose boot has exited,
-    /// or that has not been switched on yet, drops the frame. A running receiver takes its frames at the start of its
-    /// next run, which starts at `now`, so a blocked one becomes runnable here.
+    /// or that is not switched on until after `now`, drops the frame. A
+    /// running receiver takes its frames at the start of its next run, which
+    /// starts at `now`, so a blocked one becomes runnable here.
     /// A paused or suspended receiver runs no guest work, so it admits them now
     /// with one zero-budget batch and commit. Returns whether any frame was
     /// due, so that newly generated timeline items at `now` are processed next.
@@ -1541,7 +1548,7 @@ where
         let position = self.position();
         for delivery in due {
             let entry = &mut self.execution.machines[delivery.to.0];
-            if entry.drops_frames() {
+            if entry.drops_frame(now) {
                 self.execution.network.delivery_result(
                     position,
                     delivery.from,
@@ -1946,7 +1953,7 @@ where
         let now = self.now();
         if self.execution.boundary_index != 0
             || self.execution.machines.iter().any(|entry| {
-                entry.powered_off
+                entry.powered_on_at.is_some()
                     || entry.position != now
                     || !matches!(entry.stopped, StopReason::BoundaryReached)
             })

@@ -87,7 +87,7 @@ impl<M> ExecutionState<M> {
                 inbox,
                 staged,
                 last_ended_published,
-                powered_off,
+                powered_on_at,
             } = entry;
             rng.put(&mut e)?;
             lifecycle.put(&mut e)?;
@@ -99,7 +99,7 @@ impl<M> ExecutionState<M> {
             inbox.put(&mut e)?;
             staged.put(&mut e)?;
             last_ended_published.put(&mut e)?;
-            powered_off.put(&mut e)?;
+            powered_on_at.put(&mut e)?;
         }
         events.put(&mut e)?;
         boundary_index.put(&mut e)?;
