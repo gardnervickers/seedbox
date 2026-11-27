@@ -1090,7 +1090,8 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
         )
         .is_err());
     }
-    for accepted in ["a".repeat(2047), format!("{}a", "é".repeat(1023))] {
+    // Bytes, not characters, count; each boot appends its entropy argument.
+    for accepted in ["a".repeat(2014), "é".repeat(1007)] {
         bootstrap.kernel.command_line = accepted;
         assert!(super::TcgMachine::new(
             Path::new("/missing/qemu"),
@@ -1100,7 +1101,11 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
         )
         .is_ok());
     }
-    for rejected in ["a".repeat(2048), "é".repeat(1024), "a\0b".into()] {
+    for rejected in [
+        "a".repeat(2015),
+        format!("{}a", "é".repeat(1007)),
+        "a\0b".into(),
+    ] {
         bootstrap.kernel.command_line = rejected;
         assert!(super::TcgMachine::new(
             Path::new("/missing/qemu"),
