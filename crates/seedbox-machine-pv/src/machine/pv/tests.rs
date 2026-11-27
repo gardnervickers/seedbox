@@ -322,4 +322,14 @@ fn kernel_argument_byte_limit_prevents_silent_linux_truncation() {
     assert!(super::boot::arguments(&"x".repeat(2047)).is_ok());
     assert!(super::boot::arguments(&"x".repeat(2048)).is_err());
     assert!(super::boot::arguments(&"é".repeat(1024)).is_err());
+    // A base line keeps room for the realtime offset each boot appends, so
+    // the longest accepted base still boots within the limit.
+    let room = seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES;
+    let longest = "x".repeat(2047 - room);
+    assert!(super::boot::base_arguments(&longest).is_ok());
+    assert!(super::boot::base_arguments(&format!("{longest}x")).is_err());
+    for seed in 0..64 {
+        let line = seedbox_machine::clock::boot_command_line(&longest, seed);
+        assert!(super::boot::arguments(&line).is_ok());
+    }
 }
