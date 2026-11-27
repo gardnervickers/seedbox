@@ -350,9 +350,16 @@ where
             };
             window.arrivals[index].delivery.bytes = bytes;
         }
+        // The offered frames were the lane's head and nothing else takes
+        // from it during the run; a different head is a scheduler bug.
         for &index in &run.timed[..taken] {
-            let front = window.lanes[id.0].pop_front();
-            debug_assert_eq!(front, Some(index));
+            if window.lanes[id.0].pop_front() != Some(index) {
+                return Err(Error::Causality {
+                    machine: Some(id),
+                    at: window.arrivals[index].at,
+                    reached: run.start,
+                });
+            }
         }
         self.stops.timed_taken(taken);
         let first_untaken = run.timed.get(taken).map(|&index| window.arrivals[index].at);
