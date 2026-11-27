@@ -20,8 +20,12 @@ pub struct ExecutionRequest<'a> {
     /// end, instead of ending them where it needs to. That must change no
     /// result, so it is never part of the experiment identity. Only a worker
     /// built with test support takes it
-    /// ([`crate::driver_world::TAKES_STOP_POLICY`]); others refuse the run.
+    /// ([`crate::driver_world::TAKES_TEST_OPTIONS`]); others refuse the run.
     pub stop_policy: Option<u64>,
+    /// Test support only: give no machine a timed inbox, so that each runs
+    /// once per frame arrival, which must change no result. Only a worker
+    /// built with test support takes it; others refuse the run.
+    pub no_timed_inbox: bool,
     /// Saved engine position to restore before continuing this simulation.
     pub resume_checkpoint: Option<&'a Path>,
     /// Optional durable semantic-input journal, read after the worker stops.

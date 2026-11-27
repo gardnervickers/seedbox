@@ -190,6 +190,12 @@ pub struct ExecutionOptions {
     /// refuses a submission that names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_policy: Option<u64>,
+    /// Test support only: give no machine a timed inbox, so that each runs
+    /// once per frame arrival instead of taking the frames that arrive
+    /// inside a run, which must change no result. Whole-run tests set it to
+    /// check that. A server built without test support refuses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_timed_inbox: bool,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its

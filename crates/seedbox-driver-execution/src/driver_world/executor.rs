@@ -26,11 +26,14 @@ pub struct DriverExecutor {
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
-/// Whether this build's workers take a request's stop policy
-/// ([`crate::execution::ExecutionRequest::stop_policy`]). Only a build with
-/// `test-support` does; a server built without it refuses a submission that
-/// names one, before preparation, and a worker refuses the run.
-pub const TAKES_STOP_POLICY: bool = cfg!(feature = "test-support");
+/// Whether this build's workers take a request's test-support options: its
+/// stop policy and timed-inbox switch
+/// ([`crate::execution::ExecutionRequest::stop_policy`] and
+/// [`no_timed_inbox`](crate::execution::ExecutionRequest::no_timed_inbox)).
+/// Only a build with `test-support` does; a server built without it refuses
+/// a submission that sets one, before preparation, and a worker refuses the
+/// run.
+pub const TAKES_TEST_OPTIONS: bool = cfg!(feature = "test-support");
 /// What a worker says of the stop policy it runs with, on its stderr: the
 /// seed, with which another run repeats its stops.
 #[cfg(any(test, feature = "test-support"))]

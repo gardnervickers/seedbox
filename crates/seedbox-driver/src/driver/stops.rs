@@ -5,17 +5,48 @@
 //! so a shorter round only adds a barrier. Tests use that to check that no
 //! result depends on where rounds end. Outside `test-support` this is empty
 //! and every round ends at the Driver's boundary.
+//!
+//! Where a machine's runs stop inside a round is a host choice too: a
+//! machine with a timed inbox takes the frames arriving inside its run
+//! instead of a run per arrival. Tests turn that off to compare.
 use super::*;
 
-/// Host-side choice of round ends. Not simulation state: it is never part of
-/// evidence or a checkpoint, and a restored Driver starts without a policy.
+/// Host-side choice of round ends and of timed inboxes. Not simulation
+/// state: it is never part of evidence or a checkpoint, and a restored
+/// Driver starts without a policy and with timed inboxes.
 #[derive(Default)]
 pub(super) struct Stops {
     #[cfg(any(test, feature = "test-support"))]
     policy: Option<StopPolicy>,
+    /// Gives no machine a timed inbox, so tests can compare.
+    #[cfg(any(test, feature = "test-support"))]
+    no_timed_inbox: bool,
+    /// Frames delivered inside runs at their own times.
+    #[cfg(any(test, feature = "test-support"))]
+    timed_taken: u64,
 }
 
 impl Stops {
+    /// Whether machines that honour a timed inbox are given one.
+    #[cfg_attr(not(any(test, feature = "test-support")), inline(always))]
+    pub(super) fn timed_inbox(&self) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.no_timed_inbox {
+            return false;
+        }
+        true
+    }
+
+    /// Count frames a run delivered at their own times.
+    #[cfg_attr(not(any(test, feature = "test-support")), inline(always))]
+    pub(super) fn timed_taken(&mut self, taken: usize) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.timed_taken += taken as u64;
+        }
+        let _ = taken;
+    }
+
     /// The end of a round that starts at `now` and may run to `boundary`.
     #[cfg_attr(not(any(test, feature = "test-support")), inline(always))]
     pub(super) fn end(&mut self, now: Timestamp, boundary: Timestamp) -> Timestamp {
@@ -89,6 +120,23 @@ impl<M: Machine> Driver<M> {
     /// in seedbox-driver-execution).
     pub fn set_stop_policy(&mut self, policy: Option<StopPolicy>) {
         self.stops.policy = policy;
+    }
+
+    /// With `false`, give no machine a timed inbox: each frame arriving
+    /// inside a lane ends the receiver's run there, and the next run takes
+    /// it. Timed inboxes are on by default, for machines that honour them
+    /// ([`Machine::timed_inbox`]) on a clock without drift; they change no
+    /// result (`tests/driver_stop_policy.rs` compares both ways), only how
+    /// many runs a lane makes. The whole-run oracle turns them off through
+    /// a submission's `noTimedInbox`, which only a test-support build takes.
+    pub fn set_timed_inbox(&mut self, enabled: bool) {
+        self.stops.no_timed_inbox = !enabled;
+    }
+
+    /// How many frames machines took inside runs, at their own times,
+    /// since the Driver started.
+    pub fn timed_frames_taken(&self) -> u64 {
+        self.stops.timed_taken
     }
 }
 

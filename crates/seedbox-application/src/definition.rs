@@ -887,6 +887,7 @@ mod tests {
         let request = crate::execution::ExecutionRequest {
             start_paused: true,
             stop_policy: None,
+            no_timed_inbox: false,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,

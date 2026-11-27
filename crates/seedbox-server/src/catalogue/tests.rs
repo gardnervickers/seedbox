@@ -68,26 +68,43 @@ fn injected_faults_are_checked_before_journaling() {
 }
 
 #[test]
-fn a_stop_policy_is_taken_only_by_a_test_support_build() {
-    let mut catalogue = Catalogue::in_memory();
-    let request = seedbox_api::SubmitRequest {
-        metadata: Default::default(),
-        options: seedbox_api::ExecutionOptions {
-            stop_policy: Some(4242),
-            ..Default::default()
-        },
-        request_id: "stops".into(),
-        spec: spec(json!({"action":"crash","machine":"db"})),
-    };
-    let submitted = catalogue.submit(request);
-    if seedbox_driver_execution::driver_world::TAKES_STOP_POLICY {
-        assert_eq!(submitted.unwrap().0.options.stop_policy, Some(4242));
-    } else {
-        // Refused at submission, before any preparation.
-        assert!(matches!(
-            submitted,
-            Err(Error::Invalid(message))
-                if message == "a stop policy needs a server built with test support"
-        ));
+fn test_options_are_taken_only_by_a_test_support_build() {
+    for (options, refusal) in [
+        (
+            seedbox_api::ExecutionOptions {
+                stop_policy: Some(4242),
+                ..Default::default()
+            },
+            "a stop policy needs a server built with test support",
+        ),
+        (
+            seedbox_api::ExecutionOptions {
+                no_timed_inbox: true,
+                ..Default::default()
+            },
+            "turning timed inboxes off needs a server built with test support",
+        ),
+    ] {
+        let mut catalogue = Catalogue::in_memory();
+        let request = seedbox_api::SubmitRequest {
+            metadata: Default::default(),
+            options: options.clone(),
+            request_id: "test-options".into(),
+            spec: spec(json!({"action":"crash","machine":"db"})),
+        };
+        let submitted = catalogue.submit(request);
+        if seedbox_driver_execution::driver_world::TAKES_TEST_OPTIONS {
+            let taken = submitted.unwrap().0.options;
+            assert_eq!(
+                (taken.stop_policy, taken.no_timed_inbox),
+                (options.stop_policy, options.no_timed_inbox)
+            );
+        } else {
+            // Refused at submission, before any preparation.
+            assert!(matches!(
+                submitted,
+                Err(Error::Invalid(message)) if message == refusal
+            ));
+        }
     }
 }

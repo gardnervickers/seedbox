@@ -339,7 +339,9 @@ fn lifecycle_controls_replay_branch_and_rerun() {
 /// rounds at their own seeded times. Each must match the baseline, write its
 /// output and match the other, and both commit more barriers while stepping
 /// than the run without a policy, at different counts, which shows that the
-/// policy acted.
+/// policy acted. Two more runs do the same with timed inboxes, which are on
+/// by default, turned off (`noTimedInbox`, which only that build accepts):
+/// each machine then runs once per frame arrival.
 #[test]
 fn stops_and_quantum_never_change_results() {
     let mut run = Run::new("stops");
@@ -362,7 +364,7 @@ fn stops_and_quantum_never_change_results() {
         // Driver commits on the way are its own.
         let Some((output, reference)) = run
             .oracle("StepInvariance", async {
-                let (stepped, counts) = session.stepped(None).await?;
+                let (stepped, counts) = session.stepped(None, true).await?;
                 session.same_results(&baseline, &stepped).await?;
                 Ok((session.logs(&baseline).await?, counts))
             })
@@ -373,7 +375,15 @@ fn stops_and_quantum_never_change_results() {
         run.release(session.release(&[&baseline])).await;
         run.oracle(
             "StopPolicyInvariance",
-            session.stop_invariance(&baseline, &output, &reference),
+            session.stop_invariance(&baseline, &output, &reference, true),
+        )
+        .await;
+        run.release(session.release(&[&baseline])).await;
+        // Under the same seeded stops without timed inboxes, each machine
+        // runs once per frame arrival.
+        run.oracle(
+            "TimedInboxInvariance",
+            session.stop_invariance(&baseline, &output, &reference, false),
         )
         .await;
         run.release(session.release(&[])).await;

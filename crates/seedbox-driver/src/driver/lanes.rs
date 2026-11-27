@@ -8,6 +8,11 @@
 //! ([`Machine::split_run`], a PV worker process) keeps its run in flight
 //! beside the others while this thread runs blocking machines inline and
 //! finishes whichever split run stops first.
+//!
+//! A machine with a timed inbox ([`Machine::timed_inbox`]) takes the frames
+//! that arrive inside its lane in one run, each at its own time, instead of
+//! one run per arrival: every frame arriving before the round's end is known
+//! when the round starts. Frames the run did not reach go back to the lane.
 use super::batch::RunResult;
 use super::round::Runs;
 use super::*;
@@ -31,6 +36,9 @@ struct LaneRun {
     /// The simulation time the run's machine times map from.
     lower: Timestamp,
     offered: usize,
+    /// The frames offered to a timed inbox, as indices into the window's
+    /// arrivals, in the lane's order; they stay in its queue until taken.
+    timed: Vec<usize>,
     offered_commands: Vec<(MachineId, NonZeroU32, Timestamp)>,
     offered_stops: Vec<NonZeroU32>,
 }
@@ -48,6 +56,8 @@ struct Window {
     /// Machines held at a breakpoint (see `Driver::held`): at the round's
     /// start, or since a run of this round staged their hit.
     held: Vec<bool>,
+    /// The machines given timed inboxes (see `Driver::timed_lanes`).
+    timed: Vec<bool>,
     ran: bool,
 }
 
@@ -94,6 +104,21 @@ where
         })
     }
 
+    /// Which machines are given timed inboxes: those that honour them
+    /// ([`Machine::timed_inbox`]) on a clock without drift, so that each
+    /// machine nanosecond is one simulation nanosecond and a run woken by
+    /// its timer starts where the timer is due.
+    fn timed_lanes(&self) -> Vec<bool> {
+        let enabled = self.stops.timed_inbox();
+        self.execution
+            .machines
+            .iter()
+            .map(|entry| {
+                enabled && entry.time.steady() && entry.machine.as_ref().is_some_and(M::timed_inbox)
+            })
+            .collect()
+    }
+
     /// Run every machine's lane to `end`, taking the frames for `receivers`.
     /// Returns whether any machine ran, and the latest arrival taken.
     pub(super) fn run_lanes(
@@ -117,6 +142,7 @@ where
                     self.execution.control.service.breaks.supported && self.held(MachineId(index))
                 })
                 .collect(),
+            timed: self.timed_lanes(),
             ran: false,
         };
         for (at, delivery) in taken {
@@ -139,10 +165,12 @@ where
             let result = self.next_run(&mut runs);
             let id = result.id;
             let run = window.running.remove(&id).expect("running lane");
-            let finished = self.finish_lane_run(result, run).and_then(|hit| {
-                window.held[id.0] |= hit;
-                self.advance_lane(id, &mut window, &mut runs)
-            });
+            let finished = self
+                .finish_lane_run(result, run, &mut window)
+                .and_then(|hit| {
+                    window.held[id.0] |= hit;
+                    self.advance_lane(id, &mut window, &mut runs)
+                });
             if let Err(error) = finished {
                 Self::fail_lane(id, error, &mut window, &mut errors);
             }
@@ -238,18 +266,48 @@ where
             else {
                 return Ok(());
             };
-            // A machine held at a breakpoint only admits what arrived.
-            let upto = if window.held[id.0] {
-                start
+            // A machine held at a breakpoint only admits what arrived. A
+            // timed inbox takes every frame arriving before the end, at its
+            // own time; otherwise the run ends at the next arrival.
+            let timed_run = window.timed[id.0] && !window.held[id.0] && !inside;
+            let (upto, timed) = if window.held[id.0] {
+                (start, Vec::new())
+            } else if timed_run {
+                let arrivals = &window.arrivals;
+                let timed = window.lanes[id.0]
+                    .iter()
+                    .copied()
+                    .take_while(|&index| arrivals[index].at < window.end)
+                    .collect();
+                (window.end, timed)
             } else {
-                arrival.map_or(window.end, |at| at.min(window.end))
+                (
+                    arrival.map_or(window.end, |at| at.min(window.end)),
+                    Vec::new(),
+                )
             };
             let ids = [id];
             let offered_commands = self.offered_commands(&ids);
             let offered_stops = self.offered_stops(&ids);
-            let (view, lower) = self.batch_view(id, start, upto, false)?;
-            let (_, machine_start, machine_bound, ref inbox) = view;
-            let offered = inbox.len();
+            let (mut view, lower) = self.batch_view(id, start, upto, false)?;
+            let offered = view.3.len();
+            if timed_run && upto > start {
+                // The lane's arrivals all come after `start`; their bytes
+                // move into the run and come back if it does not take them.
+                view.4 = true;
+                let entry = &self.execution.machines[id.0];
+                for &index in &timed {
+                    let arrival = &mut window.arrivals[index];
+                    debug_assert!(start < arrival.at && arrival.at < upto);
+                    view.3.push_back(Input {
+                        at: entry.machine_time(id, arrival.at)?,
+                        payload: Request::ReceiveFrame {
+                            bytes: std::mem::take(&mut arrival.delivery.bytes),
+                        },
+                    });
+                }
+            }
+            let (_, machine_start, machine_bound, _, _) = view;
             self.submit_run(view, runs);
             window.running.insert(
                 id,
@@ -260,6 +318,7 @@ where
                     machine_bound,
                     lower,
                     offered,
+                    timed,
                     offered_commands,
                     offered_stops,
                 },
@@ -270,13 +329,40 @@ where
     }
 
     /// Accept a lane's finished run and record it on its machine. Returns
-    /// whether the run staged a breakpoint hit.
+    /// whether the run staged a breakpoint hit. Timed frames it took leave
+    /// the lane's queue; the bytes of those it did not reach go back to
+    /// their arrivals, which stay queued.
     fn finish_lane_run(
         &mut self,
-        result: RunResult<M>,
+        mut result: RunResult<M>,
         run: LaneRun,
+        window: &mut Window,
     ) -> Result<bool, Error<M::Error>> {
         let id = result.id;
+        // A machine takes timed inputs only once every due one is taken, so
+        // what it left of them is the leftover's tail.
+        let untaken = result.leftover.len().min(run.timed.len());
+        let left = result.leftover.split_off(result.leftover.len() - untaken);
+        let taken = run.timed.len() - untaken;
+        for (input, &index) in left.into_iter().zip(&run.timed[taken..]) {
+            let Request::ReceiveFrame { bytes } = input.payload else {
+                unreachable!("only frames are timed inputs");
+            };
+            window.arrivals[index].delivery.bytes = bytes;
+        }
+        // The offered frames were the lane's head and nothing else takes
+        // from it during the run; a different head is a scheduler bug.
+        for &index in &run.timed[..taken] {
+            if window.lanes[id.0].pop_front() != Some(index) {
+                return Err(Error::Causality {
+                    machine: Some(id),
+                    at: window.arrivals[index].at,
+                    reached: run.start,
+                });
+            }
+        }
+        self.stops.timed_taken(taken);
+        let first_untaken = run.timed.get(taken).map(|&index| window.arrivals[index].at);
         let report = self.receive_run(result, run.offered);
         let accepted = self.accept_run(
             report,
@@ -286,6 +372,14 @@ where
             run.start,
             run.upto,
         )?;
+        // A timed inbox's run stops no later than the first frame it did
+        // not take.
+        if first_untaken.is_some_and(|at| accepted.reached() > at) {
+            return Err(Error::InvalidStop {
+                id,
+                stopped: accepted.stopped(),
+            });
+        }
         self.confirm_offered_commands(&run.offered_commands, None)?;
         let staged = self.execution.machines[id.0].staged.len();
         self.commit_runs([accepted], &run.offered_stops, None);

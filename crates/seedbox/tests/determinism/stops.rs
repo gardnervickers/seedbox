@@ -9,6 +9,8 @@ use seedbox_api::{ControlCommand, SimulationId};
 const STEPS: usize = 20;
 /// The stop policy seeds of the two runs [`Session::stop_invariance`] makes.
 const STOP_SEEDS: [u64; 2] = [4242, 4243];
+/// How a worker's stderr notice that it turned timed inboxes off ends.
+const TIMED_INBOX_OFF: &str = "Driver timed inboxes off";
 
 impl Session {
     // ---- QuantumInvariance --------------------------------------------------------
@@ -36,15 +38,19 @@ impl Session {
     /// policy seeds end their rounds at times drawn from them, so they stop
     /// differently from each other and from the Driver's own rounds, whose
     /// barrier counts after each of the first steps are `reference`. Each
-    /// must match the baseline and write its output.
+    /// must match the baseline and write its output. Unless `timed`, the
+    /// submissions also turn timed inboxes off (`noTimedInbox`), which are
+    /// on by default and in the baseline, so that each machine runs once
+    /// per frame arrival.
     pub async fn stop_invariance(
         &self,
         baseline: &SimulationId,
         output: &[Record],
         reference: &[u64],
+        timed: bool,
     ) -> Outcome {
-        let (first, first_counts) = self.stepped(Some(STOP_SEEDS[0])).await?;
-        let (second, second_counts) = self.stepped(Some(STOP_SEEDS[1])).await?;
+        let (first, first_counts) = self.stepped(Some(STOP_SEEDS[0]), timed).await?;
+        let (second, second_counts) = self.stepped(Some(STOP_SEEDS[1]), timed).await?;
         // Without a policy every run commits at the same barriers. A policy
         // only adds barriers, so one that acted shows more, and two runs
         // seeded apart show different ones.
@@ -58,7 +64,7 @@ impl Session {
         for (run, seed) in [(&first, STOP_SEEDS[0]), (&second, STOP_SEEDS[1])] {
             // The worker names the seed it drew its stops from, which shows it
             // took the policy; submitting the seed again repeats the stops.
-            self.stop_seed(run, seed)?;
+            self.stop_seed(run, seed, timed)?;
             let checked = async {
                 self.same_results(baseline, run).await?;
                 same_output(output, &self.logs(run).await?)
@@ -72,8 +78,9 @@ impl Session {
     }
 
     /// Check that the run's worker said, on its retained stderr, that it drew
-    /// its stops from `seed`.
-    fn stop_seed(&self, id: &SimulationId, seed: u64) -> Outcome {
+    /// its stops from `seed`, and unless `timed`, that it turned timed
+    /// inboxes off.
+    fn stop_seed(&self, id: &SimulationId, seed: u64, timed: bool) -> Outcome {
         let said = self.cli(&[
             "show",
             &id.to_string(),
@@ -82,30 +89,39 @@ impl Session {
             "--file",
             "vmm.stderr",
         ])?;
+        let said = String::from_utf8_lossy(&said);
         let notice = format!("Driver stop policy seed {seed}");
-        if String::from_utf8_lossy(&said)
-            .lines()
-            .any(|line| line.ends_with(&notice))
-        {
-            Ok(())
-        } else {
-            Err(format!(
+        if !said.lines().any(|line| line.ends_with(&notice)) {
+            return Err(format!(
                 "{id}: its worker did not name stop policy seed {seed}"
-            ))
+            ));
         }
+        let untimed = said.lines().any(|line| line.ends_with(TIMED_INBOX_OFF));
+        if untimed == timed {
+            return Err(format!(
+                "{id}: its worker {} timed inboxes off",
+                if timed { "turned" } else { "did not turn" }
+            ));
+        }
+        Ok(())
     }
 
-    /// Run the definition paused, its submission naming `stop_policy`, step
-    /// its first [`STEPS`] quanta, then play it to the end. Returns the run
-    /// and how many barriers its Driver had committed after each step: a host
-    /// count, which only a stop policy changes.
+    /// Run the definition paused, its submission naming `stop_policy` and,
+    /// unless `timed`, turning timed inboxes off, step its first [`STEPS`]
+    /// quanta, then play it to the end. Returns the run and how many barriers
+    /// its Driver had committed after each step: a host count, which only a
+    /// stop policy changes.
     pub async fn stepped(
         &self,
         stop_policy: Option<u64>,
+        timed: bool,
     ) -> Result<(SimulationId, Vec<u64>), String> {
         let mut document = self.document.clone();
         if let Some(seed) = stop_policy {
             document["options"]["stopPolicy"] = seed.into();
+        }
+        if !timed {
+            document["options"]["noTimedInbox"] = true.into();
         }
         let id = self.submit(&document, true).await?;
         self.live(&id).await?;
