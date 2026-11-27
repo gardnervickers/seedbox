@@ -793,3 +793,333 @@ fn udp_frames_carry_a_valid_ipv4_header_and_the_whole_payload() {
     assert_eq!(udp[6..8], [0, 0]);
     assert_eq!(frame[42..], payload);
 }
+
+/// One machine as a Driver lane keeps it: its stop, the frames routed to it
+/// and not yet taken, and what it has shown.
+struct Lane<M> {
+    machine: M,
+    clock: SimulationClock,
+    rng: SeededRng,
+    stopped: StopReason,
+    reached: u64,
+    /// Due inputs, at or before the next run's start.
+    inbox: VecDeque<Input>,
+    /// Routed frames not yet offered: arrival time and bytes, in order.
+    arrivals: VecDeque<(u64, Vec<u8>)>,
+    output: String,
+    console: String,
+}
+
+/// What one schedule of [`timed_inbox_matches_one_run_per_arrival`] showed
+/// at one barrier.
+#[derive(PartialEq, Eq)]
+struct Look {
+    at: u64,
+    output: [String; 2],
+    console: [String; 2],
+    frames: Vec<Routed>,
+    witness: [Option<crate::machine::ExecutionEvidence>; 2],
+    state: Option<[Option<crate::machine::StateEvidence>; 2]>,
+}
+
+/// Runs, frames delivered inside runs, and the looks of one schedule.
+struct Schedule {
+    looks: Vec<Look>,
+    runs: usize,
+    timed: usize,
+}
+
+/// Where two looks differ.
+fn look_differences(own: &Look, other: &Look) -> String {
+    let mut found = Vec::new();
+    for index in 0..2 {
+        if own.output[index] != other.output[index] {
+            found.push(format!(
+                "{index} output: {:?} against {:?}",
+                own.output[index], other.output[index]
+            ));
+        }
+        if own.console[index] != other.console[index] {
+            found.push(format!("{index} console"));
+        }
+        if own.witness[index] != other.witness[index] {
+            found.push(format!("{index} witness"));
+        }
+        if let (Some(a), Some(b)) = (&own.state, &other.state) {
+            if let (Some(a), Some(b)) = (&a[index], &b[index]) {
+                for ((name, x), (_, y)) in a.parts.iter().zip(&b.parts) {
+                    if x != y {
+                        found.push(format!("{index} state part {name}"));
+                    }
+                }
+                if a.page_hashes != b.page_hashes {
+                    found.push(format!("{index} RAM pages"));
+                }
+            }
+        }
+    }
+    if own.frames != other.frames {
+        let first = own
+            .frames
+            .iter()
+            .zip(&other.frames)
+            .position(|(a, b)| a != b);
+        found.push(format!(
+            "frames ({} against {}), first difference at {first:?}",
+            own.frames.len(),
+            other.frames.len()
+        ));
+    }
+    found.join("\n")
+}
+
+/// Run the exchange from boot in windows of [`LATENCY`], as the Driver's
+/// lanes would: a frame sent at `s` arrives at exactly `s + LATENCY`, inside
+/// the next window, and each machine runs from its own next start, taking
+/// frames at their arrival. With `timed`, a run takes every frame arriving
+/// before the window's end at its own time; otherwise each run ends at the
+/// next arrival. Looks at every window's end until `windows` (or, without
+/// it, until the client is done), with full state every `state_every`
+/// windows and at the last.
+fn schedule<M: Machine<Context = ()>>(
+    machines: [M; 2],
+    timed: bool,
+    windows: Option<usize>,
+    state_every: usize,
+) -> Schedule
+where
+    M::Error: Debug,
+{
+    let guard = HangGuard::new("timed inbox network exchange", HOST_LIMIT);
+    let mut lanes = machines.map(|machine| Lane {
+        machine,
+        clock: SimulationClock::new(0),
+        rng: SeededRng::new(41),
+        stopped: StopReason::BoundaryReached,
+        reached: 0,
+        inbox: VecDeque::new(),
+        arrivals: VecDeque::new(),
+        output: String::new(),
+        console: String::new(),
+    });
+    let mut frames = Vec::new();
+    let (mut runs, mut taken) = (0, 0);
+    let mut looks = Vec::new();
+    for window in 0.. {
+        let done = lanes[1].output.contains("NETPROBE done");
+        if windows.map_or(done, |windows| window == windows) {
+            break;
+        }
+        let end = (window as u64 + 1) * LATENCY;
+        assert!(end < LIMIT, "no exchange within the simulated bound");
+        guard.remaining().expect("timed inbox exchange hang");
+        let mut routed = Vec::new();
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            loop {
+                let next = match lane.stopped {
+                    StopReason::BoundaryReached => Some(lane.reached),
+                    StopReason::Blocked { deadline, .. } => deadline.map(Timestamp::as_nanos),
+                    StopReason::Exited { .. } => panic!("{index} exited: {:?}", lane.output),
+                };
+                let arrival = lane
+                    .arrivals
+                    .front()
+                    .map(|&(at, _)| at)
+                    .filter(|&at| at < end);
+                if let Some(at) = arrival.filter(|&at| next.is_none_or(|start| start >= at)) {
+                    // Frames arriving at `at` wait for the run from `at`; a
+                    // blocked receiver becomes runnable then.
+                    while lane.arrivals.front().is_some_and(|&(due, _)| due == at) {
+                        let (_, bytes) = lane.arrivals.pop_front().unwrap();
+                        lane.inbox.push_back(Input {
+                            at: Timestamp::from_nanos(at),
+                            payload: Request::ReceiveFrame { bytes },
+                        });
+                    }
+                    if let StopReason::Blocked { .. } = lane.stopped {
+                        lane.stopped = StopReason::BoundaryReached;
+                        lane.reached = at;
+                    }
+                    continue;
+                }
+                let Some(start) = next.filter(|&start| start < end) else {
+                    break;
+                };
+                let (upto, offered) = if timed {
+                    let offered = lane
+                        .arrivals
+                        .iter()
+                        .take_while(|&&(at, _)| at < end)
+                        .count();
+                    (end, offered)
+                } else {
+                    (arrival.map_or(end, |at| at.min(end)), 0)
+                };
+                let mut inbox = std::mem::take(&mut lane.inbox);
+                for (at, bytes) in lane.arrivals.drain(..offered) {
+                    inbox.push_back(Input {
+                        at: Timestamp::from_nanos(at),
+                        payload: Request::ReceiveFrame { bytes },
+                    });
+                }
+                lane.clock.set(start);
+                let mut staged = Vec::new();
+                let view = Inbox::new(&mut inbox, Timestamp::from_nanos(start));
+                let stop = lane
+                    .machine
+                    .run(
+                        &mut RunContext {
+                            worker: &mut (),
+                            clock: &lane.clock,
+                            rng: &mut lane.rng,
+                            execution: Default::default(),
+                            inbox: if timed {
+                                view.with_timed(Timestamp::from_nanos(upto))
+                            } else {
+                                view
+                            },
+                            outbox: Outbox::new(
+                                &mut staged,
+                                Timestamp::from_nanos(start),
+                                Timestamp::from_nanos(upto),
+                            ),
+                        },
+                        Timestamp::from_nanos(upto),
+                    )
+                    .unwrap();
+                runs += 1;
+                // Frames the run did not reach go back, in order.
+                let left = inbox.len();
+                assert!(left <= offered, "{index} left due inputs");
+                taken += offered - left;
+                for input in inbox.into_iter().rev() {
+                    let Request::ReceiveFrame { bytes } = input.payload else {
+                        unreachable!("only frames are timed");
+                    };
+                    lane.arrivals.push_front((input.at.as_nanos(), bytes));
+                }
+                lane.reached = match stop {
+                    StopReason::BoundaryReached => upto,
+                    StopReason::Blocked { reached, .. } => reached.as_nanos(),
+                    StopReason::Exited { .. } => panic!("{index} exited: {:?}", lane.output),
+                };
+                assert!(
+                    lane.arrivals
+                        .front()
+                        .is_none_or(|&(at, _)| at >= lane.reached),
+                    "{index} ran past a frame it did not take"
+                );
+                lane.stopped = stop;
+                for output in staged {
+                    let at = output.at.as_nanos();
+                    match output.payload {
+                        Response::ApplicationOutput { bytes, .. } => {
+                            lane.output.push_str(&String::from_utf8_lossy(&bytes))
+                        }
+                        Response::BootConsole { bytes } => {
+                            lane.console.push_str(&String::from_utf8_lossy(&bytes))
+                        }
+                        Response::ApplicationOutcome { code } => assert!(
+                            index == 1 && code == 0 && lane.output.ends_with("NETPROBE done\n"),
+                            "{index} probe exited {code}: {:?}",
+                            lane.output
+                        ),
+                        Response::TransmitFrame { bytes } => {
+                            let to = route(index, &bytes);
+                            let arrival = to.map(|_| at + LATENCY);
+                            frames.push((at, index, to, arrival, Sha256::digest(&bytes).into()));
+                            if let (Some(to), Some(arrival)) = (to, arrival) {
+                                routed.push((to, arrival, bytes));
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        }
+        // Every frame sent in this window arrives in the next one, after
+        // those already routed to its receiver.
+        for (to, arrival, bytes) in routed {
+            assert!(arrival >= end);
+            lanes[to].arrivals.push_back((arrival, bytes));
+        }
+        // The last window: the requested count, or the one the client
+        // finished in.
+        let last = windows.map_or_else(
+            || lanes[1].output.contains("NETPROBE done"),
+            |windows| window + 1 == windows,
+        );
+        let state = (window % state_every == 0 || last).then(|| {
+            lanes
+                .each_mut()
+                .map(|lane| lane.machine.state_evidence().unwrap())
+        });
+        looks.push(Look {
+            at: end,
+            output: lanes.each_ref().map(|lane| lane.output.clone()),
+            console: lanes.each_ref().map(|lane| lane.console.clone()),
+            frames: frames.clone(),
+            witness: lanes
+                .each_mut()
+                .map(|lane| lane.machine.execution_evidence().unwrap()),
+            state,
+        });
+    }
+    Schedule {
+        looks,
+        runs,
+        timed: taken,
+    }
+}
+
+/// A machine that honours a timed inbox takes the frames arriving inside a
+/// run at their own times: at every barrier its output, console, native
+/// witness and (every `state_every` windows) full state equal those of one
+/// run per arrival, and it makes fewer runs.
+pub fn timed_inbox_matches_one_run_per_arrival<M: Machine<Context = ()>>(
+    backend: &Backend<M>,
+    state_every: usize,
+) where
+    M::Error: Debug,
+{
+    let machines = backend.machines();
+    assert!(
+        machines.iter().all(M::timed_inbox),
+        "{} timed inbox",
+        backend.name
+    );
+    let split = schedule(machines, false, None, state_every);
+    let windows = split.looks.len();
+    let timed = schedule(backend.machines(), true, Some(windows), state_every);
+    let last = split.looks.last().expect("windows");
+    let [server, client] = &last.output;
+    assert_eq!(server, "NETPROBE ready port=7000\n");
+    assert!(client.ends_with("NETPROBE done\n"), "{client:?}");
+    assert!(
+        last.state
+            .as_ref()
+            .is_some_and(|state| state.iter().all(Option::is_some)),
+        "full state"
+    );
+    assert!(last.witness.iter().all(Option::is_some), "native witness");
+    for (a, b) in split.looks.iter().zip(&timed.looks) {
+        assert!(
+            a == b,
+            "first difference at {} ns ({} runs against {}):\n{}",
+            a.at,
+            timed.runs,
+            split.runs,
+            look_differences(a, b)
+        );
+    }
+    eprintln!(
+        "{}: {windows} windows, {} frames, {} runs one per arrival, {} with timed inboxes ({} frames inside runs)",
+        backend.name,
+        last.frames.len(),
+        split.runs,
+        timed.runs,
+        timed.timed
+    );
+    assert_eq!(split.timed, 0);
+    assert!(timed.timed > 0 && timed.runs < split.runs);
+}

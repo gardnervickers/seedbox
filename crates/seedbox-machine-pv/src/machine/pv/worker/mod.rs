@@ -37,6 +37,8 @@ use std::{
 };
 #[cfg(test)]
 mod resource_tests;
+#[cfg(test)]
+mod timed_tests;
 
 type Result<T> = std::result::Result<T, String>;
 // Seedbox PV v3 shared-page ABI. Guest advances LAST while executing; a stopped
@@ -481,6 +483,77 @@ impl<B: Backend> Machine<B> {
         let stop = self.run_until(now, upto, syscall_cost_ns, shutdown, input, frames, breaks)?;
         self.page.set_word(BOUND, self.wake().unwrap_or(u64::MAX));
         Ok(stop)
+    }
+    /// [`Machine::run`] with a timed inbox: each of `timed`, a frame and its
+    /// time, ascending, after `now` and before `upto`, is delivered at its
+    /// time. The run goes on across every stop at which the client would at
+    /// once start the next run of the same machine inside this one, and
+    /// makes that run here with the same arguments: at a frame's time, with
+    /// the frames due then, and from a block, at its wake or the next
+    /// frame's time, whichever comes first. So the guest sees exactly the
+    /// runs it would see with one run per input (C3). Returns the stop and
+    /// how many timed frames were delivered; any not reached stay with the
+    /// client.
+    #[allow(clippy::too_many_arguments)]
+    fn run_timed(
+        &mut self,
+        now: u64,
+        upto: u64,
+        syscall_cost_ns: u64,
+        shutdown: bool,
+        input: &[u8],
+        frames: Vec<Vec<u8>>,
+        timed: Vec<(u64, Vec<u8>)>,
+        breaks: &[String],
+    ) -> Result<(Stop, usize)> {
+        if timed.first().is_some_and(|&(first, _)| first <= now)
+            || timed.last().is_some_and(|&(last, _)| last >= upto)
+            || timed.windows(2).any(|pair| pair[0].0 > pair[1].0)
+        {
+            return Err("PV timed frames outside their run".into());
+        }
+        let total = timed.len();
+        let mut timed = timed.into_iter().peekable();
+        let mut start = now;
+        let mut frames = frames;
+        let mut first = true;
+        loop {
+            let next = timed.peek().map(|&(at, _)| at);
+            let stop = self.run(
+                start,
+                next.unwrap_or(upto),
+                syscall_cost_ns,
+                shutdown && first,
+                if first { input } else { &[] },
+                std::mem::take(&mut frames),
+                breaks,
+            )?;
+            first = false;
+            let resume = match stop {
+                // It reached the next frame's time.
+                Stop::Horizon => next.filter(|&at| at == self.state.now),
+                // An expired wake goes back to the client, which refuses
+                // it as it would after any run.
+                Stop::Blocked(Some(wake)) if wake <= self.state.now => None,
+                // Idle: the client would run it again from its wake, or
+                // from the next frame, which wakes it.
+                Stop::Blocked(wake) => {
+                    let wake = wake.filter(|&wake| wake < upto);
+                    match (wake, next) {
+                        (Some(wake), Some(at)) => Some(wake.min(at)),
+                        (wake, at) => wake.or(at),
+                    }
+                }
+                _ => None,
+            };
+            let Some(at) = resume else {
+                return Ok((stop, total - timed.len()));
+            };
+            while let Some((_, bytes)) = timed.next_if(|&(due, _)| due == at) {
+                frames.push(bytes);
+            }
+            start = at;
+        }
     }
     /// Whether `exit` is the guest's clock yield: it read a time past the
     /// published bound, or yielded to take a deferred interrupt.
@@ -1180,18 +1253,42 @@ pub(crate) fn serve() -> Result<()> {
                 frames: _,
                 breaks,
                 resume,
+                timed,
             } => {
                 let vm = machine.as_mut().ok_or("PV run before boot")?;
                 vm.resume = resume;
-                let stop = vm.run(
-                    now,
-                    upto,
-                    syscall_cost_ns,
-                    shutdown,
-                    &lifecycle,
-                    frames,
-                    &breaks,
-                )?;
+                let (stop, delivered) = match timed {
+                    None => (
+                        vm.run(
+                            now,
+                            upto,
+                            syscall_cost_ns,
+                            shutdown,
+                            &lifecycle,
+                            frames,
+                            &breaks,
+                        )?,
+                        0,
+                    ),
+                    Some(timed) => {
+                        let mut frames = frames;
+                        let late = frames
+                            .len()
+                            .checked_sub(timed.len())
+                            .ok_or("PV more timed frames than frames")?;
+                        let timed = timed.into_iter().zip(frames.split_off(late)).collect();
+                        vm.run_timed(
+                            now,
+                            upto,
+                            syscall_cost_ns,
+                            shutdown,
+                            &lifecycle,
+                            frames,
+                            timed,
+                            &breaks,
+                        )?
+                    }
+                };
                 vm.output.clear();
                 let taken = std::mem::take(&mut vm.state.writes);
                 let count = taken.len() as u64;
@@ -1200,6 +1297,7 @@ pub(crate) fn serve() -> Result<()> {
                     time: vm.state.now,
                     stop,
                     writes: count,
+                    taken: delivered as u64,
                 })
             }
             Request::ExecutionEvidence => Ok(Response::ExecutionEvidence(

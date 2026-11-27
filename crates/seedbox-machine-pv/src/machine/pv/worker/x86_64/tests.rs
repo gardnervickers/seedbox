@@ -1348,3 +1348,77 @@ fn a_held_disk_request_waits_for_its_release_and_continues_in_order() {
         assert!(error.contains("script capture unused"), "{error}");
     }
 }
+fn timed_frame(tag: u8) -> Vec<u8> {
+    let mut frame = vec![0xff; 6];
+    frame.extend([2, 0, 0, 0, 0, 2, 0x88, 0xb5, tag]);
+    frame.resize(60, 0);
+    frame
+}
+/// A guest that set up its PIC, armed its timer at `deadline` and halted.
+/// Woken, it acknowledges one interrupt and halts again. The scripted NIC
+/// raises no interrupt for a frame, so only its timer wakes it.
+fn idle_networked(deadline: Option<u64>) -> Machine<Scripted> {
+    let mut vm = machine_full(None, Some([2, 0, 0, 0, 0, 1]));
+    vm.native.exits.extend([event(32, 3)]);
+    vm.native.exits.extend(pic_setup());
+    if let Some(deadline) = deadline {
+        vm.native.exits.push_back(event(0, deadline));
+    }
+    vm.native.exits.push_back(halt());
+    vm.native.interruptible.extend([false, true]);
+    vm.native.exits.extend([
+        Exit::Window,
+        port(0x21, true, 0xcf),
+        port(0x20, true, 0x60),
+        port(ACK_PORT, true, 1),
+        port(0x21, true, 0xce),
+        halt(),
+    ]);
+    vm
+}
+/// What a stopped machine shows, for comparing two schedules of it.
+fn timed_look(vm: &Machine<Scripted>) -> ((Vec<u8>, Vec<u8>), usize) {
+    (stopped(vm), vm.native.entries)
+}
+/// A timed run delivers each frame at its time and goes on across blocks
+/// whose wake comes first, making exactly the runs the client would make
+/// with one run per input: the stopped machine is the same. The guest's
+/// timer is unset, between the frames, at the first frame's time and
+/// after both.
+#[test]
+fn a_timed_run_makes_the_runs_one_run_per_input_would() {
+    let frames = [(15, timed_frame(1)), (50, timed_frame(2))];
+    for deadline in [None, Some(30), Some(15), Some(70)] {
+        let (_, delivered) = super::super::timed_tests::a_timed_run_matches_one_run_per_input(
+            || idle_networked(deadline),
+            &frames,
+            100,
+            timed_look,
+        );
+        assert_eq!(delivered, 2, "deadline {deadline:?}");
+    }
+}
+/// A timed run that ends before a frame, here at the guest's power-off,
+/// leaves it undelivered.
+#[test]
+fn a_timed_run_leaves_the_frames_it_does_not_reach() {
+    // A timer at 15 wakes the guest after the first frame; it powers off
+    // there, before the second.
+    let make = || {
+        let mut vm = idle_networked(Some(15));
+        vm.native.exits.pop_back();
+        vm.native.exits.push_back(Exit::Halt { interrupts: false });
+        vm
+    };
+    let frames = [(10, timed_frame(1)), (20, timed_frame(2))];
+    assert_eq!(
+        super::super::timed_tests::a_timed_run_matches_one_run_per_input(
+            make, &frames, 100, timed_look
+        ),
+        (Stop::PoweredOff, 1)
+    );
+    // Frames must lie inside the run, in order.
+    super::super::timed_tests::a_timed_run_refuses_frames_outside_it(|| {
+        machine_full(None, Some([2, 0, 0, 0, 0, 1]))
+    });
+}

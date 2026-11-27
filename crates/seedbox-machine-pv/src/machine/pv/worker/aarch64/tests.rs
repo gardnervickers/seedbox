@@ -623,3 +623,100 @@ fn a_rewind_that_finds_a_missed_write_can_be_rewound_again() {
     vm.rewind(version, false).unwrap();
     assert!(unsafe { vm.ram.bytes() } == &saved[..]);
 }
+fn networked() -> Machine<Scripted> {
+    let mut image = vec![0; 64];
+    image[16..24].copy_from_slice(&4096u64.to_le_bytes());
+    image[56..60].copy_from_slice(b"ARM\x64");
+    let mut vm = Machine::boot(&image, b"initrd", 7, "", None, Some([2, 0, 0, 0, 0, 1])).unwrap();
+    vm.state.ready = true;
+    vm
+}
+fn acknowledge() -> Exit {
+    Exit::Mmio {
+        address: EVENT_MMIO + 8,
+        width: 8,
+        write: true,
+        value: 1,
+    }
+}
+/// What a stopped machine shows, for comparing two schedules of it.
+fn look(vm: &Machine<Scripted>) -> (String, [u64; 4], usize) {
+    (
+        serde_json::to_string(&vm.state).unwrap(),
+        [
+            vm.page.word(NOW),
+            vm.page.word(LAST),
+            vm.page.word(BOUND),
+            vm.page.word(EXCLUSIVE_EPOCH),
+        ],
+        vm.native.entries,
+    )
+}
+/// A timed run delivers each frame at its time and goes on across blocks
+/// whose wake comes first, making exactly the runs the client would make
+/// with one run per input: the stopped machine is the same.
+#[test]
+fn a_timed_run_makes_the_runs_one_run_per_input_would() {
+    let frame = |tag: u8| {
+        let mut frame = vec![0xff; 6];
+        frame.extend([2, 0, 0, 0, 0, 2, 0x88, 0xb5, tag]);
+        frame.resize(60, 0);
+        frame
+    };
+    // Idle from the start with a timer at 30: frames at 15 and 50, the
+    // timer taken between them. Then busy up to the first frame, which the
+    // guest reaches by a yield at the bound, and the timer after it.
+    for busy in [false, true] {
+        let make = || {
+            let mut vm = networked();
+            vm.state.deadline = Some(30);
+            if busy {
+                vm.page.set_word(LAST, 15);
+                vm.native
+                    .exits
+                    .extend([clock_yield(), idle(), acknowledge(), idle()]);
+            } else {
+                vm.native.exits.extend([idle(), acknowledge(), idle()]);
+            }
+            vm
+        };
+        // Busy, only the first frame is given.
+        let frames: &[_] = if busy {
+            &[(15, frame(1))]
+        } else {
+            &[(15, frame(1)), (50, frame(2))]
+        };
+        let (stop, delivered) = super::super::timed_tests::a_timed_run_matches_one_run_per_input(
+            make, frames, 100, look,
+        );
+        assert_eq!((stop, delivered), (Stop::Blocked(None), frames.len()));
+    }
+}
+/// A timed run that ends before a frame, here at the guest's power-off,
+/// leaves it undelivered.
+#[test]
+fn a_timed_run_leaves_the_frames_it_does_not_reach() {
+    // Idle with a timer at 15, which wakes it after the first frame; it
+    // powers off there, before the second.
+    let mut vm = networked();
+    vm.state.deadline = Some(15);
+    vm.native.core[0] = 0x8400_0008;
+    vm.native.exits.extend([idle(), Exit::Call]);
+    let frame = vec![0xff; 60];
+    assert_eq!(
+        vm.run_timed(
+            0,
+            100,
+            1000,
+            false,
+            &[],
+            Vec::new(),
+            vec![(10, frame.clone()), (20, frame.clone())],
+            &[]
+        )
+        .unwrap(),
+        (Stop::PoweredOff, 1)
+    );
+    // Frames must lie inside the run, in order.
+    super::super::timed_tests::a_timed_run_refuses_frames_outside_it(networked);
+}

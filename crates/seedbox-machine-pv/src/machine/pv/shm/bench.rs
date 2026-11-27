@@ -123,6 +123,7 @@ fn send<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64, data: &[GuestWri
         time: seq,
         stop: Stop::Horizon,
         writes: 1,
+        taken: 0,
     };
     io.get_mut().reply(&header, Some(data))
 }
@@ -133,6 +134,7 @@ fn receive<R: Read, W: Write>(io: &mut Connection<R, W>, seq: u64) -> Result<Vec
             time,
             stop: Stop::Horizon,
             writes: 1,
+            ..
         } if time == seq => wire::receive_writes(body, 1),
         _ => Err("transport benchmark received the wrong header".into()),
     })?
