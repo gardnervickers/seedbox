@@ -162,6 +162,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         let request = ExecutionRequest {
             start_paused: true,
             stop_policy: None,
+            no_timed_inbox: false,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -249,6 +250,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         let request = ExecutionRequest {
             start_paused: true,
             stop_policy: None,
+            no_timed_inbox: false,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -397,6 +399,7 @@ fn request_reports_mapping_and_import_errors() {
         let request = ExecutionRequest {
             start_paused: true,
             stop_policy: None,
+            no_timed_inbox: false,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -701,6 +704,7 @@ fn adapt_prepared(
     let request = ExecutionRequest {
         start_paused: true,
         stop_policy: None,
+        no_timed_inbox: false,
         resume_checkpoint: None,
         intervention_history: None,
         observations: None,
