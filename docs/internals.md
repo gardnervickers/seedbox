@@ -76,6 +76,18 @@ application instruction must still report its saved value. Reconstructed
 instruction lists let the client restore it in reported contexts; stored
 translation tables alone do not, and the client never asks for them.
 
+A syscall that DynamoRIO can ignore, and whose number its block sets, runs in
+the code cache. By default DynamoRIO keeps such a block in the thread's private
+cache, and a private block never links to or from a shared one, so every run of
+it leaves the cache twice. On ARM the factory passes the fork's
+`-shared_ignorable_syscall_bbs`, which shares those blocks; x86-64 does not
+pass it. Syscalls DynamoRIO must see (signal masks and waits, memory maps,
+descriptors, process control), and those whose number the block does not set,
+still go through the dispatcher. The option is part of execution semantics: a
+thread that builds no private syscall block does not commit its private code
+cache or that cache's heap pages, and DynamoRIO's own syscalls for them are
+charged.
+
 ## Reference TCG machine
 
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
