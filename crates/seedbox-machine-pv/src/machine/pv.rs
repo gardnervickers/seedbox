@@ -1685,6 +1685,9 @@ impl SplitRun<(), std::io::Error> for PVMachine {
                     else {
                         return Err("PV timed input that is not a frame".into());
                     };
+                    // A due frame for a machine without a NIC is dropped,
+                    // but the Driver gives timed frames only to attached
+                    // machines, so one here is a caller bug and refused.
                     if self.network.is_none() || !seedbox_machine::pv::frame_in_bounds(bytes) {
                         return Err("PV timed frame without a NIC or outside frame bounds".into());
                     }

@@ -174,6 +174,10 @@ pub trait Machine {
     /// starts at `t`, or by one during which the machine stayed runnable
     /// through `t`. Otherwise an input or stop the caller applies at `t`
     /// would come before that work in one schedule and after it in another.
+    /// A run given a timed inbox is the one exception: it stands for the
+    /// calls the caller would make from each frame time and each wake before
+    /// `upto`, and may go on from a block at such a wake as a call starting
+    /// there would. The caller applies nothing else inside that run.
     ///
     /// # Handling the result
     ///

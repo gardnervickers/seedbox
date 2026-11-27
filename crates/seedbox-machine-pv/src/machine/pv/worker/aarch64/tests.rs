@@ -667,7 +667,8 @@ fn a_timed_run_makes_the_runs_one_run_per_input_would() {
     // timer taken between them. Then busy up to the first frame, which the
     // guest reaches by a yield at the bound, and the timer after it.
     for busy in [false, true] {
-        let script = |vm: &mut Machine<Scripted>| {
+        let make = || {
+            let mut vm = networked();
             vm.state.deadline = Some(30);
             if busy {
                 vm.page.set_word(LAST, 15);
@@ -677,52 +678,18 @@ fn a_timed_run_makes_the_runs_one_run_per_input_would() {
             } else {
                 vm.native.exits.extend([idle(), acknowledge(), idle()]);
             }
+            vm
         };
-        let mut split = networked();
-        script(&mut split);
-        let first = split.run(0, 15, 1000, false, &[], Vec::new(), &[]).unwrap();
-        assert_eq!(
-            first,
-            if busy {
-                Stop::Horizon
-            } else {
-                Stop::Blocked(Some(30))
-            }
-        );
-        let wake = if busy { 100 } else { 50 };
-        assert_eq!(
-            split
-                .run(15, wake, 1000, false, &[], vec![frame(1)], &[])
-                .unwrap(),
-            Stop::Blocked(Some(30))
-        );
-        let last = if busy {
-            split.run(30, 100, 1000, false, &[], Vec::new(), &[])
+        // Busy, only the first frame is given.
+        let frames: &[_] = if busy {
+            &[(15, frame(1))]
         } else {
-            split.run(30, 50, 1000, false, &[], Vec::new(), &[])
+            &[(15, frame(1)), (50, frame(2))]
         };
-        assert_eq!(last.unwrap(), Stop::Blocked(None));
-        let mut frames = vec![(15, frame(1))];
-        if !busy {
-            assert_eq!(
-                split
-                    .run(50, 100, 1000, false, &[], vec![frame(2)], &[])
-                    .unwrap(),
-                Stop::Blocked(None)
-            );
-            frames.push((50, frame(2)));
-        }
-        let delivered = frames.len();
-        let mut timed = networked();
-        script(&mut timed);
-        assert_eq!(
-            timed
-                .run_timed(0, 100, 1000, false, &[], Vec::new(), frames, &[])
-                .unwrap(),
-            (Stop::Blocked(None), delivered)
+        let (stop, delivered) = super::super::timed_tests::a_timed_run_matches_one_run_per_input(
+            make, frames, 100, look,
         );
-        assert_eq!(look(&timed), look(&split), "busy {busy}");
-        assert!(timed.native.exits.is_empty());
+        assert_eq!((stop, delivered), (Stop::Blocked(None), frames.len()));
     }
 }
 /// A timed run that ends before a frame, here at the guest's power-off,
@@ -751,14 +718,5 @@ fn a_timed_run_leaves_the_frames_it_does_not_reach() {
         (Stop::PoweredOff, 1)
     );
     // Frames must lie inside the run, in order.
-    let mut vm = networked();
-    for frames in [
-        vec![(0, frame.clone())],
-        vec![(100, frame.clone())],
-        vec![(20, frame.clone()), (10, frame)],
-    ] {
-        assert!(vm
-            .run_timed(0, 100, 1000, false, &[], Vec::new(), frames, &[])
-            .is_err());
-    }
+    super::super::timed_tests::a_timed_run_refuses_frames_outside_it(networked);
 }
