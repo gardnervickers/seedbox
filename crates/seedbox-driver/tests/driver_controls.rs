@@ -227,10 +227,7 @@ fn explicit_rate_and_step_controls_cancel_a_pre_crash_arm() {
             StepOutcome::BarrierReached { at: at(3) }
         );
         if !step {
-            assert_eq!(
-                driver.step(at(100)).unwrap(),
-                StepOutcome::BarrierReached { at: at(10) }
-            );
+            // Unpaced, no quantum boundary stops the run before its end.
             assert_eq!(
                 driver.step(at(100)).unwrap(),
                 StepOutcome::Finished {

@@ -240,7 +240,11 @@ fn every_machine_stops_at_common_barriers_mapped_to_its_own_time() {
     for (id, ppb) in rates.into_iter().enumerate() {
         set_rate(&mut driver, 0, id, ppb);
     }
-    // Shorter host bounds create intermediate barriers inside quanta.
+    // Shorter host bounds create intermediate barriers inside quanta, which
+    // paced playback keeps.
+    driver
+        .with_barrier(|barrier| barrier.set_rate(crate::test_support::paced()))
+        .unwrap();
     for upto in [700, 1_000, 2_500, 5_000] {
         driver.step(at(upto)).unwrap();
         while driver.now() < at(upto) {
