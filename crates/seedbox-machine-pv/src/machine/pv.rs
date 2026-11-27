@@ -1714,6 +1714,9 @@ mod program_exit_tests;
 #[cfg(test)]
 mod progress_tests;
 
+#[cfg(test)]
+mod stop_tests;
+
 /// Explicit fixture-only construction and stopped evidence for retained scenarios.
 /// These helpers are absent unless `test-support` is enabled; they never export
 /// native handles, boot manifests or mutable machine state.

@@ -8,10 +8,12 @@
 
 typedef uint64_t u64;
 #define notrace
+#define __init
 #define __iomem
 #define unlikely(x) (x)
 #define panic(...) abort()
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
 struct pt_regs { unsigned long regs[31]; };
 struct clock_event_device { int unused; };
 struct task_struct { int pid; };
@@ -24,6 +26,8 @@ static unsigned int user_ticks, system_ticks;
 
 static unsigned long irq_flags;
 static unsigned int writes;
+/* Clock setup yields with interrupts masked; a charge only unmasked. */
+static bool masked_yields;
 static u64 window;
 static char registers[64];
 #define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
@@ -46,7 +50,7 @@ static void writeq(unsigned long value, volatile void *address)
 {
 	/* Only the unmasked yield rendezvous is reachable from a charge. */
 	assert(value == 1 && address == (void *)(registers + 24));
-	assert(irq_flags == 0);
+	assert(irq_flags == 0 || masked_yields);
 	assert(storage.last == storage.bound);
 	++writes;
 	storage.now = storage.last;
@@ -76,6 +80,8 @@ static void reset(u64 cost, u64 bound, u64 next_window)
 	event = registers;
 	window = next_window;
 	writes = user_ticks = system_ticks = yields = 0;
+	masked_yields = false;
+	irq_flags = 0;
 	nesting = 0;
 	current = &tasks[0];
 	regs = (struct pt_regs){ { 0 } };
@@ -153,5 +159,28 @@ int main(void)
 	seedbox_syscall_progress(&(struct pt_regs){ { 0 } }, 63);
 	seedbox_syscall_progress(&regs, SEEDBOX_CLOCK_GETTIME_NR);
 	assert(yields == 2 && storage.last == 2000);
+
+	/* Reads before the page was mapped are charged at clock setup within
+	 * each published bound, interrupts masked: runs of 3 ns from a boot at
+	 * 0 yield at 3 and 6 and the clock reaches the early reads' 8. */
+	reset(1000, 3, 3);
+	page = NULL;
+	for (int i = 0; i < 8; i++)
+		(void)seedbox_read();
+	page = &storage;
+	irq_flags = 128;
+	masked_yields = true;
+	seedbox_early_charge();
+	assert(storage.last == 8 && writes == 2);
+	/* A run long enough takes them at once, as before. */
+	reset(1000, UINT64_MAX, 0);
+	irq_flags = 128;
+	seedbox_early_charge();
+	assert(storage.last == 8 && writes == 0);
+	/* A boot after them keeps its own clock. */
+	reset(1000, UINT64_MAX, 0);
+	storage.last = 20;
+	seedbox_early_charge();
+	assert(storage.last == 20 && writes == 0);
 	return 0;
 }

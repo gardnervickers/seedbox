@@ -1,4 +1,6 @@
-use super::super::{memory::GRANULE, State, Stop, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST};
+use super::super::{
+    memory::GRANULE, State, Stop, BOUND, EVENT_MMIO, IRQ_DEFERRED, LAST, NOW, SYSCALL_COST,
+};
 use super::*;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -159,6 +161,141 @@ fn host_interruptions_neither_consume_time_nor_invalidate_exclusives() {
     assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 2);
     assert_eq!(vm.native.entries, entries);
     assert_eq!(vm.page.word(NOW), 25);
+}
+fn clock_yield() -> Exit {
+    Exit::Mmio {
+        address: EVENT_MMIO + 24,
+        width: 8,
+        write: true,
+        value: 1,
+    }
+}
+/// C3: a yield only for the run's bound leaves no trace: no witness record,
+/// no reservation epoch, and the stopped page holds the machine's own wake as
+/// its bound, not the run's. The next run adopts nothing and enters the guest
+/// where it stopped, and the two runs record what one run would.
+#[test]
+fn a_yield_only_for_the_runs_bound_leaves_no_trace() {
+    use seedbox_machine::machine::execution_evidence::chain;
+    for wake in [None, Some(30)] {
+        let start = |vm: &mut Machine<Scripted>| {
+            vm.state.ready = true;
+            vm.state.deadline = wake;
+            // The guest has read up to the bound, 10, and reads past it.
+            vm.page.set_word(LAST, 10);
+        };
+        let mut vm = machine();
+        start(&mut vm);
+        vm.native.exits.push_back(clock_yield());
+        assert_eq!(
+            vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 0);
+        assert_eq!(vm.state.witness, chain::initial());
+        assert_eq!(vm.page.word(BOUND), wake.unwrap_or(u64::MAX));
+        assert_eq!(vm.state.now, 10);
+        vm.native.exits.push_back(idle());
+        let entries = vm.native.entries;
+        assert_eq!(
+            vm.run(10, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Blocked(wake)
+        );
+        assert_eq!(vm.native.entries, entries + 1);
+        let mut alone = machine();
+        start(&mut alone);
+        alone.native.exits.push_back(idle());
+        alone.run(0, 20, 1000, false, &[], Vec::new(), &[]).unwrap();
+        assert_eq!(vm.state.witness, alone.state.witness);
+        assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 1);
+        assert_eq!(alone.page.word(EXCLUSIVE_EPOCH), 1);
+    }
+}
+/// C3: a guest that goes idle exactly at the run's bound blocks there, as it
+/// does when the run would go on. Stopping at the horizon instead would have
+/// the next run enter it again, for an idle exit no other schedule has.
+#[test]
+fn a_guest_idle_at_the_runs_bound_blocks_there() {
+    let start = |vm: &mut Machine<Scripted>| {
+        vm.state.ready = true;
+        vm.state.deadline = Some(30);
+        // The guest has read up to 5 and goes idle there.
+        vm.page.set_word(LAST, 5);
+        vm.native.exits.push_back(idle());
+    };
+    let mut vm = machine();
+    start(&mut vm);
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    // A later run that delivers nothing does not enter the idle guest.
+    let entries = vm.native.entries;
+    assert_eq!(
+        vm.run(5, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.native.entries, entries);
+    let mut alone = machine();
+    start(&mut alone);
+    assert_eq!(
+        alone.run(0, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.state.witness, alone.state.witness);
+    assert_eq!(
+        vm.page.word(EXCLUSIVE_EPOCH),
+        alone.page.word(EXCLUSIVE_EPOCH)
+    );
+}
+/// A yield for the machine's own wake, or to take a deferred interrupt, is
+/// recorded and advances the reservation epoch, without the run's bound.
+#[test]
+fn a_yield_for_the_wake_or_an_interrupt_is_recorded_without_the_bound() {
+    use seedbox_machine::machine::execution_evidence::chain;
+    let yielded = |at| {
+        let h = chain::record(&chain::initial(), b'w', 8, at, EVENT_MMIO + 24, 1);
+        chain::record(&h, b'Y', 0, at, 0, 0)
+    };
+    // For the wake at 30, which is also the run's bound.
+    let mut vm = machine();
+    vm.state.ready = true;
+    vm.state.deadline = Some(30);
+    vm.page.set_word(LAST, 30);
+    vm.native.exits.push_back(clock_yield());
+    assert_eq!(
+        vm.run(0, 30, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Horizon
+    );
+    assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 1);
+    assert_eq!(vm.state.witness, yielded(30));
+    assert!(vm.state.timer);
+    // To take a deferred timer interrupt, with interrupts unmasked, before
+    // the bound; the guest then acknowledges it and goes idle.
+    let mut vm = machine();
+    vm.state.ready = true;
+    vm.state.timer = true;
+    vm.state.devices.deferred.insert(TIMER);
+    vm.native.core[33] = 0;
+    let acknowledge = Exit::Mmio {
+        address: EVENT_MMIO + 8,
+        width: 8,
+        write: true,
+        value: 1,
+    };
+    vm.native.exits.extend([clock_yield(), acknowledge, idle()]);
+    assert_eq!(
+        vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(None)
+    );
+    assert_eq!(vm.page.word(EXCLUSIVE_EPOCH), 3);
+    let h = chain::record(&yielded(0), b'I', 0, 0, TIMER.into(), 0);
+    let h = chain::record(&h, b'w', 8, 0, EVENT_MMIO + 8, 1);
+    let h = chain::record(&h, b'j', 0, 0, TIMER.into(), 0);
+    assert_eq!(
+        vm.state.witness,
+        chain::record(&h, b'w', 8, 0, EVENT_MMIO + 16, 0)
+    );
 }
 #[test]
 fn zero_budget_adoption_coalesces_due_timer_without_guest_entry() {

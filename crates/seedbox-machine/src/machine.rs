@@ -149,6 +149,21 @@ pub trait Machine {
     /// speculative state or effects exposed to the caller.
     /// A blocked machine may return without making progress.
     ///
+    /// A stop that delivers nothing leaves no trace: splitting one execution
+    /// into different `run` calls gives the same machine. A call that ends at
+    /// `upto` only because `upto` came first changes no guest-visible state,
+    /// appends nothing to a witness, advances no reservation epoch, draws
+    /// nothing, and leaves no trace of `upto` in the stopped machine; the
+    /// next call that starts there, with nothing to deliver, adopts nothing.
+    ///
+    /// A machine reports [`StopReason::Blocked`] at the point where all its
+    /// work becomes blocked, even when its deadline is at or before `upto`.
+    /// It never runs its own deadline work past an idle point within one
+    /// call: work that a wakeup at `t` starts is executed only by a call that
+    /// starts at `t`, or by one during which the machine stayed runnable
+    /// through `t`. Otherwise an input or stop the caller applies at `t`
+    /// would come before that work in one schedule and after it in another.
+    ///
     /// # Handling the result
     ///
     /// - [`StopReason::BoundaryReached`]: the machine reached `upto` and is

@@ -1,4 +1,4 @@
-use super::super::{Stop, IRQ_DEFERRED, LAST, NOW};
+use super::super::{Stop, BOUND, IRQ_DEFERRED, LAST, NOW};
 use super::*;
 use std::{collections::VecDeque, rc::Rc};
 #[derive(Default)]
@@ -287,20 +287,171 @@ fn port_yield_advances_to_the_deadline_or_run_horizon() {
             }
         );
         assert!(vm.native.responses.iter().all(Option::is_none));
+        use seedbox_machine::machine::execution_evidence::chain;
+        let h = chain::record(
+            &chain::initial(),
+            b'w',
+            8,
+            0,
+            super::super::EVENT_MMIO + 32,
+            3,
+        );
         if deadline.is_none() {
-            use seedbox_machine::machine::execution_evidence::chain;
-            let h = chain::record(
-                &chain::initial(),
-                b'w',
-                8,
-                0,
-                super::super::EVENT_MMIO + 32,
-                3,
-            );
-            let h = chain::record(&h, b'O', 1, 0, YIELD_PORT.into(), 1);
-            assert_eq!(vm.state.witness, chain::record(&h, b'Y', 0, 0, 10, 0));
+            // A yield only for the run's bound leaves no record (C3).
+            assert_eq!(vm.state.witness, h);
         }
     }
+}
+/// The stopped machine as its comparison sees it: the worker's state and the
+/// shared page.
+fn stopped(vm: &Machine<Scripted>) -> (Vec<u8>, Vec<u8>) {
+    (serde_json::to_vec(&vm.state).unwrap(), unsafe {
+        vm.page.bytes().to_vec()
+    })
+}
+/// C3: a guest that goes idle exactly at the run's bound blocks there, as it
+/// does when the run would go on. Stopping at the horizon instead would have
+/// the next run enter it again, for an idle exit no other schedule has.
+#[test]
+fn a_guest_idle_at_the_runs_bound_blocks_there() {
+    let start = |vm: &mut Machine<Scripted>| {
+        vm.state.ready = true;
+        vm.state.deadline = Some(30);
+        // The guest has read up to 5 and halts there with interrupts enabled.
+        vm.page.set_word(LAST, 5);
+        vm.native.exits.push_back(halt());
+    };
+    let mut vm = machine();
+    start(&mut vm);
+    assert_eq!(
+        vm.run(0, 5, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    // A later run that delivers nothing does not enter the idle guest.
+    let entries = vm.native.entries;
+    assert_eq!(
+        vm.run(5, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.native.entries, entries);
+    let mut alone = machine();
+    start(&mut alone);
+    assert_eq!(
+        alone.run(0, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+        Stop::Blocked(Some(30))
+    );
+    assert_eq!(vm.state.witness, alone.state.witness);
+    assert!(stopped(&vm) == stopped(&alone));
+}
+/// C3: a port yield only for the run's bound consumes no guest publication.
+/// A shared PIC update and a virtio acknowledgement the guest published
+/// before it stay in the page, the acknowledgement also across the stop's
+/// own status publication, and the next run, which delivers nothing, takes
+/// both at its first exit, as a run that went on would. The two runs record
+/// what one run records and stop with the same devices and page.
+#[test]
+fn a_bound_yield_leaves_pending_publications_to_the_run_that_continues() {
+    // The guest's NIC handler has masked and acknowledged line 7 and
+    // acknowledged the device's interrupt, without an exit yet.
+    let update = PIC_UPDATE_VALID | 0x80fe;
+    let acknowledged = 1 | (1 << 32);
+    for wake in [None, Some(30)] {
+        let start = |vm: &mut Machine<Scripted>| {
+            vm.state.ready = true;
+            vm.state.deadline = wake;
+            let mut net = serde_json::to_value(vm.state.net.as_ref().unwrap()).unwrap();
+            net["interrupt"] = 1.into();
+            vm.state.net = Some(serde_json::from_value(net).unwrap());
+            vm.state.devices.pic.imr = 0x7e;
+            vm.state.devices.pic.isr = 0x80;
+            vm.native.publications.insert(1, update);
+            vm.native.virtio_publications.insert(1, (2, acknowledged));
+            // The guest has read up to 10.
+            vm.page.set_word(LAST, 10);
+        };
+        let mut vm = machine_full(None, Some(MAC));
+        start(&mut vm);
+        let before = vm.state.witness;
+        // Its next read would pass the bound, 10: it yields there.
+        vm.native.exits.push_back(port(YIELD_PORT, true, 1));
+        assert_eq!(
+            vm.run(0, 10, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!(vm.state.witness, before);
+        assert_eq!(vm.state.now, 10);
+        assert_eq!(vm.page.word(BOUND), wake.unwrap_or(u64::MAX));
+        assert_eq!(vm.page.word(PIC_UPDATE), update);
+        assert_eq!(vm.page.word(VIRTIO_IRQ + 16), acknowledged);
+        assert_eq!(vm.state.devices.pic.imr, 0x7e);
+        assert_eq!(vm.state.devices.pic.isr, 0x80);
+        assert_eq!(vm.state.net.as_ref().unwrap().interrupt_status(), 1);
+        // The run that continues enters the guest with both still published
+        // and takes them at the handler's unmask.
+        vm.native
+            .exits
+            .extend([port(PIC_UNMASK_PORT, true, 1), halt()]);
+        assert_eq!(
+            vm.run(10, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Blocked(wake)
+        );
+        assert_eq!(vm.native.nic_words_at_entry[..2], [acknowledged; 2]);
+        assert_eq!(vm.page.word(PIC_UPDATE), 0);
+        assert_eq!(vm.state.devices.pic.imr, 0xfe);
+        assert_eq!(vm.state.devices.pic.isr, 0);
+        assert_eq!(vm.state.net.as_ref().unwrap().interrupt_status(), 0);
+        assert!(vm.native.injected.is_empty());
+        let mut alone = machine_full(None, Some(MAC));
+        start(&mut alone);
+        alone
+            .native
+            .exits
+            .extend([port(PIC_UNMASK_PORT, true, 1), halt()]);
+        assert_eq!(
+            alone.run(0, 20, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Blocked(wake)
+        );
+        assert_ne!(alone.state.witness, before);
+        assert_eq!(vm.state.witness, alone.state.witness);
+        assert!(stopped(&vm) == stopped(&alone));
+    }
+}
+/// C3 before the handshake: the kernel brings its early clock reads up to
+/// each run's bound and yields on the port there until a later run publishes
+/// a bound past them. Those yields leave no trace, so a boot cut into short
+/// runs records and stops as one long run does.
+#[test]
+fn early_clock_yields_at_each_bound_leave_no_trace_before_the_handshake() {
+    use seedbox_machine::machine::execution_evidence::chain;
+    let mut vm = machine();
+    // Eight early reads under runs of 3 ns: the guest charges up to each
+    // bound, then yields.
+    for (now, upto) in [(0, 3), (3, 6)] {
+        vm.page.set_word(LAST, upto);
+        vm.native.exits.push_back(port(YIELD_PORT, true, 1));
+        assert_eq!(
+            vm.run(now, upto, 1000, false, &[], Vec::new(), &[])
+                .unwrap(),
+            Stop::Horizon
+        );
+        assert_eq!(vm.state.witness, chain::initial());
+        assert_eq!(vm.page.word(BOUND), u64::MAX);
+        assert!(!vm.state.ready);
+    }
+    let finish = |vm: &mut Machine<Scripted>, now| {
+        vm.page.set_word(LAST, 8);
+        vm.native.exits.extend([event(32, 3), halt()]);
+        assert_eq!(
+            vm.run(now, 100, 1000, false, &[], Vec::new(), &[]).unwrap(),
+            Stop::Blocked(None)
+        );
+    };
+    finish(&mut vm, 6);
+    let mut alone = machine();
+    finish(&mut alone, 0);
+    assert_ne!(alone.state.witness, chain::initial());
+    assert_eq!(vm.state.witness, alone.state.witness);
+    assert!(stopped(&vm) == stopped(&alone));
 }
 #[test]
 fn clock_signal_ports_reject_invalid_accesses() {
@@ -931,6 +1082,9 @@ fn shared_virtio_ack_bits_roundtrip_and_host_interrupts_are_invisible() {
         assert_eq!(machine.page.word(VIRTIO_IRQ + 16), 2);
         // Guest accumulates both bits. A host interruption after publication
         // must not consume it; the next semantic exit records the actual word.
+        // That is a yield for the machine's own wake: one only for the run's
+        // bound would leave the word for the next exit (C3).
+        machine.state.deadline = Some(10);
         machine
             .native
             .virtio_publications

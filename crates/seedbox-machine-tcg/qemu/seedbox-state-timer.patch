@@ -11,19 +11,7 @@
      if (runstate_is_running() || seedbox_active || time < now) {
          error_setg(errp, "advance requires a stopped VM and monotonic time");
          return;
-@@ -263,6 +267,11 @@
-                              &timers_state.vm_clock_lock);
-     }
-     qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL);
-+    /* A blocked/zero-budget adoption may arm a timer in its callback. Report
-+     * its failure in THIS command, not only at a later CPU run. */
-+    if (qemu_guest_timer_failed) {
-+        error_setg(errp, "seedbox timer failed while advancing stopped time");
-+    }
- }
- 
- void qmp_seedbox_capture_complete(Error **errp)
-@@ -333,6 +342,10 @@
+@@ -334,6 +338,10 @@
  SeedboxRunResult *qmp_query_seedbox_run(Error **errp)
  {
      SeedboxRunResult *result;

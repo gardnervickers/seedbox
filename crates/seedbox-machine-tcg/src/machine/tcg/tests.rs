@@ -454,7 +454,7 @@ fn lifecycle_tx_initramfs(input: &[u8]) -> Vec<u8> {
         "while [ ! -e /sys/class/virtio-ports/vport0p1/name ]; do /bin/busybox sleep 0.001; done\nexec 9<>/dev/vport0p1\nprintf console-A >/dev/ttyS0\n/bin/busybox sleep 0.01\nprintf fra >&9\nprintf console-B >/dev/ttyS0\n/bin/busybox sleep 0.01\nprintf 'gment\\nsecond\\n' >&9\nprintf console-C >/dev/ttyS0\n/bin/busybox sleep 0.01\necho 'seedbox: Linux userspace booted'",
     )
 }
-fn lifecycle_initramfs(input: &[u8], injection: &str) -> Vec<u8> {
+pub(super) fn lifecycle_initramfs(input: &[u8], injection: &str) -> Vec<u8> {
     transform_initramfs(input, |init| {
         init.replace("echo 'seedbox: Linux userspace booted'", injection)
     })

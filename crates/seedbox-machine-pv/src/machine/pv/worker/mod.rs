@@ -464,8 +464,51 @@ impl<B: Backend> Machine<B> {
     fn quiet(&self) -> bool {
         !self.state.timer && self.state.devices.quiet()
     }
+    /// Run the guest from `now` until `upto` at most. However the run ends,
+    /// the stopped machine keeps no trace of `upto` (C3): its page publishes
+    /// its own next wake as the bound, and the next run publishes its own.
     #[allow(clippy::too_many_arguments)]
     fn run(
+        &mut self,
+        now: u64,
+        upto: u64,
+        syscall_cost_ns: u64,
+        shutdown: bool,
+        input: &[u8],
+        frames: Vec<Vec<u8>>,
+        breaks: &[String],
+    ) -> Result<Stop> {
+        let stop = self.run_until(now, upto, syscall_cost_ns, shutdown, input, frames, breaks)?;
+        self.page.set_word(BOUND, self.wake().unwrap_or(u64::MAX));
+        Ok(stop)
+    }
+    /// Whether `exit` is the guest's clock yield: it read a time past the
+    /// published bound, or yielded to take a deferred interrupt.
+    fn is_yield(exit: &Exit) -> bool {
+        match *exit {
+            Exit::Mmio {
+                address,
+                write: true,
+                ..
+            } => address == EVENT_MMIO + 24,
+            #[cfg(target_arch = "x86_64")]
+            Exit::Port {
+                port, write: true, ..
+            } => port == arch::YIELD_PORT,
+            _ => false,
+        }
+    }
+    /// Whether a yield is a bound yield: the guest stopped only for this
+    /// run's bound, which is before its own next wake, and takes no deferred
+    /// interrupt there. Whether it happens depends on where the host ends the
+    /// run, so it leaves no trace (C3): no reservation epoch, no witness
+    /// record. The guest continues from it, in the next run, as if it had not
+    /// stopped.
+    fn bound_yield(&mut self, upto: u64) -> Result<bool> {
+        Ok(self.wake().is_none_or(|wake| upto < wake) && !self.takes_deferred()?)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn run_until(
         &mut self,
         now: u64,
         upto: u64,
@@ -490,9 +533,19 @@ impl<B: Backend> Machine<B> {
             None => syscall_cost_ns,
         };
         self.page.set_word(SYSCALL_COST, cost);
-        // Apply old guest ACKs before time/input can raise a new interrupt.
-        self.consume_irq_update()?;
-        self.adopt(now)?;
+        // A run that delivers nothing and starts where the last one stopped
+        // continues the guest as if that stop had not happened (C3): it
+        // consumes nothing and adopts nothing before the guest runs again.
+        let continuing = now == self.state.now
+            && input.is_empty()
+            && frames.is_empty()
+            && !(shutdown && !self.state.shutdown)
+            && !self.resume;
+        if !continuing {
+            // Apply old guest ACKs before time/input can raise a new interrupt.
+            self.consume_irq_update()?;
+            self.adopt(now)?;
+        }
         if !input.is_empty() {
             self.boundary()?;
             self.state.console.input(input);
@@ -546,16 +599,28 @@ impl<B: Backend> Machine<B> {
                 continue;
             }
             // Only a real semantic guest rendezvous invalidates reservations.
-            // Maintenance exits above and host interruptions do not.
-            self.boundary()?;
+            // Maintenance exits above, host interruptions and a yield only
+            // for this run's bound do not.
+            let yielded = Self::is_yield(&exit);
+            let bound = yielded && self.bound_yield(upto)?;
+            if !bound {
+                self.boundary()?;
+            }
             let last = self.page.word(LAST);
             if last == u64::MAX || last > upto {
                 return Err("PV guest crossed accepted horizon".into());
             }
             self.state.now = self.state.now.max(last);
-            self.consume_irq_update()?;
-            self.record_exit(&exit)?;
+            if !bound {
+                self.consume_irq_update()?;
+                self.record_exit(&exit)?;
+            }
             self.complete_disk()?;
+            // Any other yield happens on every schedule; its record does not
+            // hold the bound.
+            if yielded && !bound {
+                self.record_native(b'Y', 0, 0, 0);
+            }
             let mut effect = Effect::default();
             match exit {
                 Exit::Mmio {
@@ -663,14 +728,19 @@ impl<B: Backend> Machine<B> {
                 self.finish_stop()?;
                 return Ok(Stop::Held(hold));
             }
-            if self.state.now == upto {
-                self.finish_stop()?;
-                return Ok(Stop::Horizon);
-            }
+            // An idle guest blocks whether or not the run ends at this time:
+            // were it to stop at the horizon instead, the next run would enter
+            // it again and add an idle exit no other schedule has (C3). It
+            // blocks even when its wake is before `upto`, so only a run that
+            // starts at the wake takes it (the `Machine::run` contract).
             if effect.idle && self.quiet() {
                 self.state.idle = true;
                 self.finish_stop()?;
                 return Ok(Stop::Blocked(self.wake()));
+            }
+            if self.state.now == upto {
+                self.finish_stop()?;
+                return Ok(Stop::Horizon);
             }
             // Host interruptions re-enter above without preparing anything new.
             self.prepare()?;
@@ -708,7 +778,7 @@ impl<B: Backend> Machine<B> {
                 effect.idle = true;
             }
             24 => {
-                self.record_native(b'Y', 0, upto, 0);
+                // The run loop recorded the yield unless it was a bound yield.
                 if !self.state.devices.deferred() {
                     self.state.now = self
                         .wake()
