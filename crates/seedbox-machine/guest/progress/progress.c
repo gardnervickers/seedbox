@@ -113,12 +113,22 @@ static void checkpoint_and_dispatch(void)
 #error Unsupported progress architecture
 #endif
     DR_ASSERT(result > 0);
-    /* Leave through the dispatcher so a pending signal or JIT synchronization
-     * can complete at a safe point. The resumed block charges again: refund
-     * that entry, including when the configured budget is one or UINT32_MAX. */
+    /* The block resumes from its start and charges again: refund that entry,
+     * including when the configured budget is one or UINT32_MAX. */
     ++*budget();
+    void *context = dr_get_current_drcontext();
+#ifdef AARCH64
+    /* A pending signal or JIT synchronization must complete at this safe point,
+     * which the dispatcher provides. When it has nothing to do, entering the
+     * block's fragment directly has the same effect, for a fraction of the cost:
+     * the clean call returns into DynamoRIO's routine, which enters the fragment
+     * dr_redirect_entry() found. Only AArch64 takes this path: DynamoRIO
+     * implements it there alone. */
+    if (dr_redirect_entry(context, resume) != NULL)
+        return;
+#endif
     dr_mcontext_t machine = { sizeof(machine), DR_MC_ALL };
-    DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &machine));
+    DR_ASSERT(dr_get_mcontext(context, &machine));
     machine.pc = resume;
     dr_redirect_execution(&machine);
     DR_ASSERT(false);
@@ -136,7 +146,10 @@ static byte *dispatch_entry(reg_id_t scratch)
 
 /* Emit the expensive context-save/call sequence once, outside the code cache.
  * It uses the executing thread's TLS and DR stack, not the emitter's context.
- * It never returns into a fragment that a synchronization may have deleted.
+ * It goes back into the code cache only at an entry from dr_redirect_entry(),
+ * which DR refuses while a synchronization, flush or signal is pending, and
+ * through DR's own routine, which leaves for the dispatcher if a signal has
+ * arrived since.
  *
  * An exhausted block left before restoring its scratch register, so the
  * routine restores it before the clean call saves the application's state.
@@ -184,6 +197,12 @@ static void emit_dispatch(void *context)
         DR_ASSERT(instrlist_encode(context, entry, start, false) == start + ENTRY_BYTES);
         instrlist_clear_and_destroy(context, entry);
     }
+    /* A callee that returns has had dr_redirect_entry() find the block's
+     * fragment: DR's routine, written as raw words, follows the clean call and
+     * enters it. */
+    last = dr_emit_redirect_entry_routine(context, last,
+                                          (size_t)(dispatch_routine + dispatch_size - last));
+    DR_ASSERT(last != NULL);
     /* Publish generated instructions to AArch64's instruction cache. */
     for (byte *line = dispatch_routine; line < last; line += 4)
         __asm__ volatile("dc cvau, %0" : : "r"(line) : "memory");

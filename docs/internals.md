@@ -57,9 +57,20 @@ sequence in every block. The routine first puts the scratch register's saved
 value back. On ARM it has one entry per register, each reached through its own
 thread-local word, so the register is known from the entry a block took and
 never from register values, which the application controls. Its clean call
-then charges progress and redirects through DynamoRIO's dispatcher for pending
-signals and JIT synchronization; the resumed block's repeated charge is
-refunded. Charge instructions have no application translation and cannot be
+then charges progress and resumes the block from its start, refunding the
+repeated charge. A pending signal, JIT synchronization or flush completes in
+DynamoRIO's dispatcher, so the client redirects through it. On ARM, when the
+dispatcher would do nothing but look the block up, the fork's
+`dr_redirect_entry()` finds the block's cache entry instead, and the clean call
+returns into a routine DynamoRIO wrote at the end of the client's page, which
+enters it, or leaves for the dispatcher after all if a signal has arrived since.
+The routine is not among DynamoRIO's generated routines, whose size decides how
+many pages it keeps committed. `dr_redirect_entry()` never waits: it tries the
+locks the lookup needs and refuses when one is held, as the dispatcher would
+wait for it. Neither path makes a syscall of its own, short of waking a thread
+that began to wait for one of those locks, so the guest sees the same charges.
+x86-64 always redirects through the dispatcher.
+Charge instructions have no application translation and cannot be
 relocation points. Until a dead register is overwritten, a fault in an
 application instruction must still report its saved value. Reconstructed
 instruction lists let the client restore it in reported contexts; stored
