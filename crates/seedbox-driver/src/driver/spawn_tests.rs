@@ -134,7 +134,7 @@ fn build_prepared(
             .into_iter()
             .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
             .collect(),
-        crate::driver::NetworkConfig::default(),
+        fixture::floor(Duration::from_nanos(10)),
         move |definition| {
             captured.lock().unwrap().push(definition.name.clone());
             if fail == Some(definition.name.as_str()) {
@@ -290,7 +290,7 @@ fn duplicate_definitions_across_all_lists_fail_before_factories_or_rng() {
                 .into_iter()
                 .map(|n| crate::test_support::spawn_definition(fixture::definition(n)))
                 .collect(),
-            crate::driver::NetworkConfig::default(),
+            fixture::floor(Duration::from_nanos(10)),
             |_| panic!("duplicate invoked machine factory"),
         );
         assert!(matches!(result, Err(Error::DuplicateName(_))));
@@ -441,18 +441,34 @@ fn final_batch_and_stopped_pending_calls_never_create_or_draw_seed() {
 }
 #[test]
 fn finish_and_stop_cut_off_already_admitted_spawn_effects() {
-    let (mut driver, draws, built) = build(
-        vec![vec![
-            call(1, r#""op":"crash","target":{"machine":"fixture-0"}"#),
-            spawn(2, "fixture-1"),
-        ]],
-        None,
-    );
+    // The oracle's outcome at 0 ends the run one floor later, at 10, before
+    // a spawn admitted with its effect due then.
+    let (mut driver, draws, built) =
+        build(vec![vec![Response::ApplicationOutcome { code: 0 }]], None);
+    let Response::SimulationControl { id, payload } = spawn(1, "fixture-1") else {
+        unreachable!()
+    };
+    driver.execution.control.record_call(MachineId(0), id, 0);
+    let plans = driver
+        .execution
+        .control
+        .invoke_plans(&driver.execution.machines, |service, view| {
+            service.admit(
+                view,
+                control::Control::source(MachineId(0)),
+                id,
+                0,
+                10,
+                &payload,
+            )
+        })
+        .unwrap();
+    driver.control_plans(plans).unwrap();
     assert_eq!(
         driver.step(at(10)).unwrap(),
         StepOutcome::Finished {
             at: at(10),
-            reason: ExitReason::Crashed
+            reason: ExitReason::ProgramExit { code: 0 }
         }
     );
     let events = driver.drain_events();

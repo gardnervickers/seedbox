@@ -229,7 +229,7 @@ pub(in crate::driver) fn build_network(
     let config = if networked {
         NetworkConfig::new(Duration::from_nanos(5), Duration::from_nanos(3), 100_000).unwrap()
     } else {
-        NetworkConfig::default()
+        fixture::floor(Duration::from_nanos(10))
     };
     let mut definitions: Vec<_> = (0..specs.len()).map(definition).collect();
     let oracle = definitions.remove(0);

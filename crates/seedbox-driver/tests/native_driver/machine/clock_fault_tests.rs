@@ -490,8 +490,8 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
     // other machines' work never run it, and these scenarios have no
     // pause/resume. Runs with inputs (requests, replies, lifecycle) are the only
     // legitimate earlier runs. So every input-free run after a Blocked stop is
-    // that timer's wake: it must never be early, and it must happen at the
-    // earliest simulation time whose mapped time reaches the deadline.
+    // that timer's wake: it must never be early, and it starts at the deadline
+    // itself, at the earliest simulation time whose mapped time reaches it.
     let mut exact = 0;
     let mut straddled = 0;
     let mut reconverted = 0;
@@ -516,7 +516,10 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
             next.now
         );
         let wake = reference.inverse(due);
-        assert_eq!(next.now, reference.floor(wake), "{backend}: due {due}");
+        // The wake starts at the deadline itself, which a fast clock can place
+        // inside the simulation nanosecond it wakes at, before that
+        // nanosecond's machine time.
+        assert_eq!(next.now, due, "{backend}: wake at the deadline");
         exact += 1;
         // A pending timer straddling a rate change was re-converted: its wake
         // differs from the one its deadline had under the earlier rates.
@@ -524,12 +527,13 @@ fn check_time_base(backend: &str, lines: &[Line], runs: &[Run], reference: &Refe
             let boundary = reference.floor(change);
             if reached.as_nanos() < boundary && boundary < next.now {
                 straddled += 1;
-                // Rates here are never slow, so the mapping is injective and
-                // the observed clock identifies the wake: a stale (unconverted)
-                // wake would be observed differently.
+                // A stale (unconverted) wake earlier than the true one would
+                // have started the run before the deadline, at the stale
+                // nanosecond's machine time; one later is not told apart by
+                // the run, which starts at the deadline either way.
                 let earlier = Reference(reference.0[..index].to_vec());
                 let stale = earlier.inverse(due);
-                if stale != wake {
+                if stale < wake {
                     assert_ne!(reference.floor(stale), next.now, "{backend}: stale wake");
                     reconverted += 1;
                 }

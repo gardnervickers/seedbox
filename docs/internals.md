@@ -115,19 +115,35 @@ FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after co
 
 ## Same-time controls
 
-Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
+Outputs of one instant are ordered by machine, then emission, whatever the rounds: a commit holds output stamped
+at or after the earliest time any machine can still emit, unless a timeline item, a frame for a paused
+receiver or the end of the run is due at its barrier, or the host admits an input there. Such a needed barrier
+commits everything held first: committed outputs precede due timeline items, then frames, then timer wakeups;
+same-time items are FIFO. A run that only continues from any other barrier maps machine times from the nanosecond
+before it, so a slow clock's shared machine nanosecond maps to its first simulation nanosecond.
+A timer wake starts at the timer's machine deadline, which a fast clock can place inside the nanosecond it wakes at.
 A running machine takes those frames and its due timer at the start of its next run, which starts there.
-A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
-due timer, before a later item due then for it and before final evidence is read.
+A paused receiver admits frames at their arrival's barrier in a zero-budget run, which starts at the barrier's
+machine time even when a fast clock put its timer's deadline before it. A machine held at a breakpoint is held
+from its hit, whichever commit carries the hit: it takes frames at their arrival in its lane, without a budget.
+A running machine gets a zero-budget run, with its due timer, before a later item due then for it and before
+final evidence is read.
+A host input is prepared against the state its commit will see: output held at the barrier is applied to copies
+of control and, when frames are held, of the network, and a held call that would fail the commit fails the
+preparation instead.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
+What follows from a machine's output or exit (a guest call's admission, a reply, a released command, a flush reply)
+is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
+Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
+commit count or commit time, so evidence at one time is the same under any stops or quantum.
 
 ## Machine network delivery
 
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
 A frame stamped T by the round ending at T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
-A blocked receiver is runnable from a frame's arrival, so rounds end within one network (or controller) latency even if it does not wake.
+A blocked receiver is runnable from a frame's arrival, so rounds end within one network latency of the earliest start of any machine, networked or not, even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
 ## Simulated DNS
@@ -160,7 +176,7 @@ Lost kernel records fail supervision with an I/O error rather than guessing a vi
 
 Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
 The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
-The Driver reduces frames at commit and queues each flush reply behind items due at that boundary, for the same boot only.
+The Driver reduces frames at commit and queues each flush reply one network latency after its flush record, for the same boot only.
 Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
 Unmet requirements are read from the final report, so a run's verdict changes only at completion.
 

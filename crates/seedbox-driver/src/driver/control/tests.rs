@@ -61,12 +61,13 @@ fn boot_allocator_restarts_per_boot_and_never_wraps() {
 fn inspect_reports_an_application_exit_while_its_machine_runs() {
     use crate::driver::fixture::owned::*;
     let inspect = |n, time| (time, call(n, r#""op":"inspect""#));
+    // Each inspect is admitted one floor (10 ns) after it is made.
     let mut oracle = vec![(0, crate::pv::Response::Ready)];
     oracle.extend([
         inspect(1, 5),
-        inspect(2, 45),
-        inspect(3, 65),
-        inspect(4, 85),
+        inspect(2, 35),
+        inspect(3, 55),
+        inspect(4, 75),
     ]);
     // The target keeps running after its application's leader exits.
     let target = vec![

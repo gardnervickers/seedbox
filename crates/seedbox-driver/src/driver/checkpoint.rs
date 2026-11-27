@@ -24,15 +24,15 @@ pub struct Checkpoint<S> {
     now: Timestamp,
     rng: SeededRng,
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     machines: Vec<Entry<S>>,
     events: BTreeMap<Timestamp, VecDeque<Scheduled>>,
     boundary_index: u64,
-    completed_quanta: u64,
-    quantum_committed: bool,
     stopped: bool,
     playback: playback::PlaybackIntent,
     oracle: MachineId,
+    needed: Option<Timestamp>,
+    finishing: Option<(Timestamp, ExitReason)>,
     finished: Option<(Timestamp, ExitReason)>,
     oracle_stops: BTreeSet<(u64, NonZeroU32)>,
     control: control::Control,
@@ -106,7 +106,7 @@ impl<C: std::error::Error + 'static, E: std::error::Error + 'static> std::error:
 
 impl<T> Entry<T> {
     /// Copy only stopped bookkeeping, supplying the independently owned machine.
-    fn with_machine<U>(&self, machine: U) -> Entry<U> {
+    pub(super) fn with_machine<U>(&self, machine: U) -> Entry<U> {
         Entry {
             machine: Some(machine),
             rng: self.rng.clone(),
@@ -129,13 +129,13 @@ impl<T> Entry<T> {
 fn validate<T>(
     now: Timestamp,
     quantum_ns: u64,
-    quantum_end: Timestamp,
+    origin: Timestamp,
     oracle: MachineId,
     machines: &[Entry<T>],
     control: &control::Control,
     network: &network::Network,
 ) -> Result<(), &'static str> {
-    if quantum_ns == 0 || quantum_end < now {
+    if quantum_ns == 0 || origin > now {
         return Err("invalid quantum boundary");
     }
     if oracle.0 >= machines.len() {
@@ -148,6 +148,16 @@ fn validate<T>(
         return Err("machine suspended at a breakpoint");
     }
     for entry in machines {
+        // A hit held at a barrier nothing needs has not reached the service
+        // yet, but its machine is already suspended.
+        if entry.staged.iter().any(|output| {
+            matches!(
+                output.payload,
+                Response::Break { .. } | Response::BlockRequestHeld { .. }
+            )
+        }) {
+            return Err("machine suspended at a breakpoint");
+        }
         if entry.machine.is_none() || entry.rng.is_none() {
             return Err("machine or RNG is still owned by a run");
         }
@@ -273,7 +283,7 @@ where
         validate(
             self.now(),
             self.execution.quantum_ns,
-            self.execution.quantum_end,
+            self.execution.origin,
             self.execution.oracle,
             &self.execution.machines,
             &self.execution.control,
@@ -307,14 +317,14 @@ where
             rng,
             machines,
             quantum_ns: self.execution.quantum_ns,
-            quantum_end: self.execution.quantum_end,
+            origin: self.execution.origin,
             events: self.execution.events.clone(),
             boundary_index: self.execution.boundary_index,
-            completed_quanta: self.execution.completed_quanta,
-            quantum_committed: self.execution.quantum_committed,
             stopped: self.execution.stopped,
             playback: self.playback.checkpoint(),
             oracle: self.execution.oracle,
+            needed: self.execution.needed,
+            finishing: self.execution.finishing,
             finished: self.execution.finished,
             oracle_stops: self.execution.oracle_stops.clone(),
             control: self.execution.control.clone(),
@@ -356,7 +366,7 @@ where
         validate(
             checkpoint.now,
             checkpoint.quantum_ns,
-            checkpoint.quantum_end,
+            checkpoint.origin,
             checkpoint.oracle,
             &checkpoint.machines,
             &checkpoint.control,
@@ -382,15 +392,15 @@ where
                 clock: Arc::new(SimulationClock::new(checkpoint.now.as_nanos())),
                 rng: SimulationRng::Seeded(checkpoint.rng.clone()),
                 quantum_ns: checkpoint.quantum_ns,
-                quantum_end: checkpoint.quantum_end,
+                origin: checkpoint.origin,
                 machines,
                 events: checkpoint.events.clone(),
                 boundary_index: checkpoint.boundary_index,
-                completed_quanta: checkpoint.completed_quanta,
-                quantum_committed: checkpoint.quantum_committed,
                 failed: false,
                 stopped: checkpoint.stopped,
                 oracle: checkpoint.oracle,
+                needed: checkpoint.needed,
+                finishing: checkpoint.finishing,
                 finished: checkpoint.finished,
                 oracle_stops: checkpoint.oracle_stops.clone(),
                 control: checkpoint.control.clone(),
@@ -404,6 +414,7 @@ where
             observations: ObservationState::default(),
             playback: Playback::from_intent(checkpoint.playback.clone()),
             factory: Box::new(factory),
+            stops: Default::default(),
         })
     }
 }

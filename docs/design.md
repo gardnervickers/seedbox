@@ -25,10 +25,35 @@ by minimum network latency; TCG machines run one after another on the Driver's t
 No frame emitted inside that window can arrive before the round commits.
 Inside it each machine runs to the round's end on its own lane, taking its timers and arriving
 frames at their exact times. A timer or a running receiver's frame therefore never ends a round;
-frames for a paused or suspended receiver still do. Commit-time effects (replies, the finish)
-take the round's end.
+frames for a paused receiver still do. A machine held at a breakpoint takes its frames at their
+arrival without a budget, from its hit on, whichever commit carried the hit.
 Commit orders output by occurrence, not by the order runs finish, so host scheduling cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
+
+Where a round ends is the host's choice, and four rules keep it out of what the Driver does.
+Code comments cite them by label.
+
+- **C1, consequences follow the output.** What the Driver schedules because of an output (a
+  call's admission, a reply, a released command, a flush reply) is due one network latency
+  after the output, or one control latency after a call when a controller is configured, never
+  at the commit that carried it. So every runnable machine bounds the round.
+- **C2, one order for an instant.** Outputs stamped in the same nanosecond take effect in
+  (machine, emission) order. Output at an instant a machine can still reach waits for it. A
+  barrier every schedule shares (a timeline item, the end of the run, a frame for a paused
+  receiver, an input the host admits) first commits everything held, then applies what is due.
+- **C3, the same runs for a machine.** However its runs are split, the Driver offers a machine
+  the same inputs at the same machine times: a timer wake starts at the timer's own deadline,
+  and a run that only continues from a stop nothing needed maps its times as if it had not
+  stopped. A machine must in turn leave no trace of a stop that delivers nothing; that part is
+  each backend's own.
+- **C4, the run ends after the oracle.** The run ends one network latency after the oracle's
+  terminal output or exit, with every machine run to that time and its output up to then
+  published. What is due before the end still happens; what is due at it does not.
+
+`network.latency` is therefore also a delay the oracle sees: an SDK call takes effect, a `flush`
+is answered and the run ends one latency after the output that asked. A simulated time limit
+has to cover the oracle's exit plus that latency: a run whose oracle exits within one latency
+of its limit ends at the limit, not as finished.
 
 ## Checkpoints exclude their observers
 
@@ -57,14 +82,14 @@ to go back to: `Branch::rewind` restores an earlier point, replays the run's
 own inputs to just before `t` and checks the replay against the run. An input
 due at the point it returns to is delivered there, as it was in the run.
 Stops and saves are not inputs: where a run stops must not change what its
-machines do. Saves never do. A stop could, because the Driver stamps a guest's
-control and property replies with the round that committed them, so a round
-cut short at an arbitrary time moves every later one
-([#459](https://github.com/gardnervickers/seedbox/issues/459)). `Run::advance`
+machines do. Saves never do. A stop could, because the Driver still ends a run
+at the round that saw the oracle exit and orders outputs of one nanosecond by
+the commit that carried them, so a round cut short at an arbitrary time can
+move later ones ([#459](https://github.com/gardnervickers/seedbox/issues/459)). `Run::advance`
 therefore stops only at a barrier the run would reach anyway, the first one at
 or after the time asked for; only inputs cut rounds short.
 The trace compares lines and lifecycle changes, which have times of their own;
-a settlement is stamped by the commit that confirmed it and is not compared.
+settlements are not compared.
 
 ## Definitions do not borrow resource ownership
 

@@ -41,7 +41,8 @@ fn physical_worker(code: i32) -> (tempfile::TempDir, Worker<Ended>) {
         definition("oracle"),
         vec![],
         vec![],
-        NetworkConfig::default(),
+        // A floor of one quantum: the run ends one quantum after the exit.
+        NetworkConfig::new(Duration::from_nanos(10), Duration::ZERO, 0).unwrap(),
         move |_| {
             let mut supplied = evidence();
             supplied.disposition = EvidenceDisposition::Exited { code };
@@ -84,6 +85,13 @@ fn physical_worker(code: i32) -> (tempfile::TempDir, Worker<Ended>) {
 #[test]
 fn unrepresentable_physical_exit_poisoning_prevents_retry_and_does_not_invent_a_verdict() {
     let (_root, mut worker) = physical_worker(-1);
+    // The oracle exits at 0 and the run ends one floor later.
+    assert_eq!(
+        worker.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(0)
+        }
+    );
     assert!(worker
         .step(Timestamp::from_nanos(10))
         .unwrap_err()
@@ -96,6 +104,13 @@ fn unrepresentable_physical_exit_poisoning_prevents_retry_and_does_not_invent_a_
 #[test]
 fn physical_oracle_program_exit_reaches_public_result_without_an_application_output() {
     let (_root, mut worker) = physical_worker(0);
+    // The oracle exits at 0 and the run ends one floor later.
+    assert_eq!(
+        worker.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(0)
+        }
+    );
     assert!(matches!(
         worker.step(Timestamp::from_nanos(10)).unwrap(),
         StepOutcome::Finished { .. }
@@ -198,7 +213,7 @@ fn finished_driver_uses_retained_ended_evidence_and_paths_do_not_use_machine_nam
         definition("../not-a-host-path"),
         vec![],
         vec![],
-        NetworkConfig::default(),
+        NetworkConfig::new(Duration::from_nanos(10), Duration::ZERO, 0).unwrap(),
         move |_| Ok(Ended(supplied.clone())),
     )
     .unwrap();
@@ -210,6 +225,13 @@ fn finished_driver_uses_retained_ended_evidence_and_paths_do_not_use_machine_nam
                 .collect())
         })
         .unwrap();
+    // The oracle exits at 0 and the run ends one floor later.
+    assert_eq!(
+        driver.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::BarrierReached {
+            at: Timestamp::from_nanos(0)
+        }
+    );
     assert!(matches!(
         driver.step(Timestamp::from_nanos(10)).unwrap(),
         StepOutcome::Finished { .. }

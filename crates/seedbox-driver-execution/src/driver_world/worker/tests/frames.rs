@@ -271,6 +271,9 @@ fn actual_bounded_routing_overflow_reports_a_source_gap_and_keeps_authority() {
         let (_root, mut worker, socket) = frame_worker(true);
         worker.driver.set_frame_capacity(capacity);
         worker.step(Timestamp::from_nanos(10)).unwrap();
+        // The frames stamped 10 are held there while machines can still emit
+        // at 10, and routed by the next commit.
+        worker.step(Timestamp::from_nanos(20)).unwrap();
         let mut observations = vec![];
         while let Ok(observation) = {
             let mut bytes = [0; observation::MAX_DATAGRAM_BYTES + 1];
