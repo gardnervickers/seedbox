@@ -120,11 +120,16 @@ use qemu::Process;
 
 /// x86 Linux `COMMAND_LINE_SIZE`, including the terminating NUL.
 const COMMAND_LINE_SIZE: usize = 2048;
-/// Room each boot's kernel command line keeps for its entropy argument
-/// (` seedbox.entropy=` and 16 hex digits; see `qemu::boot_command_line`).
+/// Width of each boot's entropy argument (` seedbox.entropy=` and 16 hex
+/// digits).
 const ENTROPY_ARGUMENT_BYTES: usize = " seedbox.entropy=".len() + 16;
+/// Room each boot's kernel command line keeps for the arguments appended per
+/// boot (see `qemu::boot_command_line`): its entropy and its widest realtime
+/// offset.
+const PER_BOOT_ARGUMENT_BYTES: usize =
+    ENTROPY_ARGUMENT_BYTES + seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES;
 /// Capacity of a manifest's command line, including the terminating NUL.
-const COMMAND_LINE_CAPACITY: usize = COMMAND_LINE_SIZE - ENTROPY_ARGUMENT_BYTES;
+const COMMAND_LINE_CAPACITY: usize = COMMAND_LINE_SIZE - PER_BOOT_ARGUMENT_BYTES;
 /// Size of a [`Boot::Program`] image: one 64 KiB BIOS ROM.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const PROGRAM_BYTES: usize = 64 * 1024;
@@ -470,6 +475,9 @@ impl TcgMachine {
                 "TCG kernel command line must contain no NUL and fit in {} bytes",
                 COMMAND_LINE_CAPACITY - 1
             )));
+        }
+        if seedbox_machine::clock::sets_realtime_offset(&command_line) {
+            return Err(Error("TCG kernel command line sets seedbox.clock_offset_ns; remove it, each boot appends its own".into()));
         }
         // TCG needs no application instrumentation. Packaging borrows the
         // immutable prepared input; PV may derive its own private preparation.

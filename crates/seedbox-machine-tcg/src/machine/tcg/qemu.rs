@@ -567,13 +567,15 @@ impl Process {
 /// every seed booted the same guest entropy. Linux mixes the whole command
 /// line into its input pool before it first draws randomness
 /// (`random_init_early`), so the seed selects every later guest byte. It is
-/// mixed, not credited. The manifest keeps `ENTROPY_ARGUMENT_BYTES` free.
+/// mixed, not credited. The boot's realtime offset also derives from its
+/// seed (`seedbox_machine::clock::boot_command_line`). The manifest keeps
+/// `PER_BOOT_ARGUMENT_BYTES` free for both arguments.
 fn boot_command_line(command_line: &str, seed: u64) -> String {
-    let line = format!("{command_line} seedbox.entropy={seed:016x}");
-    debug_assert_eq!(
-        line.len(),
-        command_line.len() + super::ENTROPY_ARGUMENT_BYTES
+    let line = seedbox_machine::clock::boot_command_line(
+        &format!("{command_line} seedbox.entropy={seed:016x}"),
+        seed,
     );
+    debug_assert!(line.len() <= command_line.len() + super::PER_BOOT_ARGUMENT_BYTES);
     line
 }
 /// The complete QEMU command line of one process, writing its owned boot
@@ -681,8 +683,9 @@ fn command(
             command_line,
             epoch_seconds,
         } => {
-            // The CMOS RTC reads epoch plus the virtual clock, matching
-            // the realtime the supervisor sets; no host wall clock is read.
+            // The CMOS RTC reads epoch plus the virtual clock, the realtime
+            // the supervisor sets less the boot's sub-second offset; no host
+            // wall clock is read.
             // The BIOS loads the kernel, initramfs and exact command line
             // from fw_cfg.
             command

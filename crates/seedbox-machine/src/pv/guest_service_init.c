@@ -210,9 +210,10 @@ static int counter_ns(uint64_t *out) {
 #endif
 }
 /* Every boot starts CLOCK_REALTIME at the simulation epoch plus the machine
- * counter, before Ready. /seedbox/clock.bin is "SBXCLK1\0" followed by the
- * little-endian u32 epoch seconds; an archive without it uses epoch zero. */
-static void set_realtime(void) {
+ * counter plus the boot's offset (seedbox.clock_offset_ns), before Ready.
+ * /seedbox/clock.bin is "SBXCLK1\0" followed by the little-endian u32 epoch
+ * seconds; an archive without it uses epoch zero. */
+static void set_realtime(int64_t offset) {
     failure_phase = "read clock epoch"; failure_path = "/seedbox/clock.bin";
     uint32_t epoch = 0;
     int fd = open(failure_path, O_RDONLY | O_CLOEXEC);
@@ -227,9 +228,12 @@ static void set_realtime(void) {
     failure_phase = "set realtime"; failure_path = "CLOCK_REALTIME";
     uint64_t now;
     if (counter_ns(&now)) failed();
+    /* The epoch floor (a day) keeps a millisecond offset from going negative. */
+    __int128 total = (__int128)epoch * 1000000000 + now + offset;
+    if (total < 0) { errno = ERANGE; failed(); }
     struct timespec realtime = {
-        .tv_sec = (time_t)((uint64_t)epoch + now / 1000000000u),
-        .tv_nsec = (long)(now % 1000000000u),
+        .tv_sec = (time_t)(total / 1000000000),
+        .tv_nsec = (long)(total % 1000000000),
     };
     if (clock_settime(CLOCK_REALTIME, &realtime)) failed();
 }
@@ -285,8 +289,11 @@ int main(void) {
     ssize_t command_length = getline(&command, &command_capacity, command_file);
     if (command_length < 0) { if (!errno) errno = EIO; failed(); }
     if (fclose(command_file) || sbx_control_mode(command, control_enabled, &control_enabled)) failed();
+    failure_phase = "read clock offset";
+    int64_t clock_offset;
+    if (sbx_clock_offset(command, &clock_offset)) failed();
     free(command);
-    set_realtime();
+    set_realtime(clock_offset);
     if (sbx_env_before_root(&environment,management)) {
         failure_phase=environment.failure_phase;failure_path=environment.failure_path;failed();
     }

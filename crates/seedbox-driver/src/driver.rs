@@ -76,6 +76,14 @@ use crate::pv::Output;
 mod host;
 use host::Host;
 
+/// The spread of initial boots a world uses ([`Driver::stagger_boots`]).
+// Machines started together (one orchestrator, one rack power-on) come up
+// within tens of milliseconds of each other. 50 ms is far more than one
+// network hop (1 ms by default), so boot order decides who speaks first, yet
+// below the 100 ms ticks and second-scale timeouts of consensus systems and
+// negligible against a run's length.
+pub const BOOT_SPREAD: Duration = Duration::from_millis(50);
+
 /// An insertion-ordered machine identity within one driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MachineId(usize);
@@ -149,6 +157,11 @@ struct Entry<M> {
     /// Greatest ended ordinal accepted into retained staging/publication.
     /// None is distinct from logical boot zero; no unbounded boot registry.
     last_ended_published: Option<u64>,
+    /// A staggered initial machine's boot time, until its first run: it
+    /// waits, Blocked until then, and drops the frames arriving before it, as
+    /// a machine that is not yet switched on would. Its first run, whenever
+    /// it comes, ends this.
+    powered_on_at: Option<Timestamp>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,7 +232,31 @@ impl<M> Entry<M> {
             inbox: VecDeque::new(),
             staged: Vec::new(),
             last_ended_published: None,
+            powered_on_at: None,
         }
+    }
+
+    /// Hold an untouched machine's first boot until `at`, after its addition.
+    fn power_on_at(&mut self, id: MachineId, at: Timestamp) -> Result<(), ClockOverflow> {
+        let timer = self.machine_time(id, at)?;
+        self.stopped = StopReason::Blocked {
+            reached: self.reached,
+            deadline: Some(at),
+        };
+        self.timer = Some(timer);
+        self.powered_on_at = Some(at);
+        Ok(())
+    }
+
+    /// Whether a frame arriving for this machine at `at` is dropped instead
+    /// of offered: its boot has exited, or it is not switched on until later.
+    // The comparison is with the arrival, never with where a round ends: a
+    // frame arriving after the boot time is offered whether or not the first
+    // run has committed yet. A request or resume that boots the machine early
+    // commits a run at its own barrier, which every schedule shares.
+    fn drops_frame(&self, at: Timestamp) -> bool {
+        self.powered_on_at.is_some_and(|on| at < on)
+            || matches!(self.stopped, StopReason::Exited { .. })
     }
 
     /// Map a simulation time at or after the last rate change into machine time.
@@ -1785,13 +1822,14 @@ where
     }
 
     /// Offer every frame arriving at `now` to its receiver's current boot, in
-    /// (sender, sequence, receiver) order. A receiver whose boot has exited
-    /// drops the frame. A running receiver takes its frames at the start of its
-    /// next run, which starts at `now`, so a blocked one becomes runnable here;
-    /// one held at a breakpoint gets that run without a budget. A paused
-    /// receiver has no next run, so it admits them now with one zero-budget
-    /// batch and commit. Returns whether any frame was due, so that newly
-    /// generated timeline items at `now` are processed next.
+    /// (sender, sequence, receiver) order. A receiver whose boot has exited,
+    /// or that is not switched on until after `now`, drops the frame. A
+    /// running receiver takes its frames at the start of its next run, which
+    /// starts at `now`, so a blocked one becomes runnable here; one held at a
+    /// breakpoint gets that run without a budget. A paused receiver has no
+    /// next run, so it admits them now with one zero-budget batch and commit.
+    /// Returns whether any frame was due, so that newly generated timeline
+    /// items at `now` are processed next.
     fn deliver_frames(&mut self, now: Timestamp) -> Result<bool, Error<M::Error>> {
         let due = self.execution.network.take_due(now.as_nanos());
         if due.is_empty() {
@@ -1804,7 +1842,7 @@ where
         let position = self.position();
         for delivery in due {
             let entry = &mut self.execution.machines[delivery.to.0];
-            if matches!(entry.stopped, StopReason::Exited { .. }) {
+            if entry.drops_frame(now) {
                 self.execution.network.delivery_result(
                     position,
                     delivery.from,
@@ -2280,6 +2318,53 @@ where
             }
         }
         self.execution.properties = seedbox_engine_core::properties::Ledger::new(machines);
+        Ok(())
+    }
+
+    /// Stagger the first boots of the machines present before execution,
+    /// except the oracle: each waits, switched off, until a time below
+    /// `spread` after the start, chosen by its machine seed, and then boots.
+    /// Machines therefore start in a seeded order with their monotonic and
+    /// boot clocks apart, as machines powered on together never quite are.
+    /// A switched-off machine drops the frames that arrive for it. A request
+    /// admitted for it earlier (a fault, a guest command) or a resume after a
+    /// pause boots it then instead. Delays draw nothing from any stream, so
+    /// no other seeded value moves; a zero spread changes nothing. Only once,
+    /// before the first committed boundary; checkpoints retain the state.
+    // The oracle drives the workload and decides the verdict; it is not one
+    // of the replicas whose boot order is being varied, and a delay would only
+    // postpone every control call and scheduled fault it makes.
+    pub fn stagger_boots(&mut self, spread: Duration) -> Result<(), Error<M::Error>> {
+        self.check_valid()?;
+        let spread_ns = u64::try_from(spread.as_nanos()).map_err(|_| Error::TimeOverflow)?;
+        let now = self.now();
+        if self.execution.boundary_index != 0
+            || self.execution.machines.iter().any(|entry| {
+                entry.powered_on_at.is_some()
+                    || entry.position != now
+                    || !matches!(entry.stopped, StopReason::BoundaryReached)
+            })
+        {
+            return Err(Error::Control(
+                "boots are staggered once, before execution".into(),
+            ));
+        }
+        let oracle = self.execution.oracle;
+        for (index, entry) in self.execution.machines.iter_mut().enumerate() {
+            let id = MachineId(index);
+            let delay = entry
+                .rng
+                .as_ref()
+                .map_or(0, |rng| rng.boot_delay(spread_ns));
+            if id == oracle || delay == 0 {
+                continue;
+            }
+            let at = now
+                .as_nanos()
+                .checked_add(delay)
+                .ok_or(Error::TimeOverflow)?;
+            entry.power_on_at(id, Timestamp::from_nanos(at))?;
+        }
         Ok(())
     }
 
@@ -3122,6 +3207,8 @@ impl StepOutcome {
     }
 }
 
+#[cfg(test)]
+mod boot_stagger_tests;
 #[cfg(test)]
 mod break_tests;
 #[cfg(test)]

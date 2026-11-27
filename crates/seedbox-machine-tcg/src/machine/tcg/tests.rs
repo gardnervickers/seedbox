@@ -1090,8 +1090,9 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
         )
         .is_err());
     }
-    // Bytes, not characters, count; each boot appends its entropy argument.
-    for accepted in ["a".repeat(2014), "é".repeat(1007)] {
+    // Bytes, not characters, count; each boot appends its entropy and
+    // realtime offset arguments.
+    for accepted in ["a".repeat(1981), format!("{}a", "é".repeat(990))] {
         bootstrap.kernel.command_line = accepted;
         assert!(super::TcgMachine::new(
             Path::new("/missing/qemu"),
@@ -1102,9 +1103,11 @@ fn common_constructor_checks_resource_and_kernel_argument_bounds() {
         .is_ok());
     }
     for rejected in [
-        "a".repeat(2015),
-        format!("{}a", "é".repeat(1007)),
+        "a".repeat(1982),
+        "é".repeat(991),
         "a\0b".into(),
+        // Each boot appends its own offset.
+        "quiet seedbox.clock_offset_ns=0".into(),
     ] {
         bootstrap.kernel.command_line = rejected;
         assert!(super::TcgMachine::new(
