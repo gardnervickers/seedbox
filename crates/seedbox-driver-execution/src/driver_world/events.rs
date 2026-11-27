@@ -248,6 +248,15 @@ impl Publisher {
         }
         Ok(())
     }
+    /// Tell a new observer that a restored world's application is already
+    /// ready, at the position it continues from.
+    pub(super) fn restored_ready(&mut self, state: &mut State) -> Result<()> {
+        if !state.world.readiness.latched {
+            return Ok(());
+        }
+        let at = state.world.position.simulated_time_ns;
+        self.emit(state, "", 0, at, Kind::ApplicationReady)
+    }
     pub(super) fn close(&mut self, state: &mut State) -> Result<()> {
         self.emit(
             state,
@@ -282,7 +291,12 @@ impl Publisher {
                 let machine = name(names, output.machine)?;
                 match &output.payload {
                     Response::Ready => {
+                        let was_ready = state.world.readiness.latched;
+                        state.world.readiness.observe(machine);
                         self.emit(state, machine, output.boot, at, Kind::MachineReady)?;
+                        if !was_ready && state.world.readiness.latched {
+                            self.emit(state, "", 0, at, Kind::ApplicationReady)?;
+                        }
                     }
                     Response::ApplicationOutput { stream, bytes } => {
                         let stream = match stream {

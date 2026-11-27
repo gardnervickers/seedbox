@@ -668,7 +668,8 @@ impl ExecutionService {
                 s.status.stage = Some(Stage::Booting);
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
-        let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
+        let mut observations =
+            crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
         // The session's runs share one engine copy (see
         // `Orchestrator::with_executables`). Monitors hold the session lease,
         // so session cleanup never removes it under a running execution.
@@ -699,7 +700,14 @@ impl ExecutionService {
                 },
                 inputs,
                 executor.as_ref(),
-                |progress| self.observe_run_progress(id, spec, &mut retained, progress),
+                |progress| {
+                    // The worker has finished; what it committed is published
+                    // before the run finalizes, whatever the host's timing.
+                    if matches!(progress, RunProgress::Finalizing { .. }) {
+                        observations.drain();
+                    }
+                    self.observe_run_progress(id, spec, &mut retained, progress)
+                },
             )?;
         // Machines the run's spawns prepared join its own retained inputs, so
         // its described definition replays without preparing them again. The
