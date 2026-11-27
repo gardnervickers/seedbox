@@ -411,6 +411,9 @@ pub struct Input {
 pub struct Inbox<'a> {
     pending: &'a mut VecDeque<Input>,
     due_through: Timestamp,
+    /// A timed inbox's end: inputs dated after `due_through` and before it
+    /// are offered for delivery at their own times ([`Inbox::timed`]).
+    timed_before: Option<Timestamp>,
 }
 
 impl<'a> Inbox<'a> {
@@ -425,7 +428,18 @@ impl<'a> Inbox<'a> {
         Self {
             pending,
             due_through,
+            timed_before: None,
         }
+    }
+
+    /// Make this a timed inbox for a machine that honours one
+    /// ([`crate::machine::Machine::timed_inbox`]): the queued inputs dated
+    /// after the due time and before `before`, the run's bound, are offered
+    /// for delivery inside the run, each at its own time. The caller offers
+    /// only frames ([`Request::ReceiveFrame`]) this way.
+    pub fn with_timed(mut self, before: Timestamp) -> Self {
+        self.timed_before = Some(before);
+        self
     }
 
     /// Inspect the first due input without accepting it. Returns None for an
@@ -444,6 +458,32 @@ impl<'a> Inbox<'a> {
     pub fn take(&mut self) -> Option<Input> {
         self.front()?;
         self.pending.pop_front()
+    }
+
+    /// Whether this is a timed inbox ([`Inbox::with_timed`]).
+    pub fn is_timed(&self) -> bool {
+        self.timed_before.is_some()
+    }
+
+    /// The timed inputs offered after the due ones, in order: dated after
+    /// the due time and before the timed inbox's end. Empty unless this is
+    /// a timed inbox ([`Inbox::with_timed`]).
+    pub fn timed(&self) -> impl Iterator<Item = &Input> {
+        let due_through = self.due_through;
+        let before = self.timed_before;
+        self.pending
+            .iter()
+            .skip_while(move |input| input.at <= due_through)
+            .take_while(move |input| before.is_some_and(|before| input.at < before))
+    }
+
+    /// Accept the first timed input once every due one is taken: the
+    /// machine delivered it at its own time. Inputs it did not reach stay
+    /// with the caller, as untaken due inputs do.
+    pub fn take_timed(&mut self) -> Option<Input> {
+        let front = self.pending.front()?;
+        let before = self.timed_before?;
+        (front.at > self.due_through && front.at < before).then(|| self.pending.pop_front())?
     }
 }
 
