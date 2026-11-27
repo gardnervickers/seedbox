@@ -54,8 +54,9 @@ Code comments cite them by label.
   terminal output or exit, with every machine run to that time and its output up to then
   published. What is due before the end still happens; what is due at it does not.
 
-So where rounds end, and the quantum that caps them, change no result; the quantum only paces
-playback.
+So where rounds end, and the quantum, change no result. The quantum is the step of paced playback
+and of single stepping, and caps rounds only then; otherwise a round runs to where the simulation
+needs a barrier.
 
 `network.latency` is therefore also a delay the oracle sees: an SDK call takes effect, a `flush`
 is answered and the run ends one latency after the output that asked. A simulated time limit

@@ -297,7 +297,7 @@ impl Default for NetworkDefaults {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SimulatorDefaults {
-    /// Maximum simulated time between parallel execution barriers.
+    /// The step of paced playback and of single stepping; no effect on results.
     #[serde(default = "quantum")]
     pub quantum: String,
 }

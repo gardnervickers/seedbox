@@ -385,8 +385,8 @@ struct ExecutionState<M> {
     clock: Arc<SimulationClock>,
     rng: SimulationRng,
     /// The quantum and the start its boundaries are anchored at. Host
-    /// choices that cap rounds and pace playback, not simulation state: they
-    /// are outside policy evidence.
+    /// choices that pace playback, and cap rounds only then, not simulation
+    /// state: they are outside policy evidence.
     quantum_ns: u64,
     origin: Timestamp,
     machines: Vec<Entry<M>>,
@@ -424,8 +424,8 @@ impl<M> ExecutionState<M> {
         (now.as_nanos() - self.origin.as_nanos()) / self.quantum_ns
     }
 
-    /// The first quantum boundary after `now`, which caps a round that starts
-    /// there; `None` past the end of time.
+    /// The first quantum boundary after `now`, which caps a paced round that
+    /// starts there; `None` past the end of time.
     fn quantum_end(&self, now: Timestamp) -> Option<Timestamp> {
         let next = self.completed_quanta(now).checked_add(1)?;
         next.checked_mul(self.quantum_ns)
@@ -499,6 +499,8 @@ struct ObservationState {
 ///
 /// The positive quantum is fixed for the driver's lifetime. Quantum boundaries
 /// are anchored at the initial timestamp; intermediate barriers never shift them.
+/// The quantum is the step of paced playback and of single stepping, and caps
+/// rounds only then; where rounds end changes no result.
 /// The caller schedules host inputs (`Barrier::schedule`) between steps; they
 /// share one FIFO timeline with guest control work and are admitted through
 /// the same control policy, in insertion order at one timestamp and before
@@ -1039,11 +1041,15 @@ where
     /// `upto` must be at or after the current shared time. Returned times never
     /// move backwards or exceed `upto`. A step may stop earlier for a scheduled
     /// event or execution boundary, or because work becomes blocked or finishes.
-    /// A call never crosses the next fixed quantum boundary. A shorter `upto`
-    /// or a timeline item may produce an intermediate barrier, but the unfinished
-    /// quantum retains its original end. Repeated short calls therefore visit
-    /// the same quantum boundaries as larger calls. Quantum changes require a
-    /// new driver; there is no runtime setter.
+    /// While playback is paced (a limited rate) or a single quantum is
+    /// admitted, a call never crosses the next fixed quantum boundary. A shorter
+    /// `upto` or a timeline item may produce an intermediate barrier, but the
+    /// unfinished quantum retains its original end, so repeated short calls
+    /// visit the same quantum boundaries as larger calls. At an unlimited rate
+    /// the quantum caps nothing: a round ends where the simulation needs a
+    /// barrier, one network latency after the earliest machine can execute, or
+    /// at `upto`. Quantum changes require a new driver; there is no runtime
+    /// setter.
     ///
     /// The driver chooses execution bounds that allow every machine to stop at
     /// a common barrier. At the returned time, runnable machines have reached
@@ -1107,8 +1113,9 @@ where
         self.step_at(upto, Instant::now())
     }
 
-    /// The quantum: the step of paced playback and the longest round. A host
-    /// setting; where rounds end does not change results.
+    /// The quantum: the step of paced playback and of single stepping, and the
+    /// longest round only then. A host setting; where rounds end does not
+    /// change results.
     pub fn quantum(&self) -> Duration {
         Duration::from_nanos(self.execution.quantum_ns)
     }
@@ -1116,7 +1123,7 @@ where
     /// Step toward a caller-owned future input boundary, even if all machines
     /// are idle or paused individually. Global playback pause/rate and permanent
     /// completion still apply. Time advances only through ordinary Driver
-    /// quantum boundaries and never beyond `upto`; idle time runs no machines.
+    /// rounds and never beyond `upto`; idle time runs no machines.
     ///
     /// This does not queue, admit or reserve an input. The caller must deliver
     /// the due input at its barrier. The external-work assertion lasts only for
@@ -1705,10 +1712,18 @@ where
             return Ok(self.outcome());
         }
 
-        let quantum_end = self
-            .execution
-            .quantum_end(self.now())
-            .ok_or(Error::TimeOverflow)?;
+        // The quantum paces playback: it caps a round only while playback is
+        // paced or a single quantum is admitted. Otherwise a round runs to
+        // where the simulation needs a barrier, and no stop changes a result.
+        let cap = if self.playback.unattended() {
+            upto
+        } else {
+            let quantum_end = self
+                .execution
+                .quantum_end(self.now())
+                .ok_or(Error::TimeOverflow)?;
+            upto.min(quantum_end)
+        };
 
         // Known events limit the whole round, and so do frames for receivers
         // that take them only at a boundary. Every other machine takes its
@@ -1728,7 +1743,7 @@ where
             )
             .chain(self.causal_bound(&receivers))
             .chain(self.execution.finishing.map(|(at, _)| at))
-            .fold(upto.min(quantum_end), Timestamp::min);
+            .fold(cap, Timestamp::min);
         // A test's stop policy may end the round earlier, never later.
         let boundary = self.stops.end(self.now(), boundary);
 

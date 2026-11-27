@@ -70,6 +70,8 @@ impl Observed {
             .collect()
     }
 }
+/// Each mock's state, including its last draw, which shows its RNG stream
+/// continued across the restore.
 fn states(worker: &mut Worker<Mock>) -> Vec<Data> {
     worker
         .driver

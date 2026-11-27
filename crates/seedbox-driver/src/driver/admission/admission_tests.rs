@@ -612,6 +612,10 @@ fn due_frames_are_refused_work_but_runnable_machines_are_not() {
         vec![],
         true,
     );
+    // Paced, so the first round ends at the quantum boundary before the
+    // deadline.
+    d.with_barrier(|b| b.set_rate(crate::test_support::paced()))
+        .unwrap();
     assert_eq!(
         d.step(at(100)).unwrap(),
         StepOutcome::BarrierReached { at: at(10) }

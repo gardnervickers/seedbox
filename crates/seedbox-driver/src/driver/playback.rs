@@ -121,6 +121,12 @@ impl Playback {
         self.held = Some(fault);
     }
 
+    /// Nothing to pace or count between rounds: an unlimited rate with no
+    /// admitted quantum. Only then may a round cross a quantum boundary.
+    pub(super) fn unattended(&self) -> bool {
+        self.rate == PlaybackRate::Unlimited && self.step_after.is_none()
+    }
+
     /// Due-only service dispatch holds paused effects unless a step is admitted.
     pub(super) fn holds_unarmed_effect(&self) -> bool {
         self.rate == PlaybackRate::Paused && self.step_after.is_none()

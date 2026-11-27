@@ -11,7 +11,9 @@ fn paused_runnable_machine_resumes_at_current_time_without_catchup_work() {
         })
         .unwrap();
     let mut outcomes = Vec::new();
-    for end in [3, 10, 20] {
+    // Rounds end one floor (10 ns) after the earliest start, and at
+    // timeline items.
+    for end in [3, 13, 20] {
         let outcome = driver.step(at(100)).unwrap();
         assert_eq!(outcome, StepOutcome::BarrierReached { at: at(end) });
         outcomes.push(outcome);
@@ -63,7 +65,7 @@ fn pause_suppresses_timer_until_resume_delivers_it_without_cpu_execution() {
             barrier.schedule(at(20), auto_key(), Action::Resume(Target::Machine(id)))
         })
         .unwrap();
-    for end in [2, 10] {
+    for end in [2, 12] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }
@@ -170,11 +172,11 @@ fn all_paused_is_unfinished_snapshot_preserves_state_and_retains_input() {
         .unwrap();
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::BarrierReached { at: at(10) }
+        StepOutcome::BarrierReached { at: at(17) }
     );
     driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.machine(id)?.executed, 3);
+            assert_eq!(barrier.machine(id)?.executed, 10);
             Ok(())
         })
         .unwrap();

@@ -336,9 +336,8 @@ fn accepted_peer_effect_finishes_after_its_caller_exits() {
     world.advance(11);
     world.advance(13);
     // The ACK is due at 13: the peer publishes it in its run from there. The
-    // pending stop keeps that round going to its quantum end, and the reply
-    // to the crashed caller, due one floor after the ACK, is dropped at 23.
-    assert_eq!(world.step(100), StepOutcome::BarrierReached { at: at(20) });
+    // pending stop keeps that round going one floor, to 23, where the reply
+    // to the crashed caller, due one floor after the ACK, is dropped.
     assert_eq!(world.step(100), StepOutcome::Blocked { at: at(23) });
     assert!(world.peer().stopped);
     assert_eq!(world.peer().acknowledgments, [(command, 13)]);
