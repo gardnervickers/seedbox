@@ -11,7 +11,7 @@ use crate::{
     Error, Result,
 };
 use seedbox_spec::backend::CpuBackend;
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf};
 
 /// Retained process adapter sharing the ordinary worker ownership, cancellation,
 /// observation and journal boundaries. Construction performs no guest work.
@@ -20,7 +20,6 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 pub struct DriverExecutor {
     profile: ExecutionProfile,
     backend: CpuBackend,
-    workers: usize,
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
@@ -41,22 +40,18 @@ impl DriverExecutor {
         self
     }
 
-    /// Use an explicit retained profile and server-owned worker count. Factory
-    /// inventory must name the same backend; no fallback or profile rewriting.
-    pub fn new(profile: ExecutionProfile, backend: CpuBackend, workers: usize) -> Result<Self> {
+    /// Use an explicit retained profile. Factory inventory must name the same
+    /// backend; no fallback or profile rewriting.
+    pub fn new(profile: ExecutionProfile, backend: CpuBackend) -> Result<Self> {
         let recorded = super::retained::validate_contract(&profile)?;
         if recorded != backend {
             return Err(Error::Integrity(
                 "Driver executor backend argument differs from validated execution profile".into(),
             ));
         }
-        if !(1..=64).contains(&workers) {
-            return Err(Error::Setup("Driver machine workers: use 1..64".into()));
-        }
         Ok(Self {
             profile,
             backend,
-            workers,
             runtime: None,
             environment: vec![],
             session_lease: None,
@@ -103,7 +98,6 @@ impl DriverExecutor {
                 semantic_parameters: semantic,
             },
             backend,
-            1,
         )?;
         executor.admit_execution(simulation.control.is_some())?;
         Ok(executor)
@@ -160,9 +154,6 @@ impl DriverExecutor {
 impl ExecutionBackend for DriverExecutor {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())])
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.

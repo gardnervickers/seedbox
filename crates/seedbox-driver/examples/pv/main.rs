@@ -98,7 +98,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         std::time::Duration::from_millis(1),
-        2,
         driver_rng(),
         || Ok(()),
         oracle,

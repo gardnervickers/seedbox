@@ -1,6 +1,6 @@
 //! Staggered initial boots: each initial machine but the oracle first runs at
-//! a seeded delay below the spread, the same for the same seed whatever the
-//! worker count, and nothing else moves.
+//! a seeded delay below the spread, the same for the same seed, and nothing
+//! else moves.
 use super::*;
 use crate::rng::{RngStream, SeededRng};
 use std::sync::Mutex;
@@ -37,13 +37,12 @@ impl Machine for Idle {
 }
 
 type Runs = Vec<Arc<Mutex<Vec<u64>>>>;
-fn world(seed: u64, machines: usize, workers: usize) -> (Driver<Idle>, Runs) {
+fn world(seed: u64, machines: usize) -> (Driver<Idle>, Runs) {
     let runs: Runs = (0..machines).map(|_| Arc::default()).collect();
     let mut idle = runs.clone().into_iter().map(|runs| Idle { runs });
     let driver = Driver::new_seeded(
         at(0),
         Duration::from_millis(1),
-        workers,
         seed,
         || Ok(()),
         fixture::definition(0),
@@ -68,8 +67,8 @@ fn first_runs(driver: &mut Driver<Idle>, runs: &Runs, upto: u64) -> Vec<u64> {
         .map(|runs| *runs.lock().unwrap().first().expect("machine ran"))
         .collect()
 }
-fn staggered(seed: u64, machines: usize, workers: usize) -> Vec<u64> {
-    let (mut driver, runs) = world(seed, machines, workers);
+fn staggered(seed: u64, machines: usize) -> Vec<u64> {
+    let (mut driver, runs) = world(seed, machines);
     driver.stagger_boots(BOOT_SPREAD).unwrap();
     first_runs(&mut driver, &runs, 100 * MS)
 }
@@ -79,7 +78,7 @@ fn initial_machines_boot_at_distinct_seeded_times_below_the_spread_and_the_oracl
     let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
     let mut all = BTreeSet::new();
     for seed in 1..=12 {
-        let first = staggered(seed, 4, 1);
+        let first = staggered(seed, 4);
         assert_eq!(first[0], 0, "seed {seed}: the oracle is not staggered");
         let machines: BTreeSet<_> = first[1..].iter().copied().collect();
         assert_eq!(machines.len(), 3, "seed {seed}: distinct boots {first:?}");
@@ -88,9 +87,8 @@ fn initial_machines_boot_at_distinct_seeded_times_below_the_spread_and_the_oracl
             "seed {seed}: {first:?}"
         );
         all.extend(machines);
-        // The same seed boots at the same times, whatever the worker count.
-        assert_eq!(first, staggered(seed, 4, 1));
-        assert_eq!(first, staggered(seed, 4, 3));
+        // The same seed boots at the same times.
+        assert_eq!(first, staggered(seed, 4));
     }
     // Different seeds choose different times, across the spread.
     assert_eq!(all.len(), 36);
@@ -121,7 +119,7 @@ fn streams(driver: &Driver<Idle>) -> Vec<[u8; 48]> {
 #[test]
 fn delays_come_from_machine_seeds_without_drawing() {
     let spread = u64::try_from(BOOT_SPREAD.as_nanos()).unwrap();
-    let (mut driver, runs) = world(7, 3, 1);
+    let (mut driver, runs) = world(7, 3);
     let delays: Vec<u64> = driver
         .execution
         .machines
@@ -138,14 +136,14 @@ fn delays_come_from_machine_seeds_without_drawing() {
 
 #[test]
 fn a_zero_spread_changes_nothing_and_staggering_is_once_before_execution() {
-    let (mut driver, runs) = world(3, 3, 1);
+    let (mut driver, runs) = world(3, 3);
     driver.stagger_boots(Duration::ZERO).unwrap();
     assert_eq!(first_runs(&mut driver, &runs, 10 * MS), [0, 0, 0]);
     assert!(matches!(
         driver.stagger_boots(BOOT_SPREAD),
         Err(Error::Control(_))
     ));
-    let (mut driver, _) = world(3, 3, 1);
+    let (mut driver, _) = world(3, 3);
     driver.stagger_boots(BOOT_SPREAD).unwrap();
     assert!(matches!(
         driver.stagger_boots(BOOT_SPREAD),
@@ -155,7 +153,7 @@ fn a_zero_spread_changes_nothing_and_staggering_is_once_before_execution() {
 
 #[test]
 fn a_machine_paused_before_its_boot_boots_when_resumed() {
-    let (mut driver, runs) = world(5, 2, 1);
+    let (mut driver, runs) = world(5, 2);
     driver.stagger_boots(BOOT_SPREAD).unwrap();
     driver
         .with_barrier(|b| {
@@ -176,12 +174,12 @@ fn a_machine_paused_before_its_boot_boots_when_resumed() {
 
 #[test]
 fn staggered_machines_stay_switched_off_until_their_boot() {
-    let (mut driver, runs) = world(9, 3, 1);
+    let (mut driver, runs) = world(9, 3);
     driver.stagger_boots(BOOT_SPREAD).unwrap();
     assert!(driver.execution.machines[1..]
         .iter()
         .all(|entry| entry.powered_off));
-    let expected = staggered(9, 3, 1);
+    let expected = staggered(9, 3);
     // Up to just before the first boot, then onward.
     let early = expected[1..].iter().min().unwrap() - 1;
     driver.step(at(early)).unwrap();

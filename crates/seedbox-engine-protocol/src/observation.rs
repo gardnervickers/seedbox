@@ -53,6 +53,11 @@ pub enum Kind {
     Log(Chunk),
     MalformedLog,
     MachineReady,
+    /// Every initial machine has reported ready, so the application is ready
+    /// from this committed time on. Sent once per worker: right after the
+    /// `MachineReady` that completes the set, or first of all when the worker
+    /// starts from a checkpoint, which is always captured after that.
+    ApplicationReady,
     OutOfMemoryKill {
         kill: crate::out_of_memory::Kill,
     },

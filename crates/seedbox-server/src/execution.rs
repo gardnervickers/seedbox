@@ -668,7 +668,8 @@ impl ExecutionService {
                 s.status.stage = Some(Stage::Booting);
             })
             .map_err(|e| seedbox_application::Error::Execution(e.to_string()))?;
-        let observations = crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
+        let mut observations =
+            crate::observations::Receiver::start(self.manager.clone(), id.clone())?;
         // The session's runs share one engine copy (see
         // `Orchestrator::with_executables`). Monitors hold the session lease,
         // so session cleanup never removes it under a running execution.
@@ -696,11 +697,17 @@ impl ExecutionService {
                     seed: spec.seed,
                     wall_time_ns: options.wall_time_ns,
                     cancellation: cancellation.clone(),
-                    machine_workers: options.machine_workers,
                 },
                 inputs,
                 executor.as_ref(),
-                |progress| self.observe_run_progress(id, spec, &mut retained, progress),
+                |progress| {
+                    // The worker has finished; what it committed is published
+                    // before the run finalizes, whatever the host's timing.
+                    if matches!(progress, RunProgress::Finalizing { .. }) {
+                        observations.drain();
+                    }
+                    self.observe_run_progress(id, spec, &mut retained, progress)
+                },
             )?;
         // Machines the run's spawns prepared join its own retained inputs, so
         // its described definition replays without preparing them again. The
@@ -1060,9 +1067,6 @@ mod tests {
             fn profile(&self) -> ExecutionProfile {
                 self.0.profile.clone()
             }
-            fn performance_parameters(&self) -> BTreeMap<String, String> {
-                BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), "1".into())])
-            }
             fn execute(
                 &self,
                 request: ExecutionRequest<'_>,
@@ -1072,10 +1076,6 @@ mod tests {
                 assert_eq!(request.prepared.memory_mb("oracle").unwrap(), 256);
                 assert_eq!(request.prepared.memory_mb("helper").unwrap(), 1024);
                 assert_eq!(request.quantum_ns.get(), 2_500_000);
-                assert_eq!(
-                    request.performance_parameters["SEEDBOX_MACHINE_WORKERS"],
-                    "4"
-                );
                 Ok(ExecutionReport {
                     simulated_time_ns: Some(1),
                     host_wait_ns: 0,
@@ -1135,10 +1135,7 @@ mod tests {
         let resource = manager
             .submit_seeds(seedbox_api::SeedRangeRequest {
                 metadata: Default::default(),
-                options: seedbox_api::ExecutionOptions {
-                    machine_workers: Some(4),
-                    ..Default::default()
-                },
+                options: Default::default(),
                 request_id: "mixed-memory".into(),
                 spec,
                 count: 2,
@@ -1151,7 +1148,6 @@ mod tests {
             panic!("project execution must retain its canonical definition");
         };
         assert_eq!(definition.architecture, architecture);
-        assert_eq!(finished.options.machine_workers, Some(4));
         assert_eq!(finished.status.oracle_exit_code, Some(0));
         assert_eq!(
             finished.status.termination,
@@ -1161,10 +1157,8 @@ mod tests {
         let second_id = manager.advance_seeds().unwrap().unwrap();
         let second = manager.describe(&second_id).unwrap();
         assert_eq!(second.spec.seed, Some(2));
-        assert_eq!(second.options.machine_workers, Some(4));
         service.execute(second_id.clone()).unwrap();
         let finished_second = manager.describe(&second_id).unwrap();
-        assert_eq!(finished_second.options.machine_workers, Some(4));
         assert_eq!(finished_second.status.oracle_exit_code, Some(0));
         assert_eq!(
             finished_second.status.termination,

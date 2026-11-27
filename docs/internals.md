@@ -60,6 +60,9 @@ translation tables alone do not, and the client never asks for them.
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
 The TSC and LAPIC timer both count guest nanoseconds, so the guest command line states both rates instead of calibrating them at boot: `tsc_early_khz`, and `lapic_timer_khz` from the TCG kernel's [patch](../crates/seedbox-machine/guest/kernel/tcg-x86_64.patch).
 Idle reports its next virtual timer but cannot jump time itself; the Driver advances the shared clock.
+The microvm board has no RNG-seed provider and QEMU's `-seed` never reaches the guest, so each boot appends
+`seedbox.entropy=<boot seed>` to the kernel command line; Linux mixes the command line into its pool before
+its first draw. PV instead passes the seed as a device-tree `rng-seed` (ARM) or `SETUP_RNG_SEED` (x86).
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.
 
@@ -96,8 +99,10 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## PV round execution
 
-The Driver starts each runnable VM on its own request ring and sweeps the reply
-rings. A ready VM can take its next lane input while another VM is executing.
+Every machine runs on the thread that steps the Driver. A TCG world runs its
+machines inline, one after another. In a PV world the Driver starts each
+runnable VM on its own request ring and sweeps the reply rings. A ready VM can
+take its next lane input while another VM is executing.
 The Driver stages each machine's outputs until the barrier, where occurrence
 time and machine identity determine their order. One producer owns each ring.
 It publishes a completed message with one commit, or streams an oversized
@@ -380,8 +385,9 @@ their own assets. See [xtask](../crates/xtask/src/main.rs).
 external inputs, and need the server's MATCH (witness, outcome, fault history and full
 state) when that definition reruns under slowed or paused playback with stalled
 followers, beside a concurrently controlled simulation, with checkpoints at each marker, after
-fault previews, with keyed controls whose clients disconnect, and with 2, 3 and 8 machine
-workers. Branches of one checkpoint match each other and the source's suffix, including
-from a checkpoint file in a second server session; fresh runs there repeat the first
-session's output. Edited inputs keep everything before their first changed time.
+fault previews, and with keyed controls whose clients disconnect. A lifecycle variant
+with live controls replays from its retained timeline, and fresh reruns of the baseline,
+lifecycle, controlled and branch documents reproduce every observed trace. Branches of
+one checkpoint match each other and the source's suffix, including from a checkpoint file
+in a second server session; fresh runs there repeat the first session's output. Edited inputs keep everything before their first changed time.
 Position targets are reached in real time: the server samples playback every 250 ms.

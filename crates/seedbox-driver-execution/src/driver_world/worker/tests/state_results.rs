@@ -37,7 +37,6 @@ fn physical_worker(code: i32) -> (tempfile::TempDir, Worker<Ended>) {
         Timestamp::from_nanos(0),
         Duration::from_nanos(10),
         1,
-        1,
         || Ok(()),
         definition("oracle"),
         vec![],
@@ -157,7 +156,7 @@ fn evidence() -> StateEvidence {
 }
 #[test]
 fn stopped_policy_component_is_retained_without_claiming_a_native_witness() {
-    let (_root, mut worker, _) = worker(1);
+    let (_root, mut worker, _) = worker();
     let digest =
         crate::driver_world::results::record_policy(&mut worker.driver, &worker.output).unwrap();
     let path = worker.output.join("driver-policy.json");
@@ -178,7 +177,7 @@ fn stopped_policy_component_is_retained_without_claiming_a_native_witness() {
 }
 #[test]
 fn real_typed_getter_is_required_and_missing_evidence_never_publishes_a_report() {
-    let (_root, mut worker, _) = worker(1);
+    let (_root, mut worker, _) = worker();
     let error = publish_state(&mut worker.driver, &worker.names, &worker.output).unwrap_err();
     assert!(error.to_string().contains("not configured or supported"));
     assert!(!worker
@@ -188,62 +187,59 @@ fn real_typed_getter_is_required_and_missing_evidence_never_publishes_a_report()
 }
 #[test]
 fn finished_driver_uses_retained_ended_evidence_and_paths_do_not_use_machine_names() {
-    for workers in [1, 4] {
-        let root = tempfile::tempdir().unwrap();
-        let supplied = evidence();
-        let expected_pages = supplied.page_hashes.clone();
-        let mut driver = Driver::new_seeded(
-            Timestamp::from_nanos(0),
-            Duration::from_nanos(10),
-            workers,
-            1,
-            || Ok(()),
-            definition("../not-a-host-path"),
-            vec![],
-            vec![],
-            NetworkConfig::default(),
-            move |_| Ok(Ended(supplied.clone())),
-        )
+    let root = tempfile::tempdir().unwrap();
+    let supplied = evidence();
+    let expected_pages = supplied.page_hashes.clone();
+    let mut driver = Driver::new_seeded(
+        Timestamp::from_nanos(0),
+        Duration::from_nanos(10),
+        1,
+        || Ok(()),
+        definition("../not-a-host-path"),
+        vec![],
+        vec![],
+        NetworkConfig::default(),
+        move |_| Ok(Ended(supplied.clone())),
+    )
+    .unwrap();
+    let names: BTreeMap<_, _> = driver
+        .with_barrier(|barrier| {
+            Ok(barrier
+                .machines()
+                .map(|(id, _)| (id, "../not-a-host-path".to_owned()))
+                .collect())
+        })
         .unwrap();
-        let names: BTreeMap<_, _> = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(id, _)| (id, "../not-a-host-path".to_owned()))
-                    .collect())
-            })
-            .unwrap();
-        assert!(matches!(
-            driver.step(Timestamp::from_nanos(10)).unwrap(),
-            StepOutcome::Finished { .. }
-        ));
-        let report = publish_state(&mut driver, &names, root.path()).unwrap();
-        let capture = &report.machines["../not-a-host-path"];
-        assert_eq!(capture.boot, 1);
-        assert_eq!(
-            capture.disposition,
-            seedbox_artifacts::evidence::StateDisposition::Exited { code: 0 }
-        );
-        assert_eq!(capture.page_bytes().unwrap(), 16);
-        assert_eq!(capture.page_log, "machines/state-0.pages");
-        assert_eq!(
-            std::fs::read(root.path().join(&capture.page_log)).unwrap(),
-            expected_pages
-        );
-        let decoded: seedbox_artifacts::evidence::StateReport = serde_json::from_slice(
-            &std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(decoded, report);
-        let before =
-            std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap();
-        assert!(
-            publish_state(&mut driver, &names, root.path()).is_err(),
-            "publication must not clobber prior evidence"
-        );
-        assert_eq!(
-            std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap(),
-            before
-        );
-    }
+    assert!(matches!(
+        driver.step(Timestamp::from_nanos(10)).unwrap(),
+        StepOutcome::Finished { .. }
+    ));
+    let report = publish_state(&mut driver, &names, root.path()).unwrap();
+    let capture = &report.machines["../not-a-host-path"];
+    assert_eq!(capture.boot, 1);
+    assert_eq!(
+        capture.disposition,
+        seedbox_artifacts::evidence::StateDisposition::Exited { code: 0 }
+    );
+    assert_eq!(capture.page_bytes().unwrap(), 16);
+    assert_eq!(capture.page_log, "machines/state-0.pages");
+    assert_eq!(
+        std::fs::read(root.path().join(&capture.page_log)).unwrap(),
+        expected_pages
+    );
+    let decoded: seedbox_artifacts::evidence::StateReport = serde_json::from_slice(
+        &std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded, report);
+    let before =
+        std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap();
+    assert!(
+        publish_state(&mut driver, &names, root.path()).is_err(),
+        "publication must not clobber prior evidence"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join(seedbox_artifacts::evidence::STATE_REPORT)).unwrap(),
+        before
+    );
 }

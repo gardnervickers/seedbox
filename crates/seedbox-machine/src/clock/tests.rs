@@ -46,3 +46,14 @@ fn boot_command_line_appends_one_offset_argument() {
         format!("seedbox.clock_offset_ns={offset}")
     );
 }
+
+#[test]
+fn the_reserved_width_covers_the_widest_offset_argument() {
+    assert_eq!(
+        format!(" {REALTIME_OFFSET_ARGUMENT}{}", -REALTIME_OFFSET_BOUND_NS).len(),
+        REALTIME_OFFSET_ARGUMENT_BYTES
+    );
+    for seed in 0..4096 {
+        assert!(boot_command_line("x", seed).len() <= 1 + REALTIME_OFFSET_ARGUMENT_BYTES);
+    }
+}

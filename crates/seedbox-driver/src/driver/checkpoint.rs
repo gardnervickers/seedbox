@@ -10,7 +10,7 @@ mod controller_tests;
 /// An independently owned, stopped simulation capture.
 ///
 /// This retains all Driver-owned deterministic state,
-/// plus each machine's opaque snapshot. It does not retain worker threads,
+/// plus each machine's opaque snapshot. It does not retain execution
 /// contexts, factories, wall-clock anchors or any observation history, buffers,
 /// capacities, omissions or stream cursors. Restore starts a fresh, empty
 /// observer session; capture leaves the source session intact.
@@ -150,7 +150,7 @@ fn validate<T>(
     }
     for entry in machines {
         if entry.machine.is_none() || entry.rng.is_none() {
-            return Err("machine or RNG is still owned by a worker");
+            return Err("machine or RNG is still owned by a run");
         }
         // Paused, blocked and exited machines may lag shared time so far that
         // mapping `now` into their time base is no longer representable. No run
@@ -170,9 +170,7 @@ fn validate<T>(
 
 impl<M> Driver<M>
 where
-    M: Machine + Send + 'static,
-    M::Context: 'static,
-    M::Error: Send + 'static,
+    M: Machine,
 {
     /// Construct a capturable Driver using the existing deterministic seeded stream.
     ///
@@ -192,9 +190,8 @@ where
     pub fn new_seeded(
         start: Timestamp,
         quantum: Duration,
-        workers: usize,
         seed: u64,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+        context: impl FnOnce() -> Result<M::Context, M::Error>,
         oracle: MachineDefinition,
         machines: Vec<MachineDefinition>,
         prepared: Vec<SpawnDefinition>,
@@ -204,7 +201,6 @@ where
         Self::construct(
             start,
             quantum,
-            workers,
             SimulationRng::Seeded(SeededRng::new(seed)),
             context,
             oracle,
@@ -332,12 +328,11 @@ where
 
     /// Construct a new stopped Driver by borrowing an independently owned capture.
     ///
-    /// Worker count may differ from the source. Contexts are constructed as
-    /// for [`Self::new`]. Structural validation precedes all
+    /// The context is constructed as for [`Self::new`]. Structural validation precedes all
     /// callbacks. The restore callback is called once per snapshot in identity
     /// order and must reconstruct it without executing guest work or changing
     /// the capture. No initial machine factory is called and no seed is drawn.
-    /// On failure, temporary machines are dropped and workers are joined; the
+    /// On failure, temporary machines and the context are dropped; the
     /// source and capture are unchanged. Playback keeps its logical gates and
     /// pending step target but starts a new host pacing anchor.
     ///
@@ -346,7 +341,7 @@ where
     /// through the future factory. In particular, a stateful FnMut factory must
     /// be supplied at its captured logical construction position, not restarted
     /// at its original initial-call count. Contexts/factories must not introduce
-    /// host timing or worker identity into simulation behavior. These external
+    /// host timing into simulation behavior. These external
     /// obligations are not serialized or validated by this typed capture.
     /// Observation history is not restored. Service input-program cursors must be retained
     /// separately by the host; this operation alone is not checkpoint export.
@@ -355,14 +350,10 @@ where
     // failure cleanable without mutating a live Driver in place.
     pub fn from_checkpoint(
         checkpoint: &Checkpoint<M::Snapshot>,
-        workers: usize,
-        context: impl Fn() -> Result<M::Context, M::Error> + Send + Sync + 'static,
+        context: impl FnOnce() -> Result<M::Context, M::Error>,
         mut restore: impl FnMut(&M::Snapshot) -> Result<M, M::Error>,
         factory: impl FnMut(&MachineDefinition) -> Result<M, M::Error> + Send + 'static,
     ) -> Result<Self, Error<M::Error>> {
-        if workers == 0 {
-            return Err(Error::InvalidWorkerCount);
-        }
         validate(
             checkpoint.now,
             checkpoint.quantum_ns,
@@ -373,7 +364,7 @@ where
             &checkpoint.network,
         )
         .map_err(Error::InvalidCheckpoint)?;
-        let workers = Self::execution_workers(workers, context)?;
+        let host = Host::new(context)?;
         let machines = checkpoint
             .machines
             .iter()
@@ -410,7 +401,7 @@ where
                 properties: checkpoint.properties.clone(),
                 engine: None,
             },
-            workers,
+            host,
             observations: ObservationState::default(),
             playback: Playback::from_intent(checkpoint.playback.clone()),
             factory: Box::new(factory),

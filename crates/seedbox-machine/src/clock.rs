@@ -74,6 +74,12 @@ pub const REALTIME_OFFSET_BOUND_NS: i64 = 5_000_000;
 /// The kernel argument carrying a boot's realtime offset to the guest's init.
 pub const REALTIME_OFFSET_ARGUMENT: &str = "seedbox.clock_offset_ns=";
 
+/// Most bytes [`boot_command_line`] adds: a separating space and the
+/// argument with the widest offset (`-5000000`). A backend's base command
+/// line keeps this much of the kernel's limit free.
+pub const REALTIME_OFFSET_ARGUMENT_BYTES: usize =
+    " ".len() + REALTIME_OFFSET_ARGUMENT.len() + "-5000000".len();
+
 // Software that seeds randomness from the wall clock draws the same values
 // on every machine when they share one; the offset gives each boot its own
 // wall clock. It comes from the boot seed every backend already draws from

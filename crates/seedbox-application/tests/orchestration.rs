@@ -34,7 +34,6 @@ impl PreparationBackend for Preparer {
 
 struct Backend {
     profile: ExecutionProfile,
-    performance: BTreeMap<String, String>,
     extra_logs: BTreeMap<String, Vec<u8>>,
     report: ExecutionReport,
     calls: AtomicUsize,
@@ -45,16 +44,12 @@ impl ExecutionBackend for Backend {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
     }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        self.performance.clone()
-    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         for (digest, path) in request.artifacts {
             assert_eq!(ContentDigest::of(&fs::read(path)?), *digest);
         }
         assert_eq!(request.prepared.profile, self.profile);
-        assert_eq!(request.performance_parameters, &self.performance);
         fs::write(
             request.output.join("workload.console"),
             format!(
@@ -77,8 +72,8 @@ impl ExecutionBackend for Backend {
     }
 }
 
-/// The fixture's backend with only `execute` replaced, so profile and
-/// performance parameters stay those of the fixture.
+/// The fixture's backend with only `execute` replaced, so its profile stays
+/// that of the fixture.
 struct Executing<'a, F> {
     backend: &'a Backend,
     execute: F,
@@ -89,9 +84,6 @@ where
 {
     fn profile(&self) -> ExecutionProfile {
         self.backend.profile()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        self.backend.performance_parameters()
     }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         (self.execute)(request)
@@ -162,7 +154,6 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
-            performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
                 host_wait_ns: 0,
@@ -606,7 +597,6 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
                 seed: None,
                 cancellation: token,
                 wall_time_ns: None,
-                machine_workers: None,
             },
             &fixture.preparer,
             &fixture.backend,
@@ -881,40 +871,15 @@ fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
 }
 
 #[test]
-fn run_workers_change_capacity_without_changing_identity_and_quantum_is_retained() {
+fn quantum_is_retained_and_part_of_the_identity() {
     let mut fixture = Fixture::new();
     fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(2_500_000).unwrap();
-    fixture
-        .backend
-        .performance
-        .insert("SEEDBOX_MACHINE_WORKERS".into(), "1".into());
     let first = fixture.run();
-    fixture
-        .backend
-        .performance
-        .insert("SEEDBOX_MACHINE_WORKERS".into(), "4".into());
-    let parallel = fixture
-        .orchestrator
-        .run(
-            &fixture.simulation,
-            RunOptions {
-                machine_workers: Some(4),
-                ..Default::default()
-            },
-            &fixture.preparer,
-            &fixture.backend,
-        )
-        .unwrap();
-    assert_eq!(first.record.run_id, parallel.record.run_id);
-    assert_eq!(
-        parallel.record.performance_parameters["SEEDBOX_MACHINE_WORKERS"],
-        "4"
-    );
     let executor = fixture.executing(|request| {
         assert_eq!(request.quantum_ns.get(), 2_500_000);
         Ok(fixture.backend.report.clone())
     });
-    let replay = replay_retained(&fixture.orchestrator, &parallel.directory, &executor).unwrap();
+    let replay = replay_retained(&fixture.orchestrator, &first.directory, &executor).unwrap();
     assert_eq!(replay.comparison.status, ComparisonStatus::Match);
     fixture.simulation.simulator.quantum_ns = std::num::NonZeroU64::new(5_000_000).unwrap();
     assert_ne!(fixture.run().record.run_id, first.record.run_id);
@@ -968,21 +933,13 @@ fn allowed_crashes_and_progress_budget_reach_the_executor_on_run_and_replay() {
 }
 
 #[test]
-fn performance_changes_are_recorded_without_changing_identity_or_bypassing_comparison() {
+fn replay_keeps_the_identity_and_still_compares_witnesses() {
     let mut fixture = Fixture::new();
     let first = fixture.run();
-    fixture
-        .backend
-        .performance
-        .insert("SEEDBOX_WATCHDOG_MS".into(), "200".into());
     let replay = fixture.replay(&first);
     assert_eq!(replay.record.run_id, first.record.run_id);
-    assert_ne!(
-        replay.record.performance_parameters,
-        first.record.performance_parameters
-    );
     assert_eq!(replay.comparison.status, ComparisonStatus::Match);
-    fixture.backend.report.witness = Some(ContentDigest::of(b"bad performance optimization"));
+    fixture.backend.report.witness = Some(ContentDigest::of(b"bad optimization"));
     assert_eq!(
         fixture.replay(&first).comparison.status,
         ComparisonStatus::Mismatch
@@ -1126,9 +1083,6 @@ impl ExecutionBackend for AdmissionBackend<'_> {
     fn profile(&self) -> ExecutionProfile {
         self.backend.profile()
     }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        self.backend.performance_parameters()
-    }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         let call = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
         if call == self.fail_at {
@@ -1250,9 +1204,6 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
         fn profile(&self) -> ExecutionProfile {
             self.0.backend.profile()
         }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
         fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
             vec![
                 inputs.executable().unwrap(),
@@ -1295,9 +1246,6 @@ fn runs_with_an_executables_directory_share_one_engine_path() {
     impl ExecutionBackend for Engines<'_> {
         fn profile(&self) -> ExecutionProfile {
             self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
         }
         fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
             let engine = &request.artifacts[request.prepared.executable().unwrap()];
@@ -1635,9 +1583,6 @@ fn machines_a_run_spawns_are_sealed_into_its_identity_and_replayed() {
     impl ExecutionBackend for Spawning<'_> {
         fn profile(&self) -> ExecutionProfile {
             self.0.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.performance_parameters()
         }
         fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
             if let Some(spawner) = request.spawner {

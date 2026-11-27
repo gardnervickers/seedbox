@@ -114,22 +114,22 @@ fn occurrences(bytes: &[u8], marker: &[u8]) -> usize {
         .count()
 }
 
-/// Same input with 1 and 4 workers: identical guest replies and raw witness.
+/// Same input twice: identical guest replies and raw witness.
 pub async fn controller_repeat(backend: CpuBackend) {
     native_case(|owner| Box::pin(async move {
         let session = owner.session(backend);
         let request = request(session);
-        let first = session.submit(request.clone(), 1).await;
+        let first = session.submit(request.clone()).await;
         session.worker(&first).await;
-        let first_witness = session.complete(&first, false, 1, SEED).await.unwrap();
+        let first_witness = session.complete(&first, false, SEED).await.unwrap();
         let first_output = output(session, &first).await;
         let first_replies = replies(&first_output);
         verify_replies(&first_replies, &[1,2,3], &session.launch_request(&first));
         assert_eq!(occurrences(&first_output, b"ORACLE_CONTROL_DONE"), 1);
-        let second = session.submit(request, 4).await;
+        let second = session.submit(request).await;
         assert_ne!(first, second);
         session.worker(&second).await;
-        let second_witness = session.complete(&second, false, 4, SEED).await.unwrap();
+        let second_witness = session.complete(&second, false, SEED).await.unwrap();
         let second_output = output(session, &second).await;
         let second_replies = replies(&second_output);
         verify_replies(&second_replies, &[1,2,3], &session.launch_request(&second));
@@ -139,7 +139,7 @@ pub async fn controller_repeat(backend: CpuBackend) {
         let compared = session.client.compare(&first, &second).await.unwrap();
         assert_eq!(compared.status, ComparisonStatus::Match);
         assert_eq!(compared.witness_matches, Some(true));
-        eprintln!("native controller repeat: backend={} distinct_ids=true actual_workers=1/4 raw_equal=true replies_equal=true witness={first_witness}", label(backend));
+        eprintln!("native controller repeat: backend={} distinct_ids=true raw_equal=true replies_equal=true witness={first_witness}", label(backend));
     })).await;
 }
 
@@ -149,9 +149,9 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
     native_case(|owner| Box::pin(async move {
         let session = owner.session(backend);
         let request = request(session);
-        let baseline = session.submit(request.clone(), 1).await;
+        let baseline = session.submit(request.clone()).await;
         session.worker(&baseline).await;
-        let uninterrupted = session.complete(&baseline, false, 1, SEED).await.unwrap();
+        let uninterrupted = session.complete(&baseline, false, SEED).await.unwrap();
         let baseline_output = output(session, &baseline).await;
         let baseline_replies = replies(&baseline_output);
         verify_replies(&baseline_replies, &[1,2,3], &session.launch_request(&baseline));
@@ -160,7 +160,7 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         let wake = admitted + SLEEP_NS;
         let mut capture_request = request;
         capture_request.options.start_paused = true;
-        let source = session.submit(capture_request, 1).await;
+        let source = session.submit(capture_request).await;
         session.worker(&source).await;
         session.control(&source, "source-paused", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let partial = loop {
@@ -202,17 +202,15 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         };
         assert!(position.completed_rounds > 0);
         assert!(position.simulated_time_ns >= target && position.simulated_time_ns < wake);
-        let mut exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
+        let exported = session.client.checkpoint_definition(&source, "saved").await.unwrap();
         let InputSource::Resolved { definition } = &exported.spec.inputs else { panic!("resolved export required") };
         assert!(definition.simulator.oracle_control);
         let seedbox_spec::definition::Start::Checkpoint { assets, .. } = &definition.start else { panic!("checkpoint export required") };
         assert!(!assets.is_empty());
         session.client.stop(&source).await.unwrap();
-        session.complete(&source, true, 1, SEED).await;
+        session.complete(&source, true, SEED).await;
         session.client.delete(&source).await.unwrap();
         assert!(!session.execution_root.join("runs").join(source.as_str()).exists());
-        session.workers.store(4, Ordering::SeqCst);
-        exported.options.machine_workers = Some(4);
         let restored = session.client.submit_definition(&serde_json::to_value(exported).unwrap(), true).await.unwrap().metadata.id;
         session.submitted += 1;
         assert_ne!(restored, source);
@@ -228,7 +226,7 @@ pub async fn controller_checkpoint(backend: CpuBackend) {
         assert_eq!(paused.position, position);
         eprintln!("native controller capture: backend={} oracle={ORACLE} before_wake=true pending_sleep_id=2 captured={position:?} restored={:?}", label(backend), paused.position);
         session.control(&restored, "continue", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let continued = session.complete(&restored, false, 4, SEED).await.unwrap();
+        let continued = session.complete(&restored, false, SEED).await.unwrap();
         let continued_output = output(session, &restored).await;
         let continued_replies = replies(&continued_output);
         verify_replies(&continued_replies, &[2,3], &launch);

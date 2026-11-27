@@ -52,7 +52,7 @@ fn internal(d: &Driver<Mock>) -> (Vec<u8>, Playback) {
         execution,
         playback,
         observations,
-        workers: _,
+        host: _,
         factory: _,
     } = d;
     let ExecutionState {
@@ -754,59 +754,57 @@ fn sequential_same_time_entries_apply_but_prequeued_fifo_still_rejects_reboot() 
 }
 
 #[test]
-fn start_paused_authored_hold_and_live_replay_have_identical_events_workers_one_four() {
-    for workers in [1, 4] {
-        let mut source = build(
-            (0..3).map(|i| spec(i, true, vec![])).collect(),
-            vec![],
-            true,
-        );
-        let c = source.checkpoint().unwrap();
-        let mut paused = restore(&c, workers);
-        let mut replay = restore(&c, workers);
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
-            .unwrap();
-        for d in [&mut paused, &mut replay] {
-            d.schedule(at(0), key("authored"), throttle()).unwrap();
-        }
-        assert!(matches!(due(&mut paused), DueOutcome::BeforeFault { .. }));
-        assert!(matches!(
-            paused.with_barrier(|b| b.prepare_input(key("live"), pause())),
-            Err(Error::BeforeFault)
-        ));
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        paused.step(at(0)).unwrap();
-        due(&mut replay);
-        assert_eq!(paused.position(), replay.position());
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
-            .unwrap();
-        let p = prepare(&mut paused, "live", pause());
-        let q = prepare(&mut replay, "live", pause());
-        assert_eq!(p, q);
-        assert!(matches!(
-            commit(&mut paused, &p),
-            DueOutcome::BeforeFault { .. }
-        ));
-        assert!(matches!(
-            commit(&mut replay, &q),
-            DueOutcome::Applied { .. }
-        ));
-        paused
-            .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        paused.step(at(0)).unwrap();
-        assert_eq!(advance(&mut paused, 30), advance(&mut replay, 30));
-        assert_eq!(states(&paused), states(&replay));
-        assert_eq!(paused.position(), replay.position());
+fn start_paused_authored_hold_and_live_replay_have_identical_events() {
+    let mut source = build(
+        (0..3).map(|i| spec(i, true, vec![])).collect(),
+        vec![],
+        true,
+    );
+    let c = source.checkpoint().unwrap();
+    let mut paused = restore(&c);
+    let mut replay = restore(&c);
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
+        .unwrap();
+    for d in [&mut paused, &mut replay] {
+        d.schedule(at(0), key("authored"), throttle()).unwrap();
     }
+    assert!(matches!(due(&mut paused), DueOutcome::BeforeFault { .. }));
+    assert!(matches!(
+        paused.with_barrier(|b| b.prepare_input(key("live"), pause())),
+        Err(Error::BeforeFault)
+    ));
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    paused.step(at(0)).unwrap();
+    due(&mut replay);
+    assert_eq!(paused.position(), replay.position());
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Paused))
+        .unwrap();
+    let p = prepare(&mut paused, "live", pause());
+    let q = prepare(&mut replay, "live", pause());
+    assert_eq!(p, q);
+    assert!(matches!(
+        commit(&mut paused, &p),
+        DueOutcome::BeforeFault { .. }
+    ));
+    assert!(matches!(
+        commit(&mut replay, &q),
+        DueOutcome::Applied { .. }
+    ));
+    paused
+        .with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    paused.step(at(0)).unwrap();
+    assert_eq!(advance(&mut paused, 30), advance(&mut replay, 30));
+    assert_eq!(states(&paused), states(&replay));
+    assert_eq!(paused.position(), replay.position());
 }
 
 #[test]
-fn unarmed_paused_hold_roundtrips_codec_and_releases_once_workers_one_four() {
+fn unarmed_paused_hold_roundtrips_codec_and_releases_once() {
     let mut d = ready();
     d.with_barrier(|b| b.set_rate(PlaybackRate::Paused))
         .unwrap();
@@ -820,19 +818,17 @@ fn unarmed_paused_hold_roundtrips_codec_and_releases_once_workers_one_four() {
     let expected_states = states(&d);
     drop(d);
     let c = decode(&encoded, &store);
-    for workers in [1, 4] {
-        let mut d = restore(&c, workers);
-        assert_eq!(d.playback.held.as_ref(), Some(record(&p)));
-        assert!(!d.playback.before_next);
-        assert!(matches!(
-            d.step(at(100)).unwrap(),
-            StepOutcome::BeforeFault { .. }
-        ));
-        d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        assert_eq!(advance(&mut d, 30), expected);
-        assert_eq!(states(&d), expected_states);
-    }
+    let mut d = restore(&c);
+    assert_eq!(d.playback.held.as_ref(), Some(record(&p)));
+    assert!(!d.playback.before_next);
+    assert!(matches!(
+        d.step(at(100)).unwrap(),
+        StepOutcome::BeforeFault { .. }
+    ));
+    d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    assert_eq!(advance(&mut d, 30), expected);
+    assert_eq!(states(&d), expected_states);
 }
 
 #[test]
@@ -932,7 +928,6 @@ fn spy() -> (Driver<Spy>, BudgetCalls) {
     let restored = calls.clone();
     let d = Driver::<Spy>::from_checkpoint(
         &c,
-        4,
         || Ok(Context(None)),
         move |s| {
             Ok(Spy {

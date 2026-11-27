@@ -106,6 +106,16 @@ use qemu::Process;
 
 /// x86 Linux `COMMAND_LINE_SIZE`, including the terminating NUL.
 const COMMAND_LINE_SIZE: usize = 2048;
+/// Width of each boot's entropy argument (` seedbox.entropy=` and 16 hex
+/// digits).
+const ENTROPY_ARGUMENT_BYTES: usize = " seedbox.entropy=".len() + 16;
+/// Room each boot's kernel command line keeps for the arguments appended per
+/// boot (see `qemu::boot_command_line`): its entropy and its widest realtime
+/// offset.
+const PER_BOOT_ARGUMENT_BYTES: usize =
+    ENTROPY_ARGUMENT_BYTES + seedbox_machine::clock::REALTIME_OFFSET_ARGUMENT_BYTES;
+/// Capacity of a manifest's command line, including the terminating NUL.
+const COMMAND_LINE_CAPACITY: usize = COMMAND_LINE_SIZE - PER_BOOT_ARGUMENT_BYTES;
 /// Size of a [`Boot::Program`] image: one 64 KiB BIOS ROM.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) const PROGRAM_BYTES: usize = 64 * 1024;
@@ -446,10 +456,10 @@ impl TcgMachine {
         };
         // x86 COMMAND_LINE_SIZE includes its trailing NUL; Linux would
         // silently truncate a longer line copied from the boot parameters.
-        if command_line.contains('\0') || command_line.len() >= COMMAND_LINE_SIZE {
+        if command_line.contains('\0') || command_line.len() >= COMMAND_LINE_CAPACITY {
             return Err(Error(format!(
                 "TCG kernel command line must contain no NUL and fit in {} bytes",
-                COMMAND_LINE_SIZE - 1
+                COMMAND_LINE_CAPACITY - 1
             )));
         }
         // TCG needs no application instrumentation. Packaging borrows the
@@ -711,7 +721,7 @@ impl TcgMachine {
                     "{command_line} seedbox.control={}",
                     u8::from(policy.controller.as_deref() == Some(name))
                 );
-                if next.len() >= COMMAND_LINE_SIZE {
+                if next.len() >= COMMAND_LINE_CAPACITY {
                     return Err(Error("TCG configured controller argument exceeds kernel command-line capacity; shorten the base command line".into()));
                 }
                 *command_line = next;

@@ -618,7 +618,7 @@ fn capture_boundaries_lifecycle_boot_and_network_reject_source_impossible_states
             ..Fixture::default()
         },
         Fixture {
-            command: "x".repeat(2048),
+            command: "x".repeat(1982),
             ..Fixture::default()
         },
         Fixture {
@@ -637,7 +637,9 @@ fn capture_boundaries_lifecycle_boot_and_network_reject_source_impossible_states
         assert!(Snapshot::read_from(&mut &f.wire().0[..], &limits()).is_err());
     }
     let (wire, _) = Fixture {
-        command: "x".repeat(2047),
+        // 2047 kernel bytes less the boot's 33-byte entropy and 33-byte
+        // realtime offset arguments.
+        command: "x".repeat(1981),
         ..Fixture::default()
     }
     .wire();
