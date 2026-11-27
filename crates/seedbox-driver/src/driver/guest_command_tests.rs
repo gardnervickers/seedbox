@@ -325,11 +325,43 @@ fn a_heal_queued_behind_its_skew_survives_a_checkpoint() {
     advance(&mut d, 12);
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     drop(d);
-    let mut d = restore(&decode(&bytes, &store), 1);
+    let mut d = restore(&decode(&bytes, &store));
     let events = advance(&mut d, 100);
     assert_eq!(settlement(&events, "skew").0, SettlementStatus::Applied);
     assert_eq!(settlement(&events, "heal").0, SettlementStatus::Applied);
     assert_eq!(steps(&d), [7, -7]);
+}
+
+/// A heal released by its step's acknowledgement is sent one floor after
+/// it. A checkpoint taken in between, while the heal is dispatched but not
+/// yet delivered, restores to the same continuation.
+#[test]
+fn a_heal_released_but_not_yet_sent_survives_a_checkpoint() {
+    let mut d = driver(vec![]);
+    input(&mut d, 10, "skew", skew(7));
+    input(&mut d, 11, "heal", heal("skew"));
+    advance(&mut d, 20);
+    assert_eq!(steps(&d), [7]);
+    let released = d.execution.events.iter().any(|(&at, items)| {
+        at > d.now()
+            && items.iter().any(|item| {
+                matches!(
+                    item,
+                    Scheduled::Control(control::Event::Plan(
+                        crate::oracle::service::Plan::Effect { .. }
+                    ))
+                )
+            })
+    });
+    assert!(released, "the heal is dispatched for a later time");
+    let (bytes, store) = artifact(d.checkpoint().unwrap());
+    reference_observer_session(&mut d);
+    let expected = advance(&mut d, 100);
+    assert_eq!(settlement(&expected, "heal").0, SettlementStatus::Applied);
+    assert_eq!(steps(&d), [7, -7]);
+    let mut restored = restore(&decode(&bytes, &store));
+    assert_eq!(advance(&mut restored, 100), expected);
+    assert_eq!(states(&restored), states(&d));
 }
 
 /// A skew and the heal queued behind it, both for a rebooted machine that
@@ -342,7 +374,6 @@ fn an_undelivered_skew_takes_its_queued_heal_with_it() {
     let mut d = super::fixture::driver(
         at(0),
         Duration::from_millis(100),
-        1,
         SeededRng::new(51),
         || Ok(Context(None)),
         || {

@@ -66,7 +66,6 @@ pub(crate) struct Rule {
 /// Driver configuration and host faults of one run.
 #[derive(Clone, Debug)]
 pub(crate) struct Scenario {
-    pub(crate) workers: usize,
     pub(crate) seed: u64,
     pub(crate) network: NetworkConfig,
     pub(crate) rules: Vec<Rule>,
@@ -74,17 +73,20 @@ pub(crate) struct Scenario {
     pub(crate) server_disk: bool,
     /// Simulated time at which the run stops if the client has not exited.
     pub(crate) limit: u64,
+    /// Machines that honour timed inboxes take frames inside their runs
+    /// (the Driver's default).
+    pub(crate) timed: bool,
 }
 
 impl Default for Scenario {
     fn default() -> Self {
         Self {
-            workers: 1,
             seed: 1,
             network: NetworkConfig::default(),
             rules: Vec::new(),
             server_disk: false,
             limit: LIMIT,
+            timed: true,
         }
     }
 }
@@ -106,6 +108,8 @@ pub(crate) struct Run {
     pub(crate) scheduled: Vec<(&'static str, u64)>,
     /// The last step outcome.
     pub(crate) outcome: StepOutcome,
+    /// Frames machines took inside their runs (timed inboxes).
+    timed_taken: u64,
 }
 
 /// A rule's key as an input key; keys are fixed test literals.
@@ -146,7 +150,6 @@ where
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         QUANTUM,
-        scenario.workers,
         SeededRng::new(scenario.seed),
         || Ok(()),
         oracle,
@@ -157,6 +160,7 @@ where
     )
     .expect("driver construction");
     driver.set_frame_capacity(usize::MAX);
+    driver.set_timed_inbox(scenario.timed);
     let ids: Vec<MachineId> = driver
         .with_barrier(|barrier| Ok(barrier.machines().map(|(id, _)| id).collect()))
         .unwrap();
@@ -171,6 +175,7 @@ where
         outcome: StepOutcome::BarrierReached {
             at: Timestamp::from_nanos(0),
         },
+        timed_taken: 0,
     };
     let mut pending: Vec<Rule> = scenario.rules.clone();
     // Whether each machine has published TCP data, for `When::TcpData`.
@@ -249,6 +254,7 @@ where
             )
         });
     }
+    run.timed_taken = driver.timed_frames_taken();
     run
 }
 
@@ -337,10 +343,10 @@ pub(crate) fn check(run: &Run) -> Transcript {
     transcript
 }
 
-/// Runs of one scenario under different worker counts are identical: every
-/// event in order, all application output, the barriers at which rules were
-/// scheduled and the final outcome.
-pub(crate) fn check_worker_invariance(one: &Run, other: &Run) {
+/// Two runs of one scenario are identical: every event in order, all
+/// application output, the barriers at which rules were scheduled and the
+/// final outcome.
+pub(crate) fn check_same_runs(one: &Run, other: &Run) {
     assert_eq!(one.ids, other.ids);
     assert_eq!(one.outcome, other.outcome);
     assert_eq!(one.scheduled, other.scheduled);
@@ -710,9 +716,9 @@ pub(crate) fn check_disk_crash(run: &Run) {
     );
 }
 
-// Shared scenarios. Each runs `runner` with one and four workers, requires
-// identical runs and applies the backend-neutral assertions; backend entries
-// supply only the runner that builds their machines.
+// Shared scenarios. Each runs `runner` with and without timed inboxes,
+// requires identical runs and applies the backend-neutral assertions; backend
+// entries supply only the runner that builds their machines.
 const MS: u64 = 1_000_000;
 
 fn after_client(key: &'static str, text: &'static str, after: u64, action: Action) -> Rule {
@@ -735,18 +741,20 @@ fn after_client_data(key: &'static str, after: u64, action: Action) -> Rule {
     }
 }
 
-/// Run `scenario` with one and four workers; the runs must be identical.
+/// Run `scenario`, and again without timed inboxes when its machines took
+/// frames inside their runs; the runs must be identical.
 fn both(runner: &impl Fn(&Scenario) -> Run, scenario: Scenario) -> Run {
-    let one = runner(&Scenario {
-        workers: 1,
-        ..scenario.clone()
-    });
-    let four = runner(&Scenario {
-        workers: 4,
-        ..scenario
-    });
-    check_worker_invariance(&one, &four);
-    one
+    let run = runner(&scenario);
+    // A backend without timed inboxes (TCG) would run the same schedule.
+    if run.timed_taken > 0 {
+        let untimed = runner(&Scenario {
+            timed: false,
+            ..scenario
+        });
+        assert_eq!(untimed.timed_taken, 0);
+        check_same_runs(&run, &untimed);
+    }
+    run
 }
 
 /// The clean link schedules each peer-addressed frame once, FIFO in each direction.
@@ -1090,14 +1098,6 @@ mod tests {
         let pause = run.applied_index("pause-server").unwrap();
         assert!(run.frames_between(1, pause, run.events.len()).is_empty());
         assert!(run.client_exit_at().unwrap() > seen);
-        let wide = scripted(
-            &Scenario {
-                workers: 4,
-                ..scenario
-            },
-            false,
-        );
-        check_worker_invariance(&run, &wide);
     }
 
     /// A client TCP data segment, client to server, with `sequence`.

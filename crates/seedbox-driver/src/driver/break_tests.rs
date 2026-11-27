@@ -139,13 +139,12 @@ fn build_with(
     let network = if networked {
         crate::driver::NetworkConfig::new(Duration::from_nanos(5), Duration::ZERO, 0).unwrap()
     } else {
-        crate::driver::NetworkConfig::default()
+        fixture::floor(Duration::from_nanos(10))
     };
     let mut scripts = vec![oracle, worker].into_iter();
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         definition(0),
@@ -230,7 +229,8 @@ fn declared_hit_suspends_until_the_oracle_resumes_it() {
         .iter()
         .filter(|(_, _, held)| *held)
         .all(|(now, upto, _)| now == upto));
-    assert_eq!(worker.resumed, [50]);
+    // The resume call at 50 is admitted one floor later.
+    assert_eq!(worker.resumed, [60]);
     // Multi-shot: the second write of the name suspends it again.
     assert!(worker.held);
     let events = driver.drain_events();
@@ -247,7 +247,7 @@ fn declared_hit_suspends_until_the_oracle_resumes_it() {
                 }
             ),
             (
-                50,
+                60,
                 EventKind::BreakEnded {
                     break_id: 1,
                     reason: BreakEnd::Resumed
@@ -293,7 +293,38 @@ fn a_suspended_receiver_admits_frames_at_arrival_without_a_budget() {
         .iter()
         .filter(|(_, _, held)| *held)
         .all(|(now, upto, _)| now == upto));
-    assert_eq!(worker.resumed, [50]);
+    assert_eq!(worker.resumed, [55]);
+}
+
+/// A machine is held from its hit, not from the commit that carries the
+/// hit: a frame arriving in the round that wrote the hit is admitted at its
+/// arrival without a budget too.
+#[test]
+fn a_frame_arriving_in_the_round_of_the_hit_is_admitted_without_a_budget() {
+    let frame = Response::TransmitFrame {
+        bytes: vec![2, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 1, 0x88, 0xb5, 9],
+    };
+    // Rounds are one latency (5 ns) long. The hit at 31 and the arrival at
+    // 33 fall in the round from 30 to 35, which commits the hit at 35.
+    let mut driver = build_with(
+        vec![
+            (1, call(1, DECLARE)),
+            (28, frame),
+            (50, call(2, r#""op":"resume_break","break_id":1"#)),
+        ],
+        vec![(31, hit("leader"))],
+        true,
+    );
+    run_to(&mut driver, 100);
+    let worker = guest(&driver, 1);
+    assert_eq!(worker.frames, [33]);
+    assert!(worker.runs.contains(&(33, 33, true)));
+    assert!(worker
+        .runs
+        .iter()
+        .filter(|(_, _, held)| *held)
+        .all(|(now, upto, _)| now == upto));
+    assert_eq!(worker.resumed, [55]);
 }
 
 #[test]
@@ -348,10 +379,10 @@ fn a_waiter_times_out_and_a_later_hit_is_queued_for_the_next_wait() {
     run_to(&mut driver, 100);
     let r = replies(&driver);
     assert_eq!(r[1]["result"], json!({}));
-    // Admitted at the commit barrier after the call, then 10 ns.
-    assert_eq!(r[1]["replied_at_ns"], 20);
+    // Admitted one floor after the call, then 10 ns.
+    assert_eq!(r[1]["replied_at_ns"], 22);
     assert_eq!(r[2]["result"]["break_id"], 1);
-    assert_eq!(r[2]["replied_at_ns"], 40);
+    assert_eq!(r[2]["replied_at_ns"], 50);
 }
 
 #[test]
@@ -392,13 +423,12 @@ fn undeclared_names_and_engines_without_breakpoints_never_suspend() {
     let mut driver = Driver::new_seeded(
         at(0),
         Duration::from_nanos(10),
-        1,
         7,
         || Ok(()),
         fixture::definition(0),
         vec![fixture::definition(1)],
         vec![],
-        crate::driver::NetworkConfig::default(),
+        fixture::floor(Duration::from_nanos(10)),
         move |_| {
             Ok(Guest {
                 script: scripts.next().unwrap().into(),
@@ -419,7 +449,6 @@ fn declarations_reach_machines_and_survive_a_checkpoint() {
     let checkpoint = driver.checkpoint().unwrap();
     let restored = Driver::<Guest>::from_checkpoint(
         &checkpoint,
-        1,
         || Ok(()),
         |saved| Ok(saved.clone()),
         |_| unreachable!("no spawns"),
@@ -478,7 +507,7 @@ fn a_block_request_hit_suspends_until_resumed() {
         .iter()
         .filter(|(_, _, held)| *held)
         .all(|(now, upto, _)| now == upto));
-    assert_eq!(worker.resumed, [50]);
+    assert_eq!(worker.resumed, [60]);
     assert!(!worker.held);
     let events = driver.drain_events();
     assert_eq!(
@@ -494,7 +523,7 @@ fn a_block_request_hit_suspends_until_resumed() {
                 }
             ),
             (
-                50,
+                60,
                 EventKind::BreakEnded {
                     break_id: 1,
                     reason: BreakEnd::Resumed
@@ -526,13 +555,12 @@ fn block_request_breakpoints_need_an_engine_with_breakpoints() {
         let mut driver = Driver::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            1,
             7,
             || Ok(()),
             fixture::definition(0),
             vec![fixture::definition(1)],
             vec![],
-            crate::driver::NetworkConfig::default(),
+            fixture::floor(Duration::from_nanos(10)),
             move |_| {
                 Ok(Guest {
                     script: scripts.next().unwrap().into(),
@@ -593,12 +621,13 @@ fn a_block_request_hit_reached_on_resume_suspends_at_once() {
             ),
         ],
     );
-    run_to(&mut driver, 60);
+    // The resume at 50 is admitted at 60 and the wait at 51 at 61.
+    run_to(&mut driver, 70);
     let r = replies(&driver);
     assert_eq!(r[3]["result"], json!({}));
     assert_eq!(
         r[4]["result"],
-        json!({"break_id":2,"source":"block_request","machine":"fixture-1","boot":0,"name":"block_request","request":"write","nth":1,"at_ns":50})
+        json!({"break_id":2,"source":"block_request","machine":"fixture-1","boot":0,"name":"block_request","request":"write","nth":1,"at_ns":60})
     );
     // Suspended again at the release: still no checkpoint.
     assert!(matches!(
@@ -606,7 +635,7 @@ fn a_block_request_hit_reached_on_resume_suspends_at_once() {
         Err(Error::InvalidCheckpoint(_))
     ));
     run_to(&mut driver, 100);
-    assert_eq!(guest(&driver, 1).resumed, [50, 80]);
+    assert_eq!(guest(&driver, 1).resumed, [60, 90]);
     assert!(!guest(&driver, 1).held);
     let events = driver.drain_events();
     assert_eq!(
@@ -622,14 +651,14 @@ fn a_block_request_hit_reached_on_resume_suspends_at_once() {
                 }
             ),
             (
-                50,
+                60,
                 EventKind::BreakEnded {
                     break_id: 1,
                     reason: BreakEnd::Resumed
                 }
             ),
             (
-                50,
+                60,
                 EventKind::BreakHit {
                     break_id: 2,
                     machine: MachineId(1),
@@ -638,7 +667,7 @@ fn a_block_request_hit_reached_on_resume_suspends_at_once() {
                 }
             ),
             (
-                80,
+                90,
                 EventKind::BreakEnded {
                     break_id: 2,
                     reason: BreakEnd::Resumed
@@ -722,7 +751,6 @@ fn a_host_hit_waits_for_the_next_wait_break_across_a_checkpoint() {
     let checkpoint = driver.checkpoint().unwrap();
     let mut restored = Driver::<Guest>::from_checkpoint(
         &checkpoint,
-        1,
         || Ok(()),
         |saved| Ok(saved.clone()),
         |_| unreachable!("no spawns"),
@@ -761,7 +789,7 @@ fn host_and_machine_hits_are_returned_in_break_id_order() {
         r[2]["result"],
         json!({"break_id":2,"source":"host","name":"leader","at_ns":30})
     );
-    assert_eq!(guest(&driver, 1).resumed, [50]);
+    assert_eq!(guest(&driver, 1).resumed, [60]);
 }
 
 #[test]

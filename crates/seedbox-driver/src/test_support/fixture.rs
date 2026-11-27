@@ -312,27 +312,25 @@ pub fn machine(name: usize, ops: &[Op]) -> TestMachine {
 }
 
 // The first program is explicitly the oracle in these scheduler fixtures.
-pub fn configured(workers: usize, machines: Vec<TestMachine>) -> Driver<TestMachine> {
+pub fn configured(machines: Vec<TestMachine>) -> Driver<TestMachine> {
     let definitions: Vec<_> = (0..machines.len())
         .map(|index| definition(index.to_string()))
         .collect();
     Driver::new(
         at(0),
         Duration::from_nanos(10),
-        workers,
         TestRng(1),
         || Ok(()),
         definitions[0].clone(),
         definitions[1..].to_vec(),
         Vec::new(),
-        crate::driver::NetworkConfig::default(),
+        super::floor(Duration::from_nanos(10)),
         move |definition| Ok(machines[definition.name.parse::<usize>().unwrap()].clone()),
     )
     .unwrap()
 }
-pub fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
+pub fn controlled(programs: &[&[Op]]) -> Driver<TestMachine> {
     configured(
-        workers,
         programs
             .iter()
             .enumerate()
@@ -341,7 +339,7 @@ pub fn controlled(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
     )
 }
 // Lifecycle targets may exit and reboot while a separate parked oracle lives.
-pub fn controlled_targets(workers: usize, programs: &[&[Op]]) -> Driver<TestMachine> {
+pub fn controlled_targets(programs: &[&[Op]]) -> Driver<TestMachine> {
     let mut machines = vec![machine(usize::MAX, &[Op::Park])];
     machines.extend(
         programs
@@ -349,7 +347,7 @@ pub fn controlled_targets(workers: usize, programs: &[&[Op]]) -> Driver<TestMach
             .enumerate()
             .map(|(id, ops)| machine(id, ops)),
     );
-    let mut driver = configured(workers, machines);
+    let mut driver = configured(machines);
     driver
         .with_barrier(|barrier| {
             let oracle = barrier.machines().next().unwrap().0;
@@ -386,6 +384,16 @@ pub fn held(outcome: &StepOutcome) -> Option<(Timestamp, FaultAction, MachineId)
             _ => None,
         },
         _ => None,
+    }
+}
+/// Step toward `upto` until the run finishes, blocks or stops, or `upto` is
+/// reached; returns the last outcome.
+pub fn run_to(driver: &mut Driver<TestMachine>, upto: u64) -> StepOutcome {
+    loop {
+        match driver.step(at(upto)).unwrap() {
+            StepOutcome::BarrierReached { at: reached } if reached < at(upto) => {}
+            outcome => return outcome,
+        }
     }
 }
 pub fn status(driver: &mut Driver<TestMachine>) -> PlaybackStatus {

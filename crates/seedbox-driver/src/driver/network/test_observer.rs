@@ -33,6 +33,7 @@ impl ObservedNetwork {
             from,
             sent,
             bytes,
+            &|_| 0,
             &mut self.observations,
         )
     }

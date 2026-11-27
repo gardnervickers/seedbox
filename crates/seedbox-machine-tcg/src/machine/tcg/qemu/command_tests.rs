@@ -2,6 +2,10 @@ use super::super::{Boot, Initramfs, Manifest};
 use std::ffi::OsStr;
 
 fn arguments(boot: Boot) -> (tempfile::TempDir, Vec<String>) {
+    seeded_arguments(boot, 7)
+}
+
+fn seeded_arguments(boot: Boot, seed: u64) -> (tempfile::TempDir, Vec<String>) {
     let directory = tempfile::tempdir().unwrap();
     let manifest = Manifest {
         boot,
@@ -14,7 +18,7 @@ fn arguments(boot: Boot) -> (tempfile::TempDir, Vec<String>) {
         &manifest,
         directory.path(),
         false,
-        7,
+        seed,
         None,
     )
     .unwrap();
@@ -55,7 +59,10 @@ fn linux_boots_owned_inputs_on_the_fixed_x86_microvm_board() {
         value(&arguments, "-rtc"),
         ["base=1970-01-01T00:00:00,clock=vm"]
     );
-    assert_eq!(value(&arguments, "-append"), ["console=ttyS0"]);
+    assert_eq!(
+        value(&arguments, "-append"),
+        ["console=ttyS0 seedbox.entropy=0000000000000007"]
+    );
     for (flag, name, bytes) in [
         ("-bios", "firmware", [3; 4]),
         ("-kernel", "kernel", [1; 4]),
@@ -77,6 +84,40 @@ fn linux_boots_owned_inputs_on_the_fixed_x86_microvm_board() {
         .iter()
         .any(|argument| argument.starts_with("loader")));
     assert!(!arguments.iter().any(|argument| argument == "-incoming"));
+}
+
+fn linux(command_line: &str) -> Boot {
+    Boot::Linux {
+        kernel: vec![1; 4].into(),
+        initramfs: vec![2; 4].into(),
+        firmware: vec![3; 4].into(),
+        command_line: command_line.into(),
+        epoch_seconds: 0,
+    }
+}
+
+/// The board gives the guest no seeded RNG: before the boot seed reached the
+/// kernel command line, every seed booted byte-identical guest entropy.
+#[test]
+fn each_boot_seed_reaches_the_guest_kernel_command_line() {
+    let append = |seed| {
+        let (_directory, arguments) = seeded_arguments(linux("console=ttyS0"), seed);
+        value(&arguments, "-append")[0].to_owned()
+    };
+    assert_eq!(append(7), append(7));
+    assert_ne!(append(7), append(8));
+    assert_eq!(
+        append(u64::MAX),
+        "console=ttyS0 seedbox.entropy=ffffffffffffffff"
+    );
+    // The manifest reserves exactly the argument's width, so the longest
+    // accepted base line still fits the kernel's 2047 bytes.
+    let longest = "x".repeat(super::super::COMMAND_LINE_CAPACITY - 1);
+    let (_directory, arguments) = seeded_arguments(linux(&longest), 0);
+    assert_eq!(
+        value(&arguments, "-append")[0].len(),
+        super::super::COMMAND_LINE_SIZE - 1
+    );
 }
 
 #[test]

@@ -8,10 +8,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub mod fixture;
 pub mod native;
 
+pub use crate::driver::stops::StopPolicy;
+
 /// A key unique within this test process, so it is never live twice.
 pub fn auto_key() -> InputKey {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     InputKey::new(format!("auto-{}", NEXT.fetch_add(1, Ordering::Relaxed))).unwrap()
+}
+
+/// A network floor of one quantum, at most the longest floor (an hour), and
+/// nothing else. What follows from an output is due one floor after it, and
+/// every runnable machine bounds a round by it, so fixtures whose scripts
+/// are timed in nanoseconds use this instead of the default millisecond:
+/// a busy round still ends one quantum after the earliest machine's start,
+/// and consequences come one quantum after their output.
+pub fn floor(quantum: std::time::Duration) -> crate::driver::NetworkConfig {
+    let latency = quantum.min(std::time::Duration::from_secs(3600));
+    crate::driver::NetworkConfig::new(latency, std::time::Duration::ZERO, 0).unwrap()
+}
+
+/// A limited playback rate too fast ever to make a host wait. Playback is
+/// paced, so every round ends at the next quantum boundary at the latest, as
+/// paced playback and single stepping need, without host time in a test.
+pub fn paced() -> crate::driver::PlaybackRate {
+    let one = std::num::NonZeroU32::MIN;
+    crate::driver::PlaybackRate::Limited {
+        numerator: std::num::NonZeroU32::MAX,
+        denominator: one,
+    }
 }
 
 /// A fixed key for tests that correlate events with it.

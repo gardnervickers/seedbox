@@ -11,7 +11,7 @@ use crate::{
     Error, Result,
 };
 use seedbox_spec::backend::CpuBackend;
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf};
 
 /// Retained process adapter sharing the ordinary worker ownership, cancellation,
 /// observation and journal boundaries. Construction performs no guest work.
@@ -20,12 +20,25 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 pub struct DriverExecutor {
     profile: ExecutionProfile,
     backend: CpuBackend,
-    workers: usize,
     runtime: Option<super::binding::Binding>,
     environment: Vec<(OsString, OsString)>,
     session_lease: Option<PathBuf>,
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
+}
+/// Whether this build's workers take a request's test-support options: its
+/// stop policy and timed-inbox switch
+/// ([`crate::execution::ExecutionRequest::stop_policy`] and
+/// [`no_timed_inbox`](crate::execution::ExecutionRequest::no_timed_inbox)).
+/// Only a build with `test-support` does; a server built without it refuses
+/// a submission that sets one, before preparation, and a worker refuses the
+/// run.
+pub const TAKES_TEST_OPTIONS: bool = cfg!(feature = "test-support");
+/// What a worker says of the stop policy it runs with, on its stderr: the
+/// seed, with which another run repeats its stops.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn stop_seed_notice(seed: u64) -> String {
+    format!("seedbox: Driver stop policy seed {seed}")
 }
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
@@ -41,22 +54,18 @@ impl DriverExecutor {
         self
     }
 
-    /// Use an explicit retained profile and server-owned worker count. Factory
-    /// inventory must name the same backend; no fallback or profile rewriting.
-    pub fn new(profile: ExecutionProfile, backend: CpuBackend, workers: usize) -> Result<Self> {
+    /// Use an explicit retained profile. Factory inventory must name the same
+    /// backend; no fallback or profile rewriting.
+    pub fn new(profile: ExecutionProfile, backend: CpuBackend) -> Result<Self> {
         let recorded = super::retained::validate_contract(&profile)?;
         if recorded != backend {
             return Err(Error::Integrity(
                 "Driver executor backend argument differs from validated execution profile".into(),
             ));
         }
-        if !(1..=64).contains(&workers) {
-            return Err(Error::Setup("Driver machine workers: use 1..64".into()));
-        }
         Ok(Self {
             profile,
             backend,
-            workers,
             runtime: None,
             environment: vec![],
             session_lease: None,
@@ -103,7 +112,6 @@ impl DriverExecutor {
                 semantic_parameters: semantic,
             },
             backend,
-            1,
         )?;
         executor.admit_execution(simulation.control.is_some())?;
         Ok(executor)
@@ -160,9 +168,6 @@ impl DriverExecutor {
 impl ExecutionBackend for DriverExecutor {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
-    }
-    fn performance_parameters(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([("SEEDBOX_MACHINE_WORKERS".into(), self.workers.to_string())])
     }
     fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
         // Fail before opening a native admission device or preparing workers.

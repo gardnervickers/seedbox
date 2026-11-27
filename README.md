@@ -103,7 +103,8 @@ range can make later seeds differ from a fresh run of the same seed; replaying a
 seed still matches. See [the spawn project](examples/spawn/seedbox.yaml).
 
 `network.latency` sets the one-way delay between machines and defaults to `1ms`.
-`simulator.quantum` sets the timeslice:
+`simulator.quantum` sets the step of paced playback and of single stepping; it
+has no effect on results:
 
 ```yaml
 network:
@@ -113,12 +114,21 @@ simulator:
 ```
 
 `quantum` defaults to `1ms` and must be a positive duration in whole nanoseconds.
-Network latency and scheduled events can shorten a parallel execution window.
-Replay and checkpoints retain the quantum.
+While playback is paced or single stepping, no parallel execution window crosses
+a quantum boundary; otherwise network latency and scheduled events alone bound
+it. The quantum is a host setting: where machines stop changes nothing they do,
+so it does not change results. Comparison ignores a definition's quantum: edit
+`quantumNs` in `seedbox show ID --view definition` output, run that file, and
+`seedbox compare` reports MATCH. A project run again after changing `quantum`
+in `seedbox.yaml` is NOT_COMPARABLE with the earlier run instead, because its
+prepared inputs record the quantum. Replay and checkpoints retain the quantum,
+and a checkpoint start refuses a different one.
 
-Choose the backend, seed, execution limits and machine worker count with CLI flags.
-`run` and `replay` accept `--machine-workers 1..64`. The default count equals the
-number of machines. Preparation can use these workers. During execution TCG workers
-steal queued runs, and PV uses one coordinator to drive all its VM processes.
-Each round waits for every running machine to reach its boundary. Worker count
-affects host throughput and preserves simulation results.
+The latency is also how long the simulator takes to act on a machine's request: an oracle
+call takes effect, a property `flush` is answered and the run ends one `network.latency`
+after the output that asked, so a larger latency delays each of them.
+
+Choose the backend, seed and execution limits with CLI flags.
+Every machine runs on the Driver's thread. TCG machines run one after another;
+PV starts each VM process and drives them all from that thread, so they execute
+concurrently. Each round waits for every running machine to reach its boundary.

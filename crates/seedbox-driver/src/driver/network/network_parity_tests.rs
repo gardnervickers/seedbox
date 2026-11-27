@@ -118,6 +118,17 @@ fn staged_tx(d: &mut Driver<Mock>, from: usize, bytes: Vec<u8>) {
     d.execution.machines[from].staged.push(response);
     d.commit_boundary().unwrap();
 }
+/// Leave a frame held at the current barrier, as a round that ended where
+/// another machine can still emit leaves it: staged, not yet committed.
+fn held_tx(d: &mut Driver<Mock>, from: usize, bytes: Vec<u8>) {
+    let response = MachineResponse {
+        machine: MachineId(from),
+        boot: d.execution.machines[from].lifecycle.boot(),
+        at: d.now(),
+        payload: tx(bytes),
+    };
+    d.execution.machines[from].staged.push(response);
+}
 fn direct_admit(d: &mut Driver<Mock>, k: &str, a: Action, n: Option<&str>) {
     d.execution.inputs.insert(key(k), LiveInput::Pending);
     d.admit_input(key(k), a, n.map(name), d.now()).unwrap();
@@ -133,12 +144,14 @@ fn flow(d: &Driver<Mock>) -> Connection {
 fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
     let mut specs = initial();
     specs[0].sends.extend([(6,guest(1,json!({"op":"partition","left":[{"machine":"fixture-1"}],"right":[{"machine":"fixture-2"}]}))),(8,guest(2,json!({"op":"inspect"}))),(9,guest(3,json!({"op":"heal","handle":"net"}))),(11,guest(4,json!({"op":"inspect"})))]);
+    // Calls are admitted one floor (10 ns) after they are made, at 16, 18, 19
+    // and 21; the frames and the host shape keep their places between them.
     specs[1].sends.extend([
-        (5, tx(frames::plain(1, 2, 1))),
-        (7, tx(frames::plain(1, 2, 2))),
+        (15, tx(frames::plain(1, 2, 1))),
+        (17, tx(frames::plain(1, 2, 2))),
     ]);
-    let mut d = net(specs, setup(32), 2);
-    advance(&mut d, 3);
+    let mut d = net(specs, setup(32));
+    advance(&mut d, 13);
     let mut p = policy(10);
     p.bandwidth_bps = Some(8_000_000_000);
     p.queue_bound_ns = Some(120);
@@ -157,7 +170,7 @@ fn named_host_guest_cross_heals_inspect_numbering_and_typed_counts() {
     let mut events = d.drain_events();
     // Explicit host cuts separate these calls' admission/effect turns; calls
     // emitted together in one positive-budget batch intentionally admit first.
-    for end in [6, 8, 9, 12] {
+    for end in [16, 18, 19, 22] {
         events.extend(advance(&mut d, end));
     }
     let replies = replies(&d);
@@ -234,8 +247,8 @@ fn observations_are_bounded_not_persisted_and_never_change_events_entropy_or_cou
     specs[1]
         .sends
         .extend((1..=3).map(|t| (t, tx(frames::plain(1, 2, t as u8)))));
-    let mut off = net(specs.clone(), setup(0), 1);
-    let mut on = net(specs, setup(1), 4);
+    let mut off = net(specs.clone(), setup(0));
+    let mut on = net(specs, setup(1));
     let expected = advance(&mut off, 40);
     assert_eq!(advance(&mut on, 40), expected);
     assert_eq!(states(&off), states(&on));
@@ -253,8 +266,8 @@ fn observations_are_bounded_not_persisted_and_never_change_events_entropy_or_cou
     assert_eq!(source_facts.facts.len(), 1);
     assert_eq!(source_facts.omitted, 2);
     drop(on);
-    let mut a = restore(&c, 1);
-    let mut b = restore(&c, 4);
+    let mut a = restore(&c);
+    let mut b = restore(&c);
     let facts = a.drain_observations().frames;
     assert_eq!(facts, FrameFacts::default());
     assert_eq!(facts, b.drain_observations().frames);
@@ -280,7 +293,7 @@ fn every_frame_fate_including_exited_receiver_has_independent_authority() {
         } else {
             setup(8)
         };
-        let mut d = net(specs, s, 2);
+        let mut d = net(specs, s);
         advance(&mut d, 1);
         if case == 0 {
             schedule(&mut d, "cut", partition(), Some("cut"));
@@ -339,8 +352,9 @@ fn guest_connection_pages_are_read_only_and_legacy_shaped() {
         .sends
         .extend((0..35).map(|i| (1, tx(frames::tcp(1, 2, (1000 + i, 80), 7, 0, 2)))));
     specs[0].sends.extend([(3,guest(1,json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"}}))),(5,guest(2,json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":32})))]);
-    let mut d = net(specs, setup(0), 2);
-    advance(&mut d, 8);
+    let mut d = net(specs, setup(0));
+    // The calls are admitted one floor (10 ns) after they are made.
+    advance(&mut d, 18);
     let replies = replies(&d);
     assert_eq!(
         replies[&1]["result"]["connections"]
@@ -365,124 +379,127 @@ fn guest_connection_pages_are_read_only_and_legacy_shaped() {
 #[test]
 fn guest_queries_pagination_reincarnation_and_heal_ignore_frame_retention() {
     let mut reference = None;
-    for workers in [1, 4] {
-        for (capacity, resize, drain) in [
-            (0, false, false),
-            (1, false, false),
-            (1024, false, false),
-            (1024, true, false),
-            (1, false, true),
-        ] {
-            let mut specs = initial();
-            specs[1]
-                .sends
-                .extend((0..35).map(|i| (1, tx(frames::tcp(1, 2, (1000 + i, 80), 7, 0, 2)))));
-            specs[1].sends.extend([
-                (6, tx(frames::tcp(1, 2, (1000, 80), 8, 1, 0x11))),
-                (8, tx(frames::tcp(1, 2, (1000, 80), 9, 0, 2))),
-            ]);
-            specs[2]
-                .sends
-                .push_back((7, tx(frames::tcp(2, 1, (80, 1000), 1, 9, 0x11))));
-            specs[0].sends.extend([
-                (3, guest(1, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"}}))),
-                (4, guest(2, json!({"op":"inspect"}))),
-                (5, guest(3, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":32}))),
-                (9, guest(4, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":35}))),
-                (11, guest(5, json!({"op":"heal","handle":"query-shape"}))),
-                (12, guest(6, json!({"op":"inspect"}))),
-            ]);
-            let mut d = net(specs, setup(capacity), workers);
-            advance(&mut d, 2);
-            if resize {
-                d.set_frame_capacity(1);
-            }
+    for (capacity, resize, drain) in [
+        (0, false, false),
+        (1, false, false),
+        (1024, false, false),
+        (1024, true, false),
+        (1, false, true),
+    ] {
+        let mut specs = initial();
+        specs[1]
+            .sends
+            .extend((0..35).map(|i| (1, tx(frames::tcp(1, 2, (1000 + i, 80), 7, 0, 2)))));
+        // Calls are admitted one floor (10 ns) after they are made, at
+        // 13, 14, 15, 19, 21 and 22; these frames fall between the third
+        // and the fourth.
+        specs[1].sends.extend([
+            (16, tx(frames::tcp(1, 2, (1000, 80), 8, 1, 0x11))),
+            (18, tx(frames::tcp(1, 2, (1000, 80), 9, 0, 2))),
+        ]);
+        specs[2]
+            .sends
+            .push_back((17, tx(frames::tcp(2, 1, (80, 1000), 1, 9, 0x11))));
+        specs[0].sends.extend([
+            (3, guest(1, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"}}))),
+            (4, guest(2, json!({"op":"inspect"}))),
+            (5, guest(3, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":32}))),
+            (9, guest(4, json!({"op":"connections","from":{"machine":"fixture-1"},"to":{"machine":"fixture-2"},"after":35}))),
+            (11, guest(5, json!({"op":"heal","handle":"query-shape"}))),
+            (12, guest(6, json!({"op":"inspect"}))),
+        ]);
+        let mut d = net(specs, setup(capacity));
+        advance(&mut d, 2);
+        if resize {
+            d.set_frame_capacity(1);
+        }
+        if drain {
+            d.drain_observations();
+        }
+        schedule(
+            &mut d,
+            "shape",
+            shape(
+                policy(10),
+                NetworkFaults {
+                    duplicate_ppm: 1_000_000,
+                    ..Default::default()
+                },
+            ),
+            Some("query-shape"),
+        );
+        for end in [13, 14, 15, 16, 17, 18, 19, 21, 22, 30] {
+            advance(&mut d, end);
             if drain {
                 d.drain_observations();
             }
-            schedule(
-                &mut d,
-                "shape",
-                shape(
-                    policy(10),
-                    NetworkFaults {
-                        duplicate_ppm: 1_000_000,
-                        ..Default::default()
-                    },
-                ),
-                Some("query-shape"),
-            );
-            for end in [3, 4, 5, 6, 7, 8, 9, 11, 12, 30] {
-                advance(&mut d, end);
-                if drain {
-                    d.drain_observations();
-                }
-            }
-            let actual_replies = replies(&d);
-            assert_eq!(
-                actual_replies[&1]["result"]["connections"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                32
-            );
-            assert_eq!(actual_replies[&1]["result"]["next_after"], 32);
-            assert_eq!(
-                actual_replies[&3]["result"]["connections"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                3
-            );
-            assert_eq!(actual_replies[&3]["result"]["next_after"], 35);
-            assert_eq!(
-                actual_replies[&4]["result"]["connections"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                1
-            );
-            assert_eq!(actual_replies[&4]["result"]["next_after"], 36);
-            assert_eq!(
-                actual_replies[&2]["result"]["active_handles"],
-                json!(["query-shape"])
-            );
-            assert_eq!(actual_replies[&6]["result"]["active_handles"], json!([]));
-            let actual = (
-                actual_replies,
-                d.execution.network.counts(),
-                states(&d),
-                artifact(d.checkpoint().unwrap()).0,
-            );
-            if let Some(reference) = &reference {
-                assert_eq!(&actual, reference);
-            } else {
-                reference = Some(actual);
-            }
-            let facts = d.drain_observations().frames;
-            if capacity == 1 && !drain {
-                assert!(facts.omitted > 0);
-            }
+        }
+        let actual_replies = replies(&d);
+        assert_eq!(
+            actual_replies[&1]["result"]["connections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(actual_replies[&1]["result"]["next_after"], 32);
+        assert_eq!(
+            actual_replies[&3]["result"]["connections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(actual_replies[&3]["result"]["next_after"], 35);
+        assert_eq!(
+            actual_replies[&4]["result"]["connections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(actual_replies[&4]["result"]["next_after"], 36);
+        assert_eq!(
+            actual_replies[&2]["result"]["active_handles"],
+            json!(["query-shape"])
+        );
+        assert_eq!(actual_replies[&6]["result"]["active_handles"], json!([]));
+        let actual = (
+            actual_replies,
+            d.execution.network.counts(),
+            states(&d),
+            artifact(d.checkpoint().unwrap()).0,
+        );
+        if let Some(reference) = &reference {
+            assert_eq!(&actual, reference);
+        } else {
+            reference = Some(actual);
+        }
+        let facts = d.drain_observations().frames;
+        if capacity == 1 && !drain {
+            assert!(facts.omitted > 0);
         }
     }
 }
 #[test]
 fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() {
     let mut specs = initial();
+    // The heal call at 8 is admitted one floor (10 ns) later, at 18: the
+    // frames after it follow that.
     specs[1].sends.extend([
         (1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))),
         (5, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x10))),
         (7, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x10))),
-        (12, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x11))),
-        (16, tx(frames::tcp(1, 2, (1234, 80), 9, 0, 2))),
+        (22, tx(frames::tcp(1, 2, (1234, 80), 8, 1, 0x11))),
+        (26, tx(frames::tcp(1, 2, (1234, 80), 9, 0, 2))),
     ]);
     specs[2]
         .sends
-        .push_back((13, tx(frames::tcp(2, 1, (80, 1234), 1, 9, 0x11))));
+        .push_back((23, tx(frames::tcp(2, 1, (80, 1234), 1, 9, 0x11))));
     specs[0]
         .sends
         .push_back((8, guest(1, json!({"op":"heal","handle":"tcp"}))));
-    let mut d = net(specs, setup(32), 2);
+    let mut d = net(specs, setup(32));
     advance(&mut d, 4);
     let old = flow(&d);
     schedule(
@@ -494,7 +511,7 @@ fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() 
         Some("tcp"),
     );
     let mut events = d.drain_events();
-    events.extend(advance(&mut d, 15));
+    events.extend(advance(&mut d, 25));
     assert!(!d.execution.network.selection_available(&old));
     assert!(d
         .execution
@@ -520,7 +537,7 @@ fn host_selection_guest_heal_fin_close_reincarnation_and_stale_pn_consumption() 
         })
     );
     assert_eq!(replies(&d)[&1]["result"], json!({"matched":2,"dropped":2}));
-    advance(&mut d, 18);
+    advance(&mut d, 28);
     let fresh = flow(&d);
     assert!(fresh.incarnation > old.incarnation);
     schedule(
@@ -550,7 +567,7 @@ fn apply_rechecks_connection_and_failed_without_effect_does_not_poison() {
     specs[1]
         .sends
         .push_back((1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))));
-    let mut d = net(specs, setup(8), 1);
+    let mut d = net(specs, setup(8));
     advance(&mut d, 4);
     let c = flow(&d);
     // Ordinary admission, then a second committed output before its FIFO effect.
@@ -577,13 +594,85 @@ fn apply_rechecks_connection_and_failed_without_effect_does_not_poison() {
     );
     artifact(d.checkpoint().unwrap());
 }
+/// Committing an input first commits the output held at its barrier, and a
+/// held frame changes what the admission sees: a connection closes or opens
+/// when its frame is routed. The projection routes held frames too, so it
+/// agrees with the commit instead of poisoning the Driver there.
+#[test]
+fn prepare_projects_held_frames_into_the_network_it_admits_against() {
+    // A held RST closes the connection the input names.
+    let mut specs = initial();
+    specs[1]
+        .sends
+        .push_back((1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))));
+    let mut d = net(specs, setup(8));
+    advance(&mut d, 4);
+    let open = flow(&d);
+    held_tx(&mut d, 1, frames::tcp(1, 2, (1234, 80), 8, 1, 0x14));
+    let closed = d
+        .with_barrier(|b| {
+            b.prepare_input(
+                key("closed"),
+                Action::DropConnection {
+                    connection: open.clone(),
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(closed.outcome(), PreparedOutcome::Rejected(_)));
+    // The projection changed nothing: the connection is still listed until
+    // the held frame commits, and a rejected proposal is refused unchanged.
+    assert!(d.execution.network.selection_available(&open));
+    assert!(matches!(
+        d.with_barrier(|b| b.commit_input(&closed)),
+        Err(Error::InvalidRequest)
+    ));
+    schedule(&mut d, "after", partition(), None);
+    assert_eq!(
+        settled(&d.drain_events(), "after").1,
+        SettlementStatus::Applied
+    );
+    assert!(!d.execution.network.selection_available(&open));
+
+    // A held SYN opens the connection the input names.
+    let mut d = net(initial(), setup(8));
+    advance(&mut d, 4);
+    let syn = frames::tcp(1, 2, (1234, 80), 7, 0, 2);
+    let mut routed = d.execution.network.clone();
+    routed
+        .route(MachineId(1), d.now().as_nanos(), &syn)
+        .unwrap();
+    let opening = routed.connections("fixture-1", "fixture-2", 0).remove(0);
+    assert!(!d.execution.network.selection_available(&opening));
+    held_tx(&mut d, 1, syn);
+    let opened = d
+        .with_barrier(|b| {
+            b.prepare_input(
+                key("opened"),
+                Action::DropConnection {
+                    connection: opening.clone(),
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(opened.outcome(), PreparedOutcome::Admitted(_)));
+    assert!(matches!(
+        d.with_barrier(|b| b.commit_input(&opened)).unwrap(),
+        DueOutcome::Applied { .. }
+    ));
+    assert_eq!(
+        settled(&d.drain_events(), "opened").1,
+        SettlementStatus::Applied
+    );
+    assert_eq!(flow(&d), opening);
+}
 #[test]
 fn selection_heal_freezes_counts_at_admission_not_application() {
     let mut specs = initial();
     specs[1]
         .sends
         .push_back((1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))));
-    let mut d = net(specs, setup(16), 1);
+    let mut d = net(specs, setup(16));
     advance(&mut d, 4);
     let c = flow(&d);
     schedule(
@@ -602,7 +691,7 @@ fn selection_heal_freezes_counts_at_admission_not_application() {
     staged_tx(&mut d, 1, frames::tcp(1, 2, (1234, 80), 8, 1, 0x10));
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     reference_observer_session(&mut d);
-    let mut restored = restore(&decode(&bytes, &store), 4);
+    let mut restored = restore(&decode(&bytes, &store));
     for d in [&mut d, &mut restored] {
         d.with_barrier(|b| b.apply_due_now()).unwrap();
         let (_, status, counts) = settled(&d.drain_events(), "heal");
@@ -618,7 +707,7 @@ fn selection_heal_freezes_counts_at_admission_not_application() {
 }
 #[test]
 fn two_pending_aliases_roundtrip_then_one_fails_without_poison_or_wrong_key_retirement() {
-    let mut d = net(initial(), setup(8), 1);
+    let mut d = net(initial(), setup(8));
     advance(&mut d, 1);
     let now = d.now();
     d.with_barrier(|b| {
@@ -635,44 +724,42 @@ fn two_pending_aliases_roundtrip_then_one_fails_without_poison_or_wrong_key_reti
     reference_observer_session(&mut d);
     let c = decode(&bytes, &store);
     drop(d);
-    for workers in [1, 4] {
-        let mut d = restore(&c, workers);
-        assert!(matches!(
-            d.step(d.now()).unwrap(),
-            StepOutcome::BeforeFault { .. }
-        ));
-        d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
-            .unwrap();
-        d.step(d.now()).unwrap();
-        let events = d.drain_events();
-        assert_eq!(settled(&events, "a").1, SettlementStatus::Applied);
-        let loser = settled(&events, "b");
-        assert_eq!(loser.1, SettlementStatus::Failed);
-        assert!(!d.execution.inputs.contains_key(&key("b")));
-        assert!(d.execution.inputs.contains_key(&key("a")));
-        assert_eq!(handles(&d), ["same"]);
-        schedule(
-            &mut d,
-            "heal",
-            Action::Heal(HealTarget::Input(key("a"))),
-            None,
-        );
-        assert!(handles(&d).is_empty());
-        assert!(!d.execution.inputs.contains_key(&key("a")));
-        schedule(&mut d, "next", partition(), None);
-        assert_eq!(
-            settled(&d.drain_events(), "next")
-                .0
-                .handle
-                .unwrap()
-                .to_string(),
-            "p1"
-        );
-    }
+    let mut d = restore(&c);
+    assert!(matches!(
+        d.step(d.now()).unwrap(),
+        StepOutcome::BeforeFault { .. }
+    ));
+    d.with_barrier(|b| b.set_rate(PlaybackRate::Unlimited))
+        .unwrap();
+    d.step(d.now()).unwrap();
+    let events = d.drain_events();
+    assert_eq!(settled(&events, "a").1, SettlementStatus::Applied);
+    let loser = settled(&events, "b");
+    assert_eq!(loser.1, SettlementStatus::Failed);
+    assert!(!d.execution.inputs.contains_key(&key("b")));
+    assert!(d.execution.inputs.contains_key(&key("a")));
+    assert_eq!(handles(&d), ["same"]);
+    schedule(
+        &mut d,
+        "heal",
+        Action::Heal(HealTarget::Input(key("a"))),
+        None,
+    );
+    assert!(handles(&d).is_empty());
+    assert!(!d.execution.inputs.contains_key(&key("a")));
+    schedule(&mut d, "next", partition(), None);
+    assert_eq!(
+        settled(&d.drain_events(), "next")
+            .0
+            .handle
+            .unwrap()
+            .to_string(),
+        "p1"
+    );
 }
 #[test]
 fn mixed_origin_apply_collision_is_failed_and_next_guest_number_is_not_reused() {
-    let mut d = net(initial(), setup(0), 1);
+    let mut d = net(initial(), setup(0));
     advance(&mut d, 1);
     let now = d.now();
     d.with_barrier(|b| {
@@ -703,7 +790,7 @@ fn mixed_origin_apply_collision_is_failed_and_next_guest_number_is_not_reused() 
 }
 #[test]
 fn own_input_heal_refuses_pending_neighbor_even_with_active_same_text() {
-    let mut d = net(initial(), setup(0), 1);
+    let mut d = net(initial(), setup(0));
     advance(&mut d, 1);
     direct_admit(&mut d, "a", partition(), Some("same"));
     direct_admit(&mut d, "b", partition(), Some("same"));
@@ -754,7 +841,7 @@ fn own_input_heal_refuses_pending_neighbor_even_with_active_same_text() {
 }
 #[test]
 fn named_prepare_exact_commit_authored_and_held_paths_preserve_alias_and_identity() {
-    let mut d = net(initial(), setup(8), 1);
+    let mut d = net(initial(), setup(8));
     advance(&mut d, 1);
     let p = d
         .with_barrier(|b| {
@@ -788,7 +875,7 @@ fn named_prepare_exact_commit_authored_and_held_paths_preserve_alias_and_identit
     assert!(handles(&d).is_empty());
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     reference_observer_session(&mut d);
-    let mut restored = restore(&decode(&bytes, &store), 4);
+    let mut restored = restore(&decode(&bytes, &store));
     assert!(matches!(
         restored.step(restored.now()).unwrap(),
         StepOutcome::BeforeFault { .. }
@@ -814,7 +901,7 @@ fn named_prepare_exact_commit_authored_and_held_paths_preserve_alias_and_identit
     .unwrap();
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     reference_observer_session(&mut d);
-    let mut restored = restore(&decode(&bytes, &store), 2);
+    let mut restored = restore(&decode(&bytes, &store));
     assert_eq!(advance(&mut d, 10), advance(&mut restored, 10));
     assert_eq!(handles(&d), ["future"]);
 }
@@ -833,7 +920,7 @@ fn pending_network_shape_is_codec_closed_and_continues_with_sessions_burst_and_q
         (6, tx(frames::plain(2, 1, 2))),
         (15, tx(frames::plain(2, 1, 3))),
     ]);
-    let mut d = net(specs, setup(64), 1);
+    let mut d = net(specs, setup(64));
     advance(&mut d, 3);
     let c = flow(&d);
     schedule(
@@ -881,15 +968,13 @@ fn pending_network_shape_is_codec_closed_and_continues_with_sessions_burst_and_q
     let expected_counts = d.execution.network.counts();
     let expected_states = states(&d);
     drop(d);
-    for workers in [1, 4] {
-        let mut restored = restore(&decode(&bytes, &store), workers);
-        assert_eq!(restored.drain_observations().frames, FrameFacts::default());
-        restored.set_frame_capacity(64);
-        assert_eq!(advance(&mut restored, 120), expected_events);
-        assert_eq!(restored.drain_observations().frames, expected_frames);
-        assert_eq!(restored.execution.network.counts(), expected_counts);
-        assert_eq!(states(&restored), expected_states);
-    }
+    let mut restored = restore(&decode(&bytes, &store));
+    assert_eq!(restored.drain_observations().frames, FrameFacts::default());
+    restored.set_frame_capacity(64);
+    assert_eq!(advance(&mut restored, 120), expected_events);
+    assert_eq!(restored.drain_observations().frames, expected_frames);
+    assert_eq!(restored.execution.network.counts(), expected_counts);
+    assert_eq!(states(&restored), expected_states);
 }
 #[test]
 fn real_network_fault_records_project_losslessly_to_canonical_control_actions() {
@@ -927,7 +1012,7 @@ fn real_network_fault_records_project_losslessly_to_canonical_control_actions() 
     specs[1]
         .sends
         .push_back((1, tx(frames::tcp(1, 2, (1234, 80), 7, 0, 2))));
-    let mut d = net(specs, setup(0), 1);
+    let mut d = net(specs, setup(0));
     advance(&mut d, 3);
     let c = flow(&d);
     schedule(
@@ -1009,7 +1094,6 @@ fn baseline_unknown_and_unattached_members_fail_before_factory_or_context_work()
         let result = Driver::<Mock>::new_seeded(
             at(0),
             Duration::from_nanos(10),
-            1,
             51,
             move || {
                 cx.fetch_add(1, Ordering::SeqCst);
@@ -1048,7 +1132,7 @@ fn structured_counter_pairs_survive_colliding_display_names_and_restore() {
         (22, tx(frames::plain(2, 3, 5))),
         (23, tx(frames::plain(2, 3, 6))),
     ]);
-    let mut d = net(specs, setup(8), 1);
+    let mut d = net(specs, setup(8));
     advance(&mut d, 25);
     let before = d.execution.network.counts();
     let a = NetworkPair {
@@ -1071,13 +1155,11 @@ fn structured_counter_pairs_survive_colliding_display_names_and_restore() {
     assert_eq!(after[&a].delivered, 3);
     assert_eq!(after[&b].delivered, 3);
     drop(d);
-    for workers in [1, 4] {
-        let mut restored = restore(&decode(&bytes, &store), workers);
-        assert_eq!(restored.execution.network.counts(), before);
-        assert_eq!(restored.drain_observations().frames, FrameFacts::default());
-        restored.set_frame_capacity(64);
-        assert_eq!(advance(&mut restored, 50), events);
-        assert_eq!(restored.execution.network.counts(), after);
-        assert_eq!(restored.drain_observations().frames, facts);
-    }
+    let mut restored = restore(&decode(&bytes, &store));
+    assert_eq!(restored.execution.network.counts(), before);
+    assert_eq!(restored.drain_observations().frames, FrameFacts::default());
+    restored.set_frame_capacity(64);
+    assert_eq!(advance(&mut restored, 50), events);
+    assert_eq!(restored.execution.network.counts(), after);
+    assert_eq!(restored.drain_observations().frames, facts);
 }

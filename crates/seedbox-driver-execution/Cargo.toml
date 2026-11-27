@@ -34,8 +34,10 @@ seedbox-machine = { workspace = true, features = ["test-support"] }
 [features]
 # Original-worker failure injection hooks for process-lifetime tests.
 worker-failure = []
-# Opt-in fixtures, such as a synthetic runtime package, for dependents' tests.
-test-support = ["seedbox-machine/test-support"]
+# Opt-in fixtures, such as a synthetic runtime package, for dependents' tests,
+# and the stop policy and timed-inbox switch whole-run tests give a worker
+# (driver_world::TAKES_TEST_OPTIONS).
+test-support = ["seedbox-machine/test-support", "seedbox-driver/test-support"]
 
 [[bin]]
 name = "seedbox-lifetime-fixture"

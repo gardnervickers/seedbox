@@ -17,10 +17,6 @@ async fn fresh_native_pv_different_input_witnesses_do_not_match() {
 }
 
 #[tokio::test]
-async fn native_pv_same_seed_workers_one_and_four_match() {
-    crate::scenarios::pv_worker_counts().await;
-}
-#[tokio::test]
 async fn native_pv_different_seed_is_reported() {
     crate::scenarios::pv_seed_report().await;
 }

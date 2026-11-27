@@ -29,6 +29,6 @@ fn backend() -> Backend<TcgMachine> {
 
 #[test]
 #[ignore = "requires patched QEMU, TCG assets and disk fixtures"]
-fn tcg_disk_driver_is_deterministic_across_workers() {
-    super::disk_driver_scenario::driver_is_deterministic_across_workers(&backend());
+fn tcg_disk_driver_runs_the_disk_scenario() {
+    super::disk_driver_scenario::driver_runs_the_disk_scenario(&backend());
 }

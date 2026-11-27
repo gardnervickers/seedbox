@@ -1,7 +1,7 @@
 //! Native evidence families and where each is recorded:
 //! I: x86::Machine::prepare after successful Native::inject(vector); ARM irq/
 //! interrupts after successful previously-unasserted Native::irq(vector,true).
-//! O/i/w/r: Machine::run -> record_exit after Interrupted/maintenance exclusions
+//! O/i/w/r: Machine::run -> record_exit after Interrupted/maintenance/bound-yield exclusions
 //! and accepted LAST; writes include value, reads use zero. H: Halt/Wait.
 //! d: Block::write_traced -> process callback AFTER each successful used-ring
 //! completion, preserving partial-prefix errors and actual completion order;
@@ -11,7 +11,9 @@
 //! S: PV boot entropy-generation installation (arch::load wrote the boot seed);
 //! generation is physical boot ordinal. No runtime page-reseed API exists.
 //! C: fresh Boot after predecessor successor() fold, for forced marks1/2 only.
-//! Y: semantic soft-bound yield after its actual MMIO or port write. Console bytes are O or PL011 w.
+//! Y: semantic soft-bound yield after its actual MMIO or port write (size0, a0, b0),
+//! for the machine's own wake or a deferred interrupt. A yield only for the run's
+//! bound records nothing, not even its w/O record (C3). Console bytes are O or PL011 w.
 //! X/E: this Linux PV board maps no 0xf4/0xf5 debug-exit/init-error devices:
 //! those ports float/ignore, and are ordinary O/i, not terminal requests.
 //! Native outcomes use PV power-off MMIO, PSCI or architectural reset.
@@ -52,8 +54,9 @@ impl<B: Backend> Machine<B> {
     pub(super) fn record_native(&mut self, kind: u8, size: u8, a: u64, b: u64) {
         self.state.witness = chain::record(&self.state.witness, kind, size, self.state.now, a, b);
     }
-    /// The run loop calls this only after excluding Interrupted and backend
-    /// maintenance, and after accepting the actual guest's LAST publication.
+    /// The run loop calls this only after excluding Interrupted, backend
+    /// maintenance and bound yields, and after accepting the actual guest's
+    /// LAST publication.
     pub(super) fn record_exit(&mut self, exit: &Exit) -> Result<()> {
         match *exit {
             Exit::Mmio {

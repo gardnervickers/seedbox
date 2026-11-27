@@ -2,69 +2,62 @@ use seedbox_driver::test_support::fixture::*;
 
 #[test]
 fn paused_runnable_machine_resumes_at_current_time_without_catchup_work() {
-    let mut reference = None;
-    for workers in [1, 2, 4] {
-        let mut driver = controlled(workers, &[&[Op::Work(100)], &[Op::Work(100)]]);
-        let ids = ids(&mut driver);
+    let mut driver = controlled(&[&[Op::Work(100)], &[Op::Work(100)]]);
+    let ids = ids(&mut driver);
+    driver
+        .with_barrier(|barrier| {
+            barrier.schedule(at(3), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
+            barrier.schedule(at(20), auto_key(), Action::Resume(Target::Machine(ids[0])))
+        })
+        .unwrap();
+    let mut outcomes = Vec::new();
+    // Rounds end one floor (10 ns) after the earliest start, and at
+    // timeline items.
+    for end in [3, 13, 20] {
+        let outcome = driver.step(at(100)).unwrap();
+        assert_eq!(outcome, StepOutcome::BarrierReached { at: at(end) });
+        outcomes.push(outcome);
         driver
             .with_barrier(|barrier| {
-                barrier.schedule(at(3), auto_key(), Action::Pause(Target::Machine(ids[0])))?;
-                barrier.schedule(at(20), auto_key(), Action::Resume(Target::Machine(ids[0])))
-            })
-            .unwrap();
-        let mut outcomes = Vec::new();
-        for end in [3, 10, 20] {
-            let outcome = driver.step(at(100)).unwrap();
-            assert_eq!(outcome, StepOutcome::BarrierReached { at: at(end) });
-            outcomes.push(outcome);
-            driver
-                .with_barrier(|barrier| {
-                    assert_eq!(barrier.machine(ids[0])?.executed, 3);
-                    assert_eq!(barrier.machine(ids[1])?.executed, end);
-                    assert_eq!(barrier.paused(ids[0])?, end < 20);
-                    Ok(())
-                })
-                .unwrap();
-        }
-        driver
-            .with_barrier(|barrier| {
-                let guest = barrier.machine(ids[0])?;
-                assert_eq!(guest.reached, 20);
-                assert_eq!(*guest.log.lock().unwrap(), [(0, 0, 3), (0, 20, 20)]);
+                assert_eq!(barrier.machine(ids[0])?.executed, 3);
+                assert_eq!(barrier.machine(ids[1])?.executed, end);
+                assert_eq!(barrier.paused(ids[0])?, end < 20);
                 Ok(())
             })
             .unwrap();
-        outcomes.push(driver.step(at(100)).unwrap());
-        let observations = driver
-            .with_barrier(|barrier| {
-                Ok(barrier
-                    .machines()
-                    .map(|(id, guest)| {
-                        (
-                            barrier.paused(id).unwrap(),
-                            guest.reached,
-                            guest.executed,
-                            guest.log.lock().unwrap().clone(),
-                            barrier.stopped(id).unwrap(),
-                        )
-                    })
-                    .collect::<Vec<_>>())
-            })
-            .unwrap();
-        assert_eq!(observations[0].2, 13);
-        assert_eq!(observations[1].2, 30);
-        let observed = (outcomes, observations);
-        if let Some(reference) = &reference {
-            assert_eq!(&observed, reference);
-        } else {
-            reference = Some(observed);
-        }
     }
+    driver
+        .with_barrier(|barrier| {
+            let guest = barrier.machine(ids[0])?;
+            assert_eq!(guest.reached, 20);
+            assert_eq!(*guest.log.lock().unwrap(), [(0, 0, 3), (0, 20, 20)]);
+            Ok(())
+        })
+        .unwrap();
+    outcomes.push(driver.step(at(100)).unwrap());
+    let observations = driver
+        .with_barrier(|barrier| {
+            Ok(barrier
+                .machines()
+                .map(|(id, guest)| {
+                    (
+                        barrier.paused(id).unwrap(),
+                        guest.reached,
+                        guest.executed,
+                        guest.log.lock().unwrap().clone(),
+                        barrier.stopped(id).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert_eq!(observations[0].2, 13);
+    assert_eq!(observations[1].2, 30);
 }
 
 #[test]
 fn pause_suppresses_timer_until_resume_delivers_it_without_cpu_execution() {
-    let mut driver = controlled(2, &[&[Op::Sleep(5), Op::Work(100)], &[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Sleep(5), Op::Work(100)], &[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -72,7 +65,7 @@ fn pause_suppresses_timer_until_resume_delivers_it_without_cpu_execution() {
             barrier.schedule(at(20), auto_key(), Action::Resume(Target::Machine(id)))
         })
         .unwrap();
-    for end in [2, 10] {
+    for end in [2, 12] {
         assert_eq!(
             driver.step(at(100)).unwrap(),
             StepOutcome::BarrierReached { at: at(end) }
@@ -119,7 +112,7 @@ fn pause_suppresses_timer_until_resume_delivers_it_without_cpu_execution() {
 
 #[test]
 fn all_paused_is_unfinished_snapshot_preserves_state_and_retains_input() {
-    let mut driver = controlled(1, &[&[Op::Park, Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Park, Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     assert_eq!(
         driver.step(at(1)).unwrap(),
@@ -179,11 +172,11 @@ fn all_paused_is_unfinished_snapshot_preserves_state_and_retains_input() {
         .unwrap();
     assert_eq!(
         driver.step(at(100)).unwrap(),
-        StepOutcome::BarrierReached { at: at(10) }
+        StepOutcome::BarrierReached { at: at(17) }
     );
     driver
         .with_barrier(|barrier| {
-            assert_eq!(barrier.machine(id)?.executed, 3);
+            assert_eq!(barrier.machine(id)?.executed, 10);
             Ok(())
         })
         .unwrap();
@@ -210,7 +203,7 @@ fn settled(events: &[seedbox_driver::driver::Event]) -> Vec<(FaultAction, Settle
 
 #[test]
 fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_arm() {
-    let mut driver = controlled_targets(2, &[&[Op::Work(100)]]);
+    let mut driver = controlled_targets(&[&[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver.drain_observations();
     let target = || Target::Machine(id);
@@ -322,7 +315,7 @@ fn pause_and_resume_follow_policy_state_and_rejected_inputs_never_consume_the_ar
 
 #[test]
 fn pause_at_timer_boundary_withholds_due_timer_and_same_time_resume_services_once() {
-    let mut driver = controlled(2, &[&[Op::Sleep(5), Op::Work(100)], &[Op::Work(100)]]);
+    let mut driver = controlled(&[&[Op::Sleep(5), Op::Work(100)], &[Op::Work(100)]]);
     let id = ids(&mut driver)[0];
     driver
         .with_barrier(|barrier| {
@@ -359,7 +352,7 @@ fn pause_at_timer_boundary_withholds_due_timer_and_same_time_resume_services_onc
 #[test]
 fn adoption_or_paused_crash_failure_poisons_driver_before_later_actions() {
     for crash in [false, true] {
-        let mut driver = configured(2, {
+        let mut driver = configured({
             let mut guest = machine(0, &[Op::Work(100)]);
             guest.fail_run_at = (!crash).then_some(5);
             guest.fail_crash = crash;

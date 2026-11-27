@@ -24,15 +24,15 @@ impl<S> Checkpoint<S> {
             now,
             rng,
             quantum_ns,
-            quantum_end,
+            origin,
             machines,
             events,
             boundary_index,
-            completed_quanta,
-            quantum_committed,
             stopped,
             playback,
             oracle,
+            needed,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -77,15 +77,15 @@ impl<S> Checkpoint<S> {
             now,
             rng,
             quantum_ns,
-            quantum_end,
+            origin,
             machines,
             events,
             boundary_index,
-            completed_quanta,
-            quantum_committed,
             stopped,
             playback,
             oracle,
+            needed,
+            finishing,
             finished,
             oracle_stops,
             control,
@@ -131,7 +131,7 @@ impl Checkpoint<SnapshotReference> {
     }
     /// Decode exactly one Driver artifact through EOF under explicit logical
     /// budgets. All fields/definitions are owned and validated before return;
-    /// no worker, context, factory, backend decoder or native resource is used.
+    /// no execution context, factory, backend decoder or native resource is used.
     /// Future unsupported RAM/Launch values remain deferred factory inputs.
     /// Ref digest/length resolution and external factory/service-history authority
     /// remain the adapter's obligations; this is not a complete service export.
@@ -367,7 +367,7 @@ impl Checkpoint<SnapshotReference> {
         validate(
             self.now,
             self.quantum_ns,
-            self.quantum_end,
+            self.origin,
             self.oracle,
             &self.machines,
             &self.control,
@@ -377,20 +377,14 @@ impl Checkpoint<SnapshotReference> {
         self.rng
             .check_persist(crate::rng::RngDomain::Machine, None)?;
         require(
-            self.completed_quanta <= self.boundary_index
-                && self.quantum_committed == (self.now == self.quantum_end)
-                && (!self.quantum_committed || self.completed_quanta > 0),
-            "quantum counters/position",
+            self.needed.is_none_or(|needed| needed == self.now),
+            "needed barrier before the capture",
         )?;
-        let ends = u128::from(self.completed_quanta) + u128::from(!self.quantum_committed);
-        let elapsed = ends
-            .checked_mul(u128::from(self.quantum_ns))
-            .ok_or(CodecError::Invalid("quantum counter overflow"))?;
         require(
-            elapsed <= u128::from(self.quantum_end.as_nanos())
-                && u128::from(self.now.as_nanos())
-                    >= u128::from(self.quantum_end.as_nanos()).saturating_sub(elapsed),
-            "quantum anchor",
+            self.finishing
+                .is_none_or(|(at, _)| at > self.now && self.finished.is_none())
+                && self.finished.is_none_or(|(at, _)| at <= self.now),
+            "pending end of the run",
         )?;
         self.network
             .check_persist(self.machines.len(), self.now.as_nanos(), &self.definitions)?;
@@ -612,7 +606,8 @@ impl Checkpoint<SnapshotReference> {
         }
         self.properties.validate().map_err(CodecError::Invalid)?;
         self.check_retired_outputs()?;
-        self.playback.check_persist(self.completed_quanta)?;
+        self.playback
+            .check_persist((self.now.as_nanos() - self.origin.as_nanos()) / self.quantum_ns)?;
         if let Some(held) = &self.playback.held {
             self.check_record(held)?;
             require(
@@ -665,4 +660,4 @@ impl<T: Wire> Wire for Entry<T> {
         })
     }
 }
-wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,quantum_end,machines,events,boundary_index,completed_quanta,quantum_committed,stopped,playback,oracle,finished,oracle_stops,control,inputs,definitions,network,properties});
+wire_struct!(Checkpoint<SnapshotReference>{now,rng,quantum_ns,origin,machines,events,boundary_index,stopped,playback,oracle,needed,finishing,finished,oracle_stops,control,inputs,definitions,network,properties});

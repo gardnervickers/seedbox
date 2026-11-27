@@ -404,12 +404,15 @@ impl Network {
             })
             .unwrap_or(self.global)
     }
+    /// Route one committed frame (see `Network::route`). `reached` gives how
+    /// far each receiver has executed; an arrival before it fails routing.
     pub(in crate::driver) fn route_at(
         &mut self,
         position: Position,
         from: MachineId,
         sent: u64,
         bytes: &[u8],
+        reached: &dyn Fn(MachineId) -> u64,
         observations: &mut FrameObservations,
     ) -> Result<(), RouteError> {
         if self.attached(from) {
@@ -418,7 +421,7 @@ impl Network {
                 .iter()
                 .filter_map(|m| Some((m.name.as_str(), m.address?)));
             if let Some(reply) = seedbox_engine_core::dns::answer(bytes, members) {
-                return self.reply(from, sent, reply);
+                return self.reply(from, sent, reply, reached);
             }
         }
         let destination: [u8; 6] = bytes[..6].try_into().expect("bounded frame");
@@ -579,6 +582,9 @@ impl Network {
                     l.counts.duplicated += 1;
                 }
             }
+            if at < reached(to) {
+                return Err(RouteError::BeforeReceiver { to, at });
+            }
             if is_reset_frame(&delivered) {
                 self.connections.observe(from.0, to.0, &delivered);
             }
@@ -611,7 +617,13 @@ impl Network {
     /// Schedule the nameserver's reply to `to` one global latency after its
     /// query. Partitions and link policy never apply, and no observation or
     /// link counter records it; the receiver's sequence orders the reply.
-    fn reply(&mut self, to: MachineId, sent: u64, bytes: Vec<u8>) -> Result<(), RouteError> {
+    fn reply(
+        &mut self,
+        to: MachineId,
+        sent: u64,
+        bytes: Vec<u8>,
+        reached: &dyn Fn(MachineId) -> u64,
+    ) -> Result<(), RouteError> {
         let sequence = self.members[to.0].sent;
         self.members[to.0].sent = sequence
             .checked_add(1)
@@ -619,6 +631,9 @@ impl Network {
         let at = sent
             .checked_add(self.config.latency_ns)
             .ok_or(RouteError::ArrivalOverflow)?;
+        if at < reached(to) {
+            return Err(RouteError::BeforeReceiver { to, at });
+        }
         self.in_flight
             .insert((at, to, sequence, to), Flight { sent, bytes });
         Ok(())

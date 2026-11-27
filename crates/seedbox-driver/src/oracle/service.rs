@@ -523,6 +523,8 @@ pub(crate) struct Settlement {
     pub requested_at: u64,
     pub admitted_at: u64,
     pub outcome_at: Option<u64>,
+    /// When the settlement took effect: the outcome's own time, even when a
+    /// later commit carried it, or the failure's time when there is none.
     pub committed_at: u64,
     pub status: SettlementStatus,
     pub handle: Option<String>,

@@ -11,6 +11,16 @@ Syscall charges sample their price once. Each segment keeps its first clock read
 and interrupt unmask, then charges the remaining ticks together up to the published
 bound. A stopped continuation retains the unpaid charge in guest state.
 
+A yield only for the run's bound (before the machine's own wake, taking no deferred
+interrupt) depends on where the host ends the run, so the [worker](../crates/seedbox-machine-pv/src/machine/pv/worker/mod.rs)
+records nothing for it and advances no reservation epoch; a stopped page publishes the
+machine's wake as its bound, and a run that delivers nothing adopts nothing.
+Reads before the kernel maps the page count without a bound, so at clock setup the
+guest charges them up to each published bound, yielding between runs. A guest that
+goes idle blocks there, also exactly at the run's bound and before its own wake: a run
+ending at the horizon would re-enter it for an idle exit of its own, and one that ran
+on to the wake would take its timer before an input the host applies at that time.
+
 Some syscalls are not application work at full price. The PV clock leaves the vDSO
 without a clock on both architectures, so time syscalls (`clock_gettime`,
 `clock_getres`, `gettimeofday`, and x86 `time`) cost only the clock read they make.
@@ -71,6 +81,14 @@ translation tables alone do not, and the client never asks for them.
 TCG budgets QEMU icount steps, not retired instructions: REP I/O costs per iteration plus a final check.
 The TSC and LAPIC timer both count guest nanoseconds, so the guest command line states both rates instead of calibrating them at boot: `tsc_early_khz`, and `lapic_timer_khz` from the TCG kernel's [patch](../crates/seedbox-machine/guest/kernel/tcg-x86_64.patch).
 Idle reports its next virtual timer but cannot jump time itself; the Driver advances the shared clock.
+A run's budget splits a translated block as a timer deadline does, and finds nothing newly pending there:
+timers run between blocks, and an I/O instruction that raises an interrupt ends its block. A run that starts
+where the last stopped, with nothing to deliver, adopts no time. A run too short to complete one instruction,
+which a throttled machine can get, is charged to the next instruction only after its CPU has taken what was
+pending at its start, and a CPU that stays halted is charged nothing. So where runs end leaves no trace.
+The microvm board has no RNG-seed provider and QEMU's `-seed` never reaches the guest, so each boot appends
+`seedbox.entropy=<boot seed>` to the kernel command line; Linux mixes the command line into its pool before
+its first draw. PV instead passes the seed as a device-tree `rng-seed` (ARM) or `SETUP_RNG_SEED` (x86).
 A bounded run has no host read timeout; only test-support adds a 600-second stuck-process watchdog.
 The [adapter](../crates/seedbox-machine-tcg/src/machine/tcg.rs) merges frame, console and lifecycle output in occurrence order.
 
@@ -99,8 +117,10 @@ memory checks and retention of the complete replay closure still run on every pr
 
 ## PV round execution
 
-The Driver starts each runnable VM on its own request ring and sweeps the reply
-rings. A ready VM can take its next lane input while another VM is executing.
+Every machine runs on the thread that steps the Driver. A TCG world runs its
+machines inline, one after another. In a PV world the Driver starts each
+runnable VM on its own request ring and sweeps the reply rings. A ready VM can
+take its next lane input while another VM is executing.
 The Driver stages each machine's outputs until the barrier, where occurrence
 time and machine identity determine their order. One producer owns each ring.
 It publishes a completed message with one commit, or streams an oversized
@@ -116,24 +136,52 @@ sleeps in its oldest run for that round, on that worker's own pipe. The default
 spin ceiling is 200 µs in the coordinator. macOS ARM64 with timed WFE uses a
 monitored wait and a 400 µs VM ceiling. Other hosts, including Macs without
 FEAT_WFxT, use bounded spinning and a 1 ms VM ceiling. Both park sooner after consecutive unproductive spins.
+A PV machine on a clock without drift has a timed inbox: its lane run goes to the round's end and is given
+every frame that arrives for it before then, instead of ending at each arrival. The worker makes, inside the run,
+exactly the runs the client would have made: to each frame's time with the frames due then, and on from a block at
+its wake or the next frame, whichever comes first, also in a lane with no frames. Frames it did not reach (an exit,
+a breakpoint, a held disk request) go back to the lane. Tests turn this off with `Driver::set_timed_inbox` and, for
+whole runs, a submission's `noTimedInbox` option, which only a `test-support` build accepts.
 [Round loop](../crates/seedbox-driver/src/driver/round.rs) ·
+[Lanes](../crates/seedbox-driver/src/driver/lanes.rs) ·
 [Wake protocol](../crates/seedbox-machine/src/host/doorbell.rs)
 
 ## Same-time controls
 
-Committed outputs precede due timeline items, then frames, then timer wakeups; same-time items are FIFO.
+Outputs of one instant are ordered by machine, then emission, whatever the rounds: a commit holds output stamped
+at or after the earliest time any machine can still emit, unless a timeline item, a frame for a paused
+receiver or the end of the run is due at its barrier, or the host admits an input there. Such a needed barrier
+commits everything held first: committed outputs precede due timeline items, then frames, then timer wakeups;
+same-time items are FIFO. A run that only continues from any other barrier maps machine times from the nanosecond
+before it, so a slow clock's shared machine nanosecond maps to its first simulation nanosecond.
+A timer wake starts at the timer's machine deadline, which a fast clock can place inside the nanosecond it wakes at.
 A running machine takes those frames and its due timer at the start of its next run, which starts there.
-A paused or suspended receiver admits frames in a zero-budget run. So does a running machine, with its
-due timer, before a later item due then for it and before final evidence is read.
+A paused receiver admits frames at their arrival's barrier in a zero-budget run, which starts at the barrier's
+machine time even when a fast clock put its timer's deadline before it. A machine held at a breakpoint is held
+from its hit, whichever commit carries the hit: it takes frames at their arrival in its lane, without a budget.
+A running machine gets a zero-budget run, with its due timer, before a later item due then for it and before
+final evidence is read.
+A host input is prepared against the state its commit will see: output held at the barrier is applied to copies
+of control and, when frames are held, of the network, and a held call that would fail the commit fails the
+preparation instead.
 Plans created by admission append behind existing items; delayed guest replies belong only to the calling boot.
+What follows from a machine's output or exit (a guest call's admission, a reply, a released command, a flush reply)
+is due one network latency after it, never at the commit that carried it, and queues in output order.
 The [Driver](../crates/seedbox-driver/src/driver.rs) assigns fault IDs at admission, never for future overrides.
+Where rounds end is the host's: policy [evidence](../crates/seedbox-driver/src/driver/evidence.rs) holds no quantum,
+commit count or commit time, so evidence at one time is the same under any stops or quantum, as long as
+each machine blocks where it goes idle (the `Machine::run` contract).
+Tests end rounds at seeded times with a [stop policy](../crates/seedbox-driver/src/driver/stops.rs): scripted
+machines in `tests/driver_stop_policy.rs`, and whole runs through a submission's `stopPolicy` seed, which only
+a server built with test support (the long suites' CLI build) accepts; any other refuses the submission. The
+worker writes the seed to its stderr (the run's `vmm.stderr` diagnostic); submitting it again repeats the stops.
 
 ## Machine network delivery
 
 Partitions survive reboots and stack by handle, but do not retract frames already routed.
-A frame stamped T by the round ending at T routes before a partition/heal due at T.
+A frame stamped T routes before a partition/heal due at T.
 Admission-run output after that effect sees the changed policy; zero-budget receive can wake a paused machine.
-A blocked receiver is runnable from a frame's arrival, so rounds end within one network (or controller) latency even if it does not wake.
+A blocked receiver is runnable from a frame's arrival, so rounds end within one network latency of the earliest start of any machine, networked or not, even if it does not wake.
 The [network policy](../crates/seedbox-driver/src/driver/network.rs) checks cuts before random draws and FIFO reservation.
 
 ## Simulated DNS
@@ -166,7 +214,7 @@ Lost kernel records fail supervision with an I/O error rather than guessing a vi
 
 Every supervisor serves `/run/seedbox/guest.sock` (and an abstract-namespace twin) and numbers a boot's guest sessions and each session's records from 1; it reports each session that closes, so the ledger stays bounded.
 The kmsg reader that relays OOM victims also relays fatal-signal reports, enabled by `print-fatal-signals`, one per crash; on a machine without `allowCrashes` each is a violation.
-The Driver reduces frames at commit and queues each flush reply behind items due at that boundary, for the same boot only.
+The Driver reduces frames in output order and queues each flush reply one network latency after its flush record, for the same boot only.
 Its [ledger](../crates/seedbox-engine-core/src/properties.rs) keeps first violations, which IDs were required or evaluated, and lost evidence, never a tally; it is Driver checkpoint and policy-evidence state.
 Unmet requirements are read from the final report, so a run's verdict changes only at completion.
 
@@ -174,7 +222,7 @@ Unmet requirements are read from the final report, so a run's verdict changes on
 
 Host interruption can clear a hardware reservation without any guest write, making raw store-exclusive failure nondeterministic.
 Translation retains address/value/size/guest epoch and retries physical monitor loss inside the exclusive pair.
-Guest boundaries advance the epoch; watchdog and maintenance exits do not. Value equality alone misses ABA.
+Guest boundaries advance the epoch; watchdog and maintenance exits and bound yields do not. Value equality alone misses ABA.
 The [translator](../vendor/dynamorio/core/arch/aarchxx/mangle.c) and kernel return hook assume one guest CPU.
 
 ## ARM code-cache consistency
@@ -383,8 +431,9 @@ their own assets. See [xtask](../crates/xtask/src/main.rs).
 external inputs, and need the server's MATCH (witness, outcome, fault history and full
 state) when that definition reruns under slowed or paused playback with stalled
 followers, beside a concurrently controlled simulation, with checkpoints at each marker, after
-fault previews, with keyed controls whose clients disconnect, and with 2, 3 and 8 machine
-workers. Branches of one checkpoint match each other and the source's suffix, including
-from a checkpoint file in a second server session; fresh runs there repeat the first
-session's output. Edited inputs keep everything before their first changed time.
+fault previews, and with keyed controls whose clients disconnect. A lifecycle variant
+with live controls replays from its retained timeline, and fresh reruns of the baseline,
+lifecycle, controlled and branch documents reproduce every observed trace. Branches of
+one checkpoint match each other and the source's suffix, including from a checkpoint file
+in a second server session; fresh runs there repeat the first session's output. Edited inputs keep everything before their first changed time.
 Position targets are reached in real time: the server samples playback every 250 ms.

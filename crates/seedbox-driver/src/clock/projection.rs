@@ -33,6 +33,11 @@ impl Projection {
         }
     }
 
+    /// Whether machine time advances exactly as fast as simulation time.
+    pub(crate) fn steady(self) -> bool {
+        self.drift_ppb == 0
+    }
+
     /// Simulation time of the most recent rate change (or construction).
     pub(crate) fn anchor(self) -> u64 {
         self.anchor

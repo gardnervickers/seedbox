@@ -70,6 +70,13 @@ pub(super) enum Request {
         /// The client took ResumeBreak since the last run: a held disk
         /// request continues at the start of this run, budget or not.
         resume: bool,
+        /// A timed run: the times of the last frames of the trailer, one
+        /// each, ascending, after `now` and before `upto`. Each is delivered
+        /// at its time, as a run ending there and the next run starting
+        /// there with it would deliver it, and the run goes on across a
+        /// block whose wake comes first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timed: Option<Vec<u64>>,
     },
     ExecutionEvidence,
     Capture(PathBuf),
@@ -178,6 +185,9 @@ pub(super) enum Response {
         time: u64,
         stop: Stop,
         writes: u64,
+        /// How many of the run's timed frames the guest was given, in order.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        taken: u64,
     },
     ExecutionEvidence(NativeExecution),
     Captured,
@@ -288,3 +298,7 @@ pub(super) fn receive<T: DeserializeOwned>(input: &mut impl Read) -> Result<Opti
 }
 #[cfg(test)]
 mod tests;
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}

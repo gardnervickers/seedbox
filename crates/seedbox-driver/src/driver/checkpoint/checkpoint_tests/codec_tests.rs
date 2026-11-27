@@ -32,20 +32,17 @@ fn exercise(mut d: Driver<Mock>) {
     let (bytes, store) = artifact(d.checkpoint().unwrap());
     let expected = continue_from(&mut d);
     drop(d);
-    for workers in [1, 4] {
-        let c = decode(&bytes, &store);
-        let mut b = restore(&c, workers);
-        drop(c);
-        assert_eq!(status(&mut b), before);
-        assert_eq!(continue_from(&mut b), expected);
-    }
+    let c = decode(&bytes, &store);
+    let mut b = restore(&c);
+    drop(c);
+    assert_eq!(status(&mut b), before);
+    assert_eq!(continue_from(&mut b), expected);
 }
 #[test]
 fn all_stopped_boundary_families_roundtrip_after_source_destruction() {
     let mut d = Driver::new_seeded(
         at(0),
         Duration::from_nanos(u64::MAX - 1),
-        1,
         51,
         || Ok(Context(None)),
         fixture::definition(0),
@@ -465,7 +462,6 @@ fn future_binary_closure_is_exact_and_invalid_resources_remain_deferred() {
         let count = calls.clone();
         let mut b = Driver::from_checkpoint(
             &c,
-            1,
             || Ok(Context(None)),
             Mock::restore,
             move |definition| {
@@ -582,7 +578,7 @@ fn decoded_invariants_reject_untrusted_complete_objects() {
             0 => c.quantum_ns = 0,
             1 => c.oracle = MachineId(100),
             2 => c.network = network::Network::new(NetworkConfig::default()),
-            3 => c.completed_quanta = u64::MAX,
+            3 => c.origin = at(u64::MAX),
             4 => c.machines[0].machine = None,
             5 => c.machines[0].lifecycle.uncertain_failure(),
             6 => {
@@ -785,18 +781,16 @@ fn held_effect_survives_running_rate_selection_and_rearm() {
         };
         let expected = finish(&mut d);
         drop(d);
-        for workers in [1, 4] {
-            let c = decode(&bytes, &store);
-            let mut restored = restore(&c, workers);
-            drop(c);
-            assert_eq!(finish(&mut restored), expected);
-        }
+        let c = decode(&bytes, &store);
+        let mut restored = restore(&c);
+        drop(c);
+        assert_eq!(finish(&mut restored), expected);
     }
 }
 
 #[test]
 fn retired_cursor_and_reports_are_validated_before_publication_or_restore() {
-    let mut d = net(initial(), setup(8), 1);
+    let mut d = net(initial(), setup(8));
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
     for kind in 0..5 {
@@ -870,7 +864,7 @@ fn retired_cursor_and_reports_are_validated_before_publication_or_restore() {
 
 #[test]
 fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
-    let mut d = net(initial(), setup(8), 1);
+    let mut d = net(initial(), setup(8));
     advance(&mut d, 1);
     let (bytes, _) = artifact(d.checkpoint().unwrap());
     assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
@@ -910,7 +904,7 @@ fn closed_codec_version_and_orphaned_network_ownership_fail_before_restore() {
 }
 
 #[test]
-fn oom_victim_output_survives_persisted_continuation_and_worker_counts() {
+fn oom_victim_output_survives_persisted_continuation() {
     let kill = Response::OutOfMemoryKill {
         kill: seedbox_engine_protocol::out_of_memory::Kill {
             pid: 31,
@@ -937,7 +931,7 @@ fn oom_victim_output_survives_persisted_continuation_and_worker_counts() {
     );
     advance(&mut d, 3);
     // exercise destroys the source and compares publications and machine state
-    // after binary decode/restoration with both one and four workers.
+    // after binary decode/restoration.
     exercise(d);
 }
 

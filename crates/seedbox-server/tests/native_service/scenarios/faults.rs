@@ -58,7 +58,7 @@ fn delta(output: &str) -> u64 {
 async fn active_throttle(session: &mut NativeSession) -> (seedbox_api::SimulationId, u32) {
     let mut request = cpu_request(session);
     request.options.start_paused = true;
-    let id = session.submit(request, 1).await;
+    let id = session.submit(request).await;
     session.worker(&id).await;
     session
         .control(
@@ -111,13 +111,13 @@ pub async fn pv_throttle_heal_replay() {
         let InputSource::Resolved { definition } = &mut request.spec.inputs else { unreachable!() };
         definition.runtime.execution["witness_mode"] = serde_json::to_value(WitnessMode::FullState).unwrap();
         request.spec = SimulationSpec::resolved(definition.as_ref().clone()).unwrap();
-        let baseline = session.submit(request.clone(), 1).await;
+        let baseline = session.submit(request.clone()).await;
         session.worker(&baseline).await;
-        session.complete(&baseline, false, 1, SEED).await.unwrap();
+        session.complete(&baseline, false, SEED).await.unwrap();
         let baseline_output = session.stdout(&baseline, TARGET, false).await;
         let mut paused = request;
         paused.options.start_paused = true;
-        let source = session.submit(paused, 1).await;
+        let source = session.submit(paused).await;
         session.worker(&source).await;
         session.control(&source, "initial-pause", ControlCommand::SetRate { rate: PlaybackRate::Paused }).await;
         let started = until_output(session, &source, "START=").await;
@@ -134,16 +134,16 @@ pub async fn pv_throttle_heal_replay() {
         let world = session.client.world(&source).await.unwrap();
         assert_ne!(world.machines.iter().find(|machine| machine.name == TARGET).unwrap().throttle_permille, Some(2_000));
         session.control(&source, "finish", ControlCommand::SetRate { rate: PlaybackRate::Unlimited }).await;
-        let source_witness = session.complete(&source, false, 1, SEED).await.unwrap();
+        let source_witness = session.complete(&source, false, SEED).await.unwrap();
         applied_once(session, &source, &[fault, heal]).await;
         // Consume the service-frozen spec, not fresh duplicate host injections.
         let resource = session.client.describe(&source).await.unwrap();
         assert_eq!(resource.spec.program.len(), 2);
         assert!(matches!(&resource.spec.inputs, InputSource::Resolved { definition }
             if definition.overrides == resource.spec.program));
-        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }, 4).await;
+        let replay = session.submit(SubmitRequest { metadata: Default::default(), options: Default::default(), request_id: "fault-replay".into(), spec: resource.spec }).await;
         session.worker(&replay).await;
-        let replay_witness = session.complete(&replay, false, 4, SEED).await.unwrap();
+        let replay_witness = session.complete(&replay, false, SEED).await.unwrap();
         assert_eq!(source_witness, replay_witness);
         assert_eq!(target_output, session.stdout(&replay, TARGET, false).await);
         applied_once(session, &replay, &[fault, heal]).await;

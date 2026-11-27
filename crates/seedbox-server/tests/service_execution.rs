@@ -364,7 +364,6 @@ fn retained_old_and_new_engines_with_different_policy_digests_are_not_comparable
             run_id: ContentDigest::of(&serde_json::to_vec(&identity).unwrap()),
             attempt: name.into(),
             identity,
-            performance_parameters: Default::default(),
             log_policy: LogPolicy::default(),
             omitted_logs: Default::default(),
             outcome: Outcome::Pass,

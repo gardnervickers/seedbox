@@ -105,7 +105,7 @@ fn captured_names_require_unique_present_names_even_if_service_names_match() {
 fn service_name_substitution_is_refused_before_any_native_mapping() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut source = driver(1, 2, Arc::default(), Arc::default(), None);
+    let mut source = driver(2, Arc::default(), Arc::default(), None);
     let mut state = state(2);
     let path = capture(
         &mut source,
@@ -149,7 +149,7 @@ fn service_name_substitution_is_refused_before_any_native_mapping() {
 fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut source = driver(4, 3, Arc::default(), Arc::default(), None);
+    let mut source = driver(3, Arc::default(), Arc::default(), None);
     source.step(Timestamp::from_nanos(10)).unwrap();
     let mut state = state(3);
     let path = capture(
@@ -178,7 +178,7 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
     }
     std::thread::scope(|scope| {
         let mut handles = vec![];
-        for workers in [1, 4, 1, 4] {
+        for _ in 0..4 {
             let checkpoint = &checkpoint;
             let expected = &expected;
             handles.push(scope.spawn(move || {
@@ -187,7 +187,6 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let mut branch = Driver::<Restoring>::from_checkpoint(
                     checkpoint,
-                    workers,
                     || Ok(()),
                     |saved| {
                         let LazySaved::Stored(file) = saved else {
@@ -232,7 +231,7 @@ fn simultaneous_restores_share_verified_descriptors_not_reader_positions() {
 fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_targets() {
     let root = tempfile::tempdir().unwrap();
     let inventory = fixture_inventory(&root.path().join("authority"));
-    let mut source = driver(4, 3, Arc::default(), Arc::default(), None);
+    let mut source = driver(3, Arc::default(), Arc::default(), None);
     source.step(Timestamp::from_nanos(10)).unwrap();
     let mut state = state(3);
     let manifest = capture(
@@ -265,7 +264,6 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
     let mut calls = 0;
     let failed = Driver::<Restoring>::from_checkpoint(
         &checkpoint,
-        4,
         || Ok(()),
         |saved| {
             calls += 1;
@@ -284,11 +282,10 @@ fn descriptor_backed_restore_has_one_decoded_body_at_a_time_and_cleans_partial_t
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     // The same checkpoint remains reusable after failure and native source/file
     // destruction. Independent pread cursors do not need seek-reset or retries.
-    for workers in [1, 4] {
+    for _ in 0..2 {
         let before = drops.load(Ordering::SeqCst);
         let mut branch = Driver::<Restoring>::from_checkpoint(
             &checkpoint,
-            workers,
             || Ok(()),
             |saved| restore_one(saved, &live, &peak, &drops, false),
             |_| panic!("existing machines must not call future factory"),

@@ -126,6 +126,10 @@ where
         driver.set_frame_capacity(if observations.is_some() { 1024 } else { 0 });
         let mut state = state;
         state.world.publication.session = Default::default();
+        let mut publisher = Publisher::connect(observations)?;
+        // Readiness is published as the Ready that latches it commits
+        // (`Publisher::publish`); a restored world latched it before.
+        publisher.restored_ready(&mut state)?;
         Ok(Self {
             driver,
             state,
@@ -133,7 +137,7 @@ where
             output,
             names,
             constructed,
-            publisher: Publisher::connect(observations)?,
+            publisher,
             prepared: None,
             checkpoint: None,
             checkpoint_refusal: None,
@@ -173,17 +177,6 @@ where
                             return Err(fail("Driver machine identity committed twice"));
                         }
                         self.state.world.machine_names.push(name);
-                    }
-                    driver::EventKind::Output(driver::MachineResponse {
-                        machine,
-                        payload: Response::Ready,
-                        ..
-                    }) => {
-                        let name = self
-                            .names
-                            .get(machine)
-                            .ok_or_else(|| fail("Driver ready fact has no machine binding"))?;
-                        self.state.world.readiness.observe(name);
                     }
                     driver::EventKind::FaultAdmitted(record) => {
                         facts.admissions.push(record.clone())
@@ -625,16 +618,13 @@ where
             .driver
             .with_barrier(|barrier| barrier.commit_input(&scope.input));
         let facts = self.flush()?;
-        let due = match result {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.failed = true;
-                self.terminal = true;
-                return Err(fail(format!(
-                    "retained Driver intervention failed: {error}"
-                )));
-            }
-        };
+        if let Err(error) = result {
+            self.failed = true;
+            self.terminal = true;
+            return Err(fail(format!(
+                "retained Driver intervention failed: {error}"
+            )));
+        }
         let expected = match scope.input.outcome() {
             PreparedOutcome::Admitted(record) => &**record,
             PreparedOutcome::Rejected(_) => {
@@ -647,7 +637,6 @@ where
                 "Driver committed admission differs from prepared retained Intervention",
             ));
         }
-        self.finish_due(due)?;
         self.state.world.input_program.admissions.push(
             seedbox_engine_protocol::input_program::InputAdmission {
                 key: request_id.clone(),
@@ -721,7 +710,6 @@ where
                 .map_err(|error| fail(error.to_string()))?;
             self.flush()?;
             let ready = matches!(due, DueOutcome::Applied { .. });
-            self.finish_due(due)?;
             if !ready {
                 return Ok(false);
             }
@@ -732,8 +720,7 @@ where
                     None => barrier.schedule(at, key.clone(), action),
                 })
                 .map_err(|error| fail(error.to_string()))?;
-            let due = self
-                .driver
+            self.driver
                 .with_barrier(|barrier| barrier.apply_due_now())
                 .map_err(|error| fail(error.to_string()))?;
             let facts = self.flush()?;
@@ -777,7 +764,6 @@ where
                 .input_program
                 .validate_at(at.as_nanos())
                 .map_err(fail)?;
-            self.finish_due(due)?;
             Ok(true)
         })();
         if result.is_err() {
@@ -785,20 +771,6 @@ where
             self.terminal = true;
         }
         result
-    }
-    pub(super) fn finish_due(&mut self, outcome: DueOutcome) -> Result<()> {
-        if let DueOutcome::Finished { at, .. } = outcome {
-            // The already-finished fast path clears pending step/arm without
-            // running machines or changing time; due-only dispatch preserves it.
-            let terminal = self.driver.step(at).map_err(|e| fail(e.to_string()))?;
-            self.observe_terminal(&terminal)?;
-            if !matches!(terminal, StepOutcome::Finished { .. }) {
-                return Err(fail("Driver due-finish changed while finalizing playback"));
-            }
-            self.terminal = true;
-            self.flush()?;
-        }
-        Ok(())
     }
     pub(super) fn step(&mut self, upto: Timestamp) -> Result<StepOutcome> {
         self.step_selected(upto, false)

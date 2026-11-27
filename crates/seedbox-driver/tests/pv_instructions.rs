@@ -70,13 +70,9 @@ fn instruction_application(mode: &str) -> MachineDefinition {
 }
 
 /// Run the instruction fixture as an instrumented oracle through the public
-/// Driver; return every committed output and the oracle's stdout.
+/// Driver; return the oracle's stdout.
 #[cfg(target_arch = "x86_64")]
-fn instruction_run(
-    mode: &str,
-    workers: usize,
-    seed: u8,
-) -> (Vec<seedbox_driver::driver::MachineResponse>, String) {
+fn instruction_run(mode: &str, seed: u8) -> String {
     use seedbox_driver::driver::{Driver, EventKind, StepOutcome};
     use seedbox_machine::machine::ExitReason;
     struct SeedRng(u8);
@@ -98,7 +94,6 @@ fn instruction_run(
     let mut driver = Driver::new(
         Timestamp::from_nanos(0),
         Duration::from_nanos(quantum),
-        workers,
         SeedRng(seed),
         || Ok(()),
         instruction_application(mode),
@@ -171,19 +166,16 @@ fn instruction_run(
         .flatten()
         .copied()
         .collect();
-    (outputs, String::from_utf8(stdout).unwrap())
+    String::from_utf8(stdout).unwrap()
 }
 
 #[cfg(target_arch = "x86_64")]
 #[test]
 #[ignore = "requires native x86 PV worker, factory guest assets and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
 fn instrumented_rdrand_and_rdseed_draw_seeded_guest_entropy() {
-    let (serial, stdout) = instruction_run("entropy", 1, 9);
+    let stdout = instruction_run("entropy", 9);
     println!("{stdout}");
-    let (parallel, parallel_stdout) = instruction_run("entropy", 4, 9);
-    assert_eq!(stdout, parallel_stdout);
-    assert!(serial == parallel, "worker count changed committed outputs");
-    let (_, reseeded) = instruction_run("entropy", 1, 77);
+    let reseeded = instruction_run("entropy", 77);
     let parse = |text: &str| -> Vec<(String, u64, u64)> {
         text.lines()
             .map(|line| {
@@ -245,12 +237,9 @@ fn instrumented_rdrand_and_rdseed_draw_seeded_guest_entropy() {
 #[test]
 #[ignore = "requires native x86 PV worker, factory guest assets and SEEDBOX_PV_CLANG/SEEDBOX_PV_LD"]
 fn host_sensitive_user_instructions_are_virtual_or_refused() {
-    let (serial, stdout) = instruction_run("probe", 1, 9);
+    let stdout = instruction_run("probe", 9);
     println!("{stdout}");
-    let (parallel, parallel_stdout) = instruction_run("probe", 4, 9);
-    assert_eq!(stdout, parallel_stdout);
-    assert!(serial == parallel, "worker count changed committed outputs");
-    assert_eq!(stdout, instruction_run("probe", 1, 77).1);
+    assert_eq!(stdout, instruction_run("probe", 77));
     // RDPID reads the guest-owned TSC_AUX (CPU 0). RDPRU and UMWAIT are
     // refused (SIGILL); RDPMC faults without CR4.PCE (SIGSEGV). RDTSCP traps
     // to the kernel's virtual time. KVM intercepts MONITORX/MWAITX, so the
