@@ -1107,6 +1107,12 @@ where
         self.step_at(upto, Instant::now())
     }
 
+    /// The quantum: the step of paced playback and the longest round. A host
+    /// setting; where rounds end does not change results.
+    pub fn quantum(&self) -> Duration {
+        Duration::from_nanos(self.execution.quantum_ns)
+    }
+
     /// Step toward a caller-owned future input boundary, even if all machines
     /// are idle or paused individually. Global playback pause/rate and permanent
     /// completion still apply. Time advances only through ordinary Driver
@@ -2115,6 +2121,30 @@ where
         })
     }
 
+    /// The committed-output frontier: the earliest of the watermark and of
+    /// every output and exit still held. Everything stamped before it is
+    /// committed, and without a new input nothing can still be stamped
+    /// before it. `None` when nothing is held and nothing can emit again. It
+    /// is read from the machines' positions and staged output, which a
+    /// checkpoint carries, so a restored Driver gives the same answer.
+    fn committed_before(&self) -> Option<Timestamp> {
+        let held = self.execution.machines.iter().flat_map(|entry| {
+            let exit = match entry.stopped {
+                StopReason::Exited { reached, .. }
+                    if entry
+                        .lifecycle
+                        .facts()
+                        .is_ok_and(|facts| !facts.physically_ended) =>
+                {
+                    Some(reached)
+                }
+                _ => None,
+            };
+            entry.staged.iter().map(|output| output.at).chain(exit)
+        });
+        self.watermark().into_iter().chain(held).min()
+    }
+
     /// Make the current barrier a needed one: every machine is cut here in
     /// every schedule, and what is held commits before anything due or
     /// admitted here (C2).
@@ -2456,6 +2486,30 @@ where
             .control
             .world_view(&self.driver.execution.machines)
             .map_err(Error::Control)
+    }
+
+    /// How far committed output reaches at this barrier, exclusively: every
+    /// output and exit stamped before the returned time has been committed
+    /// and published ([`Driver::drain_observations`] returns it), and no
+    /// machine can still stamp anything before it unless the host gives the
+    /// Driver an input due earlier. Output stamped at it or later may be
+    /// held, uncommitted, until a later barrier, also when it is stamped
+    /// before the barrier's own time. `None` when nothing is held and,
+    /// without another input, nothing can emit again.
+    ///
+    /// At a barrier every schedule shares (a timeline item or the end of the
+    /// run due there, a frame for a paused receiver, an input or
+    /// [`Barrier::host_break`] the host gave it) everything emitted so far is
+    /// committed, and the frontier is the barrier's time or later. At any
+    /// other barrier it is the barrier's time, or the nanosecond before when
+    /// a machine with a slow clock has reached the barrier inside a machine
+    /// nanosecond that the previous simulation nanosecond shares: what it
+    /// emits next may still be stamped there, so every machine's output
+    /// stamped there waits. It never trails the barrier by more.
+    // A host comparing what two runs published by a time must know how far
+    // each run's published output is complete; the barrier's time is not it.
+    pub fn committed_before(&self) -> Option<Timestamp> {
+        self.driver.committed_before()
     }
 
     /// Hit the breakpoint `name` from the host. The oracle receives the hit

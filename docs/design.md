@@ -14,8 +14,11 @@ The oracle checks application behaviour; a witness comparison checks reproducibi
 Guest properties and crash reports qualify the oracle's verdict: violations, unmet requirements and lost evidence are the only property results kept, and they arrive with the final report ([properties](scenarios.md)).
 Replay uses retained runtime inputs, so MATCH alone cannot validate a changed engine.
 Independent fresh runs exercise the new engine; comparison first checks resolved input compatibility.
-[Comparison](../crates/seedbox-server/src/execution.rs) ignores image names and descriptive host/engine metadata,
-not launch contracts or binary inputs. Completion freezes definitions and result evidence in the server;
+[Comparison](../crates/seedbox-server/src/execution.rs) ignores image names, descriptive host/engine metadata
+and the quantum, not launch contracts or binary inputs. The prepared Driver inputs are binary inputs and record
+the quantum they were prepared with, so a project prepared again with another quantum is NOT_COMPARABLE, while
+a definition resubmitted with only its quantum edited shares its source's inputs and compares.
+Completion freezes definitions and result evidence in the server;
 comparison never reconstructs them from attempt paths. Missing evidence is NOT_COMPARABLE, not a mismatch.
 
 ## Parallelism has a causal bound
@@ -30,7 +33,7 @@ arrival without a budget, from its hit on, whichever commit carried the hit.
 Commit orders output by occurrence, not by the order runs finish, so host scheduling cannot change results.
 The [Driver](../crates/seedbox-driver/src/driver.rs) owns that bound, not the CPU backends.
 
-Where a round ends is the host's choice, and four rules keep it out of what the Driver does.
+Where a round ends is the host's choice, and four rules keep it out of a run's results.
 Code comments cite them by label.
 
 - **C1, consequences follow the output.** What the Driver schedules because of an output (a
@@ -44,11 +47,15 @@ Code comments cite them by label.
 - **C3, the same runs for a machine.** However its runs are split, the Driver offers a machine
   the same inputs at the same machine times: a timer wake starts at the timer's own deadline,
   and a run that only continues from a stop nothing needed maps its times as if it had not
-  stopped. A machine must in turn leave no trace of a stop that delivers nothing; that part is
-  each backend's own.
+  stopped. A machine in turn leaves no trace of a stop that delivers nothing: no record, epoch,
+  draw or adopted time ([PV](internals.md#bounded-clock-reads-and-progress),
+  [TCG](internals.md#reference-tcg-machine)).
 - **C4, the run ends after the oracle.** The run ends one network latency after the oracle's
   terminal output or exit, with every machine run to that time and its output up to then
   published. What is due before the end still happens; what is due at it does not.
+
+So where rounds end, and the quantum that caps them, change no result; the quantum only paces
+playback.
 
 `network.latency` is therefore also a delay the oracle sees: an SDK call takes effect, a `flush`
 is answered and the run ends one latency after the output that asked. A simulated time limit
@@ -81,13 +88,14 @@ its delivered inputs alone. And a line one run wrote at time `t` is written at
 to go back to: `Branch::rewind` restores an earlier point, replays the run's
 own inputs to just before `t` and checks the replay against the run. An input
 due at the point it returns to is delivered there, as it was in the run.
-Stops and saves are not inputs: where a run stops must not change what its
-machines do. Saves never do. A stop could, because the Driver still ends a run
-at the round that saw the oracle exit and orders outputs of one nanosecond by
-the commit that carried them, so a round cut short at an arbitrary time can
-move later ones ([#459](https://github.com/gardnervickers/seedbox/issues/459)). `Run::advance`
-therefore stops only at a barrier the run would reach anyway, the first one at
-or after the time asked for; only inputs cut rounds short.
+Stops and saves are not inputs, and neither changes what a run's machines do
+(see the causal bound above). `Run::advance` stops exactly at the time asked
+for, and `advance_watching` asks its watch every stride of simulated time, one
+quantum unless told otherwise.
+A stopped run's trace holds what its machines wrote before the Driver's
+committed frontier (`Barrier::committed_before`): the stop, or the nanosecond
+before it while a machine with a slow clock can still stamp output there.
+`rewind` checks the replay against the run up to that frontier.
 The trace compares lines and lifecycle changes, which have times of their own;
 settlements are not compared.
 

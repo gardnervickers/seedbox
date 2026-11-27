@@ -66,3 +66,28 @@ fn injected_faults_are_checked_before_journaling() {
         Err(Error::Invalid(message)) if message.contains("preempt ppm")
     ));
 }
+
+#[test]
+fn a_stop_policy_is_taken_only_by_a_test_support_build() {
+    let mut catalogue = Catalogue::in_memory();
+    let request = seedbox_api::SubmitRequest {
+        metadata: Default::default(),
+        options: seedbox_api::ExecutionOptions {
+            stop_policy: Some(4242),
+            ..Default::default()
+        },
+        request_id: "stops".into(),
+        spec: spec(json!({"action":"crash","machine":"db"})),
+    };
+    let submitted = catalogue.submit(request);
+    if seedbox_driver_execution::driver_world::TAKES_STOP_POLICY {
+        assert_eq!(submitted.unwrap().0.options.stop_policy, Some(4242));
+    } else {
+        // Refused at submission, before any preparation.
+        assert!(matches!(
+            submitted,
+            Err(Error::Invalid(message))
+                if message == "a stop policy needs a server built with test support"
+        ));
+    }
+}

@@ -50,6 +50,7 @@ fn request(inventory: Inventory, output: PathBuf) -> wire::Request {
         simulated_time_ns: 0,
         host_control: output.join("control"),
         output,
+        stop_policy: None,
         start_paused: false,
         full_state: false,
         observations: None,

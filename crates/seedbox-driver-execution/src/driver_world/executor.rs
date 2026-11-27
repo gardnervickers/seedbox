@@ -26,6 +26,17 @@ pub struct DriverExecutor {
     #[cfg(feature = "worker-failure")]
     failure_test: Option<(PathBuf, crate::process_lifetime::WorkerFailureInjector)>,
 }
+/// Whether this build's workers take a request's stop policy
+/// ([`crate::execution::ExecutionRequest::stop_policy`]). Only a build with
+/// `test-support` does; a server built without it refuses a submission that
+/// names one, before preparation, and a worker refuses the run.
+pub const TAKES_STOP_POLICY: bool = cfg!(feature = "test-support");
+/// What a worker says of the stop policy it runs with, on its stderr: the
+/// seed, with which another run repeats its stops.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn stop_seed_notice(seed: u64) -> String {
+    format!("seedbox: Driver stop policy seed {seed}")
+}
 impl DriverExecutor {
     /// Test-only monitor override and original-worker injection. `monitor` must
     /// dispatch the real process_lifetime monitor/anchor compiled with worker-failure

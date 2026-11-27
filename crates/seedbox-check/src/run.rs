@@ -830,18 +830,24 @@ fn native<C: Commands>(
         if !assets.is_absolute() || !assets.join("driver-runtime.tar.gz").is_file() {
             return Err("asset build did not return its absolute complete output directory".into());
         }
-        let mut build = checks.job(
-            "application-build",
-            words(&[
-                "cargo",
-                "build",
-                "--release",
-                "--locked",
-                "-p",
-                "seedbox",
-                "--message-format=json",
-            ]),
-        );
+        let mut command = words(&[
+            "cargo",
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "seedbox",
+            "--message-format=json",
+        ]);
+        // The long suites' determinism oracles give a run a host stop policy,
+        // which only a CLI built with their feature takes.
+        if suites
+            .iter()
+            .any(|s| matches!(s, Suite::MacAppsLong | Suite::LinuxAppsLong))
+        {
+            command.extend(words(&["--features", "long-application-tests"]));
+        }
+        let mut build = checks.job("application-build", command);
         build.environment.insert(
             "SEEDBOX_BUILD_DRIVER_RUNTIME".into(),
             assets

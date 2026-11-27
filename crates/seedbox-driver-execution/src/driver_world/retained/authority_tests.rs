@@ -161,6 +161,7 @@ fn backend_authority_checks_saved_inventory_in_runtime_and_both_launch_paths() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -247,6 +248,7 @@ fn retained_worker_launch_serializes_the_driver_contract_without_starting_it() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -394,6 +396,7 @@ fn request_reports_mapping_and_import_errors() {
         let cancellation = CancellationToken::default();
         let request = ExecutionRequest {
             start_paused: true,
+            stop_policy: None,
             resume_checkpoint: None,
             intervention_history: None,
             observations: None,
@@ -697,6 +700,7 @@ fn adapt_prepared(
     let cancellation = CancellationToken::default();
     let request = ExecutionRequest {
         start_paused: true,
+        stop_policy: None,
         resume_checkpoint: None,
         intervention_history: None,
         observations: None,

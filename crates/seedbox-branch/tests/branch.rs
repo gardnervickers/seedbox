@@ -9,7 +9,10 @@ use seedbox_driver::{
     pv::{CommandResult, Output, Request, Response, SimulationControlId, Stream},
     test_support::definition,
 };
-use seedbox_machine::machine::{ExitReason, Machine, RunContext, StopReason, Timestamp};
+use seedbox_machine::{
+    clock::ClockRate,
+    machine::{ExitReason, Machine, RunContext, StopReason, Timestamp},
+};
 use std::{num::NonZeroU32, time::Duration};
 
 fn at(nanos: u64) -> Timestamp {
@@ -297,8 +300,7 @@ fn a_restored_run_repeats_its_parent_until_its_own_inputs_differ() {
 
 /// The oracle asks at 13 for the server to crash, and the Driver applies a
 /// guest's call one floor (10 ns) after it, at 23, after the server's line at
-/// 17. Stopping and saving at every nanosecond changes nothing, and neither
-/// does a stop in the program.
+/// 17. Stopping exactly at every nanosecond and saving there changes nothing.
 #[test]
 fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
     let scripts = || {
@@ -317,24 +319,19 @@ fn where_a_run_stops_or_saves_does_not_change_what_its_machines_do() {
     let mut stepped = run(scripts(), vec![]);
     let mut saves = Vec::new();
     for time in 1..=100 {
-        stepped.advance(at(time)).unwrap();
+        assert_eq!(stepped.advance(at(time)).unwrap(), Stop::Reached);
+        assert_eq!(stepped.now(), at(time));
         saves.push(stepped.save().unwrap());
     }
+    assert_eq!(lines(&stepped), lines(&straight));
     assert_eq!(occurrences(&stepped), occurrences(&straight));
-    // A run restored from any of those points goes on the same way.
-    let mut resumed = restored(&saves[14]);
-    resumed.advance(at(100)).unwrap();
-    assert_eq!(occurrences(&resumed), occurrences(&straight));
-
-    // A stop at 15 in the program ends that round there, before the line;
-    // the crash still comes one floor after the call.
-    let stop = || vec![Input::stop(at(15), key("stop"))];
-    let mut cut = run(scripts(), stop());
-    cut.advance(at(100)).unwrap();
-    assert_eq!(lines(&cut), lines(&straight));
-    let mut again = run(scripts(), stop());
-    again.advance(at(100)).unwrap();
-    assert_eq!(occurrences(&again), occurrences(&cut));
+    // A run restored from any of those points goes on the same way, among
+    // them the ones between the call and the crash, and before the line.
+    for saved in [&saves[12], &saves[14], &saves[16], &saves[21]] {
+        let mut resumed = restored(saved);
+        resumed.advance(at(100)).unwrap();
+        assert_eq!(occurrences(&resumed), occurrences(&straight));
+    }
 }
 
 /// The server's line at 20 is written by the round that ends at 20 and held
@@ -407,8 +404,7 @@ fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
         .iter()
         .map(|input| input.key.as_str())
         .collect();
-    // And the stop that put it there, so the stop is part of its run.
-    assert_eq!(delivered, ["pause", "rewind-67"]);
+    assert_eq!(delivered, ["pause"]);
     assert!(before.program().pending().is_empty());
     // The server was paused before it ended its first line.
     assert!(lines(&before).is_empty());
@@ -437,14 +433,7 @@ fn rewind_returns_to_just_before_a_line_the_run_already_wrote() {
 #[test]
 fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
     // The inputs arrive after the saved point, the first due at that point.
-    // The scout stops exactly at 39 and 40 only because its program does.
-    let mut scout = run(
-        talk(),
-        vec![
-            Input::stop(at(39), key("stop-39")),
-            Input::stop(at(40), key("stop-40")),
-        ],
-    );
+    let mut scout = run(talk(), vec![]);
     scout.advance(at(39)).unwrap();
     let earlier = scout.save().unwrap();
     scout.advance(at(40)).unwrap();
@@ -467,20 +456,20 @@ fn rewind_delivers_an_input_due_at_the_point_it_returns_to() {
     // Back at the saved point the pause is in force, as it was in the scout.
     let mut paused = saved.rewind(history, at(40), &mut restore).unwrap();
     assert_eq!(paused.now(), at(40));
-    assert_eq!(keys(&paused), ["stop-39", "stop-40", "pause"]);
+    assert_eq!(keys(&paused), ["pause"]);
     assert!(paused.program().pending().is_empty());
     paused.advance(at(100)).unwrap();
     assert!(lines(&paused).is_empty());
 
     // A nanosecond earlier it is not, and the server ends its line on time.
     let mut free = earlier.rewind(history, at(39), &mut restore).unwrap();
-    assert_eq!(keys(&free), ["stop-39"]);
+    assert!(keys(&free).is_empty());
     free.advance(at(50)).unwrap();
     assert_eq!(lines(&free), [(5, "bootelectleader".to_owned())]);
 
     // The resume is due where this rewind stops, so the scout's lines follow.
     let mut resumed = saved.rewind(history, at(70), &mut restore).unwrap();
-    assert_eq!(keys(&resumed), ["stop-39", "stop-40", "pause", "resume"]);
+    assert_eq!(keys(&resumed), ["pause", "resume"]);
     resumed.advance(at(100)).unwrap();
     assert_eq!(occurrences(&resumed), occurrences(&scout));
 }
@@ -509,6 +498,88 @@ fn rewind_refuses_a_replay_missing_a_line_the_history_wrote() {
     assert!(early
         .rewind(imposter.history(), at(75), &mut restore)
         .is_ok());
+}
+
+/// At nine tenths of simulation time, simulation nanoseconds 10 and 11
+/// share machine nanosecond 9. A run stopped at 11 has not committed what
+/// its machines stamped at 10: the slow machine could still write there.
+/// Rewind compares up to the Driver's committed frontier, not up to 11.
+#[test]
+fn rewind_under_a_slow_clock_compares_up_to_what_the_replay_committed() {
+    let slow = || {
+        input(
+            0,
+            "slow",
+            Action::Drift {
+                target: machine(1),
+                rate: ClockRate::new(-100_000_000).unwrap(),
+            },
+        )
+    };
+    // Machine times 9 and 45: stamped 10 and 50.
+    let scripts = || vec![vec![], vec![(9, says("first\n")), (45, says("second\n"))]];
+    let mut scout = run(scripts(), vec![slow()]);
+    scout.advance(at(5)).unwrap();
+    let early = scout.save().unwrap();
+    scout.advance(at(100)).unwrap();
+    assert_eq!(
+        lines(&scout),
+        [(10, "first".to_owned()), (50, "second".into())]
+    );
+
+    // Stopped at 11, the replay holds the line stamped 10 uncommitted.
+    let mut before = early.rewind(scout.history(), at(11), &mut restore).unwrap();
+    assert_eq!(before.now(), at(11));
+    let frontier = before.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(10)));
+    assert!(lines(&before).is_empty());
+    // A run restored from a save there holds it too, and says so.
+    let mut saved = restored(&before.save().unwrap());
+    let frontier = saved.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(10)));
+    saved.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&saved), occurrences(&scout));
+    // It is the scout's run: the line follows, where the scout saw it.
+    before.advance(at(100)).unwrap();
+    assert_eq!(occurrences(&before), occurrences(&scout));
+    // One nanosecond on, nothing can be stamped at 10 any more.
+    let mut after = early.rewind(scout.history(), at(12), &mut restore).unwrap();
+    assert_eq!(lines(&after), [(10, "first".to_owned())]);
+    let frontier = after.barrier(|barrier| Ok(barrier.committed_before()));
+    assert_eq!(frontier.unwrap(), Some(at(12)));
+
+    // Stopped at every nanosecond, the frontier trails the stop by at most
+    // one, never goes back, and never passes a record the trace has yet to
+    // receive.
+    let mut stepped = restored(&early);
+    let (mut frontier, mut seen) = (stepped.now(), stepped.trace().len());
+    for time in 6..=60 {
+        stepped.advance(at(time)).unwrap();
+        assert!(stepped.trace().since(seen).all(|new| new.at >= frontier));
+        let next = stepped.barrier(|barrier| Ok(barrier.committed_before()));
+        let next = next.unwrap().unwrap();
+        assert!(next >= frontier && next >= at(time - 1) && next <= at(time));
+        (frontier, seen) = (next, stepped.trace().len());
+    }
+    assert_eq!(lines(&stepped), lines(&scout));
+
+    // A history with a line stamped 9, before the frontier, that the replay
+    // never writes is still refused, also when rewinding to 11.
+    let mut scripts = scripts();
+    scripts[1].insert(0, (8, says("gone\n")));
+    let mut imposter = run(scripts, vec![slow()]);
+    imposter.advance(at(100)).unwrap();
+    assert_eq!(lines(&imposter)[0], (9, "gone".to_owned()));
+    match early.rewind(imposter.history(), at(11), &mut restore) {
+        Err(Error::Diverged {
+            expected,
+            found: None,
+        }) => assert!(matches!(
+            expected.unwrap().entry,
+            Entry::Line { text, .. } if text == "gone"
+        )),
+        other => panic!("{:?}", other.map(|run| run.now())),
+    }
 }
 
 #[test]
@@ -864,22 +935,35 @@ fn crash_scripts() -> Scripts {
 }
 
 #[test]
-fn a_watched_stop_delivers_the_input_that_cut_its_round() {
-    // The watch stops at the barrier the programmed stop at 15 cut; the
-    // stop is delivered by then, so dropping what is pending keeps it.
-    let mut watched = run(crash_scripts(), vec![Input::stop(at(15), key("p"))]);
-    let mut seen = 0;
-    let stop = watched.advance_watching(at(100), |_, _| {
-        seen += 1;
-        seen == 2
+fn a_watch_is_asked_every_stride_and_where_it_stops_changes_nothing() {
+    // By default the watch is asked every quantum (10 ns) up to the end.
+    let mut every = run(crash_scripts(), vec![]);
+    let mut asked = Vec::new();
+    let mut seen = Vec::new();
+    let stop = every.advance_watching(at(100), None, |trace, _| {
+        asked.push(trace.len());
+        false
+    });
+    assert_eq!(stop.unwrap(), Stop::Reached);
+    assert_eq!(asked.len(), 10);
+    // With a stride of 4 ns from 2 ns, it is asked at 6, 10, 14 ... and
+    // stops at the first look that finds a new line: the server's boot line
+    // ends at 5, so at 6, before the crash the oracle asked for at 13.
+    let mut watched = run(crash_scripts(), vec![]);
+    watched.advance(at(2)).unwrap();
+    let stride = Some(Duration::from_nanos(4));
+    let stop = watched.advance_watching(at(100), stride, |trace, first| {
+        seen.push(trace.len());
+        trace
+            .since(first)
+            .any(|record| matches!(record.entry, Entry::Line { .. }))
     });
     assert_eq!(stop.unwrap(), Stop::Watched);
-    assert_eq!(watched.now(), at(15));
-    assert!(watched.program().pending().is_empty());
-    watched.replace_pending(Vec::new()).unwrap();
+    assert_eq!(watched.now(), at(6));
+    assert_eq!(seen.len(), 1);
+    // A watch's stop is no input: the program is unchanged, and the run goes
+    // on as one that never stopped.
+    assert!(watched.program().delivered().is_empty());
     watched.advance(at(100)).unwrap();
-    // Its program, run from boot, reproduces it.
-    let mut cold = run(crash_scripts(), watched.program().delivered().to_vec());
-    cold.advance(at(100)).unwrap();
-    assert_eq!(occurrences(&cold), occurrences(&watched));
+    assert_eq!(occurrences(&watched), occurrences(&every));
 }

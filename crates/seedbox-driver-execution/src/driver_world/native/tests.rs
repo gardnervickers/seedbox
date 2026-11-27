@@ -166,6 +166,7 @@ fn tcg_codec_policy_and_name_refuse_before_native_reconstruction() {
         program: vec![],
         simulated_time_ns: 0,
         output: output.clone(),
+        stop_policy: None,
         start_paused: false,
         full_state: false,
         host_control: missing,

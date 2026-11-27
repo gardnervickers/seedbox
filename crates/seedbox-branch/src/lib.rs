@@ -15,11 +15,10 @@
 //!   same inputs up to `t`. [`Branch::rewind`] uses that to go back to just
 //!   before something a run has already seen, and checks it each time.
 //!
-//! That last holds only if stops and saves change nothing. Saves never do.
-//! [`Run::advance`] stops only where the Driver's rounds end anyway, because
-//! where a round ends can still leave a trace in a machine (a PV guest
-//! records the yield at a run's bound); a stop that must be exact is a
-//! [`What::Stop`] input, part of the program.
+//! That last holds because stops and saves change nothing: the Driver times
+//! what follows from a machine's output by the output itself, never by where
+//! a round ended, and a stop that delivers nothing leaves no trace in a
+//! machine. So [`Run::advance`] stops exactly where it is asked to.
 //!
 //! [`Run::recover`] and [`Run::judge`] bring a run to a verdict: end what is
 //! in force, tell the oracle to finish, and read the outcome. Everything

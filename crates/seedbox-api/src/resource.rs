@@ -184,6 +184,12 @@ pub struct ExecutionOptions {
     pub start_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_ns: Option<u64>,
+    /// Test support only: the Driver ends its rounds at times drawn from
+    /// this seed instead of its own, which must change no result. Whole-run
+    /// tests set it to check that. A server built without test support
+    /// refuses a submission that names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_policy: Option<u64>,
 }
 
 /// Request identity is scoped to this catalogue and retained for as long as its

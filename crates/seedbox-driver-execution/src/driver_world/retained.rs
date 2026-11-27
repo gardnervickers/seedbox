@@ -467,6 +467,7 @@ pub(crate) fn request(
         program: request.program.to_vec(),
         simulated_time_ns: request.limits.simulated_time_ns,
         output: request.output.join(crate::execution::MACHINE_OUTPUT_DIR),
+        stop_policy: request.stop_policy,
         start_paused: request.start_paused,
         full_state: request.prepared.profile.witness_mode
             == crate::execution::WitnessMode::FullState,
